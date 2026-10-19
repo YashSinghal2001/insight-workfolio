@@ -1,0 +1,28 @@
+{
+  "name": "@workfolio/desktop",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "tauri dev",
+    "dev:web": "vite",
+    "build": "tsc && vite build",
+    "package": "tauri build",
+    "typecheck": "tsc",
+    "lint": "eslint src test && cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings",
+    "test": "node --test && cargo test --manifest-path src-tauri/Cargo.toml",
+    "tauri": "tauri",
+    "verify:native": "node scripts/verify-native.mjs",
+    "verify:screenshots": "node scripts/verify-screenshots.mjs"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "2.12.3",
+    "@workfolio/shared": "workspace:*"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "2.12.2",
+    "@types/node": "26.6.5",
+    "typescript": "6.0.3",
+    "vite": "8.3.4"
+  }
+}

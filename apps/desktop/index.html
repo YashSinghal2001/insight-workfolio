@@ -1,0 +1,291 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Insight Workfolio</title>
+    <link rel="stylesheet" href="/src/styles.css" />
+    <script type="module" src="/src/main.ts"></script>
+  </head>
+  <body>
+    <header class="topbar">
+      <h1>Insight <span class="brand">Workfolio</span></h1>
+      <div class="status" role="status" aria-live="polite">
+        <span id="api-dot" class="dot checking" aria-hidden="true"></span>
+        <span id="api-label">Checking connection…</span>
+      </div>
+    </header>
+
+    <main>
+      <div class="notice" role="note">
+        <strong>Transparent monitoring.</strong>
+        This app records your clock-in, break and clock-out times. While you are clocked in and not on a
+        break, it also records which application is in front and when you are idle. It never records
+        keystrokes, window titles, websites or screenshots.
+      </div>
+
+      <p id="auth-loading" class="muted" role="status">Checking sign-in…</p>
+
+      <section id="login-view" class="card" aria-labelledby="login-heading" hidden>
+        <h2 id="login-heading">Sign in</h2>
+        <form id="login-form" class="stack">
+          <p id="login-error" class="error" role="alert" hidden></p>
+          <label>Work email <input name="email" type="email" autocomplete="username" required /></label>
+          <label>Password <input name="password" type="password" autocomplete="current-password" required /></label>
+          <button type="submit" id="login-submit">Sign in</button>
+          <p class="muted">First time? Use the setup link from your administrator to choose a password.</p>
+        </form>
+      </section>
+
+      <div id="signed-in-view" class="stack" hidden>
+        <section class="card identity" aria-label="Signed in as">
+          <div>
+            <div id="identity-name" class="name"></div>
+            <div class="muted"><span id="identity-code"></span> · <span id="identity-email"></span></div>
+          </div>
+          <span id="mode-badge" class="badge" hidden>Offline</span>
+        </section>
+
+        <nav class="tabs" role="tablist" aria-label="Sections">
+          <button type="button" role="tab" id="tab-btn-today" data-tab="today" aria-selected="true" aria-controls="tab-today">Today</button>
+          <button type="button" role="tab" id="tab-btn-history" data-tab="history" aria-selected="false" aria-controls="tab-history">History</button>
+          <button type="button" role="tab" id="tab-btn-corrections" data-tab="corrections" aria-selected="false" aria-controls="tab-corrections">Corrections</button>
+        </nav>
+
+        <div id="tab-today" role="tabpanel" aria-labelledby="tab-btn-today" class="stack">
+        <!-- Device enrolment: required once before attendance can be recorded. -->
+        <section id="device-register" class="card" aria-labelledby="device-heading" hidden>
+          <h2 id="device-heading">Register this device</h2>
+          <p class="muted">Attendance can be recorded from one registered device. This app uses a random ID it creates; no hardware identifiers are read.</p>
+          <form id="device-form" class="stack">
+            <p id="device-error" class="error" role="alert" hidden></p>
+            <label>Device name <input name="deviceName" maxlength="120" required /></label>
+            <button type="submit" id="device-submit">Register device</button>
+          </form>
+        </section>
+        <section id="device-blocked" class="card" role="alert" hidden>
+          <h2>Device not available</h2>
+          <p id="device-blocked-text" class="muted"></p>
+          <button type="button" id="device-recheck" class="secondary">Check again</button>
+        </section>
+
+        <section id="attendance" class="card" aria-labelledby="attendance-heading" hidden>
+          <div class="row">
+            <h2 id="attendance-heading">Attendance</h2>
+            <span id="att-state" class="state" role="status" aria-live="polite"></span>
+          </div>
+          <dl>
+            <dt>Clocked in</dt><dd id="att-clock-in">—</dd>
+            <dt>Session</dt><dd id="att-elapsed">—</dd>
+            <dt>Breaks</dt><dd id="att-breaks">—</dd>
+            <dt>Working time</dt><dd id="att-net">—</dd>
+          </dl>
+          <p id="att-preview" class="hint" hidden></p>
+          <div class="actions">
+            <button type="button" data-action="CLOCK_IN">Clock in</button>
+            <button type="button" data-action="BREAK_START">Start break</button>
+            <button type="button" data-action="BREAK_END">End break</button>
+            <button type="button" data-action="CLOCK_OUT">Clock out</button>
+          </div>
+        </section>
+
+        <section id="monitoring-consent" class="card" aria-labelledby="consent-heading" hidden>
+          <h2 id="consent-heading"></h2>
+          <p id="consent-draft" class="hint" hidden>Draft notice: wording pending HR/Legal review.</p>
+          <ul id="consent-points" class="points"></ul>
+          <p class="hint">Never recorded: <span id="consent-never"></span>.</p>
+          <p id="consent-error" class="error" role="alert" hidden></p>
+          <button type="button" id="consent-accept">I have read this notice</button>
+        </section>
+
+        <section id="screenshot-consent" class="card" aria-labelledby="shot-consent-heading" hidden>
+          <h2 id="shot-consent-heading"></h2>
+          <p id="shot-consent-draft" class="hint" hidden>Draft notice: wording pending HR/Legal review.</p>
+          <ul id="shot-consent-points" class="points"></ul>
+          <p id="shot-consent-error" class="error" role="alert" hidden></p>
+          <button type="button" id="shot-consent-accept">I have read the screenshot notice</button>
+        </section>
+
+        <section id="screenshots" class="card" aria-labelledby="shots-heading" hidden>
+          <div class="row">
+            <h2 id="shots-heading">Screenshots</h2>
+            <span id="shot-state" class="pill" role="status" aria-live="polite"></span>
+          </div>
+          <p id="shot-reason" class="muted"></p>
+          <p id="shot-taken" class="notice" role="status" aria-live="polite" hidden></p>
+          <dl>
+            <dt>Screen recording permission</dt><dd id="shot-permission">—</dd>
+            <dt>Next screenshot</dt><dd id="shot-next">—</dd>
+            <dt>Last taken (on this computer)</dt><dd id="shot-last-local">—</dd>
+            <dt>Last confirmed in cloud storage</dt><dd id="shot-last-cloud">Never</dd>
+            <dt>Waiting to upload</dt><dd id="shot-pending">0</dd>
+            <dt>Local storage used</dt><dd id="shot-storage">—</dd>
+          </dl>
+          <p id="shot-permission-help" class="hint" hidden>
+            macOS asks you to allow screen recording. If you already declined, open System Settings › Privacy &amp; Security ›
+            Screen &amp; System Audio Recording, turn on Insight Workfolio, then quit and reopen this app. You can turn it off
+            there at any time; screenshots then stop.
+          </p>
+          <button type="button" id="shot-permission-request" class="secondary" hidden>Allow screen recording…</button>
+          <p id="shot-sync-detail" class="hint" hidden></p>
+          <p id="shot-warning" class="error" role="alert" hidden></p>
+          <p id="shot-error" class="error" role="alert" hidden></p>
+          <div id="shot-problems" class="error" role="alert" hidden>
+            <span id="shot-problems-text"></span>
+            <button type="button" id="shot-dismiss" class="secondary">Dismiss and delete these from this computer</button>
+          </div>
+          <details>
+            <summary>Screenshot policy and your acknowledgement</summary>
+            <p id="shot-policy" class="muted"></p>
+            <p id="shot-ack" class="muted"></p>
+            <p id="shot-notice-title"></p>
+            <ul id="shot-notice-points" class="points"></ul>
+          </details>
+        </section>
+
+        <section id="monitoring" class="card" aria-labelledby="monitoring-heading" hidden>
+          <div class="row">
+            <h2 id="monitoring-heading">Activity monitoring</h2>
+            <span id="mon-state" class="pill" role="status" aria-live="polite"></span>
+          </div>
+          <p id="mon-reason" class="muted"></p>
+          <dl>
+            <dt>Current application</dt><dd id="mon-app">—</dd>
+            <dt>Today: active</dt><dd id="mon-today-active">—</dd>
+            <dt>Today: idle</dt><dd id="mon-today-idle">—</dd>
+            <dt>This shift</dt><dd id="mon-session">—</dd>
+            <dt>Waiting to upload</dt><dd id="mon-pending">0</dd>
+            <dt>Last uploaded</dt><dd id="mon-last">Never</dd>
+          </dl>
+          <p id="mon-sync-detail" class="hint" hidden></p>
+          <p id="mon-gap" class="hint" hidden></p>
+          <p id="mon-error" class="error" role="alert" hidden></p>
+          <div id="mon-recovered" class="notice" role="status" hidden>
+            <span id="mon-recovered-text"></span>
+            <button type="button" id="mon-recovered-dismiss" class="secondary">Dismiss</button>
+          </div>
+          <div id="mon-rejected" class="error" role="alert" hidden>
+            <span id="mon-rejected-text"></span>
+            <button type="button" id="mon-dismiss" class="secondary">Dismiss</button>
+          </div>
+          <details id="mon-consent-details">
+            <summary>What is recorded and your acknowledgement</summary>
+            <p id="mon-consent-ack" class="muted"></p>
+            <p>Recorded while monitoring is on:</p>
+            <ul id="mon-collected" class="points"></ul>
+            <p>Never recorded:</p>
+            <ul id="mon-never" class="points"></ul>
+            <p id="mon-notice-title"></p>
+            <ul id="mon-notice-points" class="points"></ul>
+          </details>
+        </section>
+
+        <section id="sync" class="card" aria-labelledby="sync-heading" hidden>
+          <div class="row">
+            <h2 id="sync-heading">Synchronization</h2>
+            <span id="sync-state" class="pill" role="status" aria-live="polite"></span>
+          </div>
+          <dl>
+            <dt>Pending</dt><dd id="sync-pending">0</dd>
+            <dt>Last synced</dt><dd id="sync-last">Never</dd>
+          </dl>
+          <p id="sync-detail" class="muted" hidden></p>
+          <p id="clock-warning" class="hint" role="status" hidden></p>
+          <div id="queue-recovered" class="error" role="alert" hidden>
+            <span id="queue-recovered-text"></span>
+            <button type="button" id="queue-recovered-dismiss" class="secondary">Dismiss</button>
+          </div>
+          <div id="sync-rejected" class="error" role="alert" hidden>
+            <strong>Not recorded by the server:</strong>
+            <ul id="sync-rejected-list"></ul>
+            <p>Nothing was overwritten. Use the Corrections tab to ask for a missing time to be added.</p>
+            <button type="button" id="sync-dismiss" class="secondary">Dismiss</button>
+          </div>
+          <button type="button" id="sync-now" class="secondary">Sync now</button>
+        </section>
+
+        </div>
+
+        <div id="tab-history" role="tabpanel" aria-labelledby="tab-btn-history" class="stack" hidden>
+          <section class="card" aria-labelledby="hours-heading">
+            <div class="row">
+              <h2 id="hours-heading">Hours</h2>
+              <div class="pager">
+                <button type="button" id="week-prev" class="mini" aria-label="Previous week">‹</button>
+                <span id="week-label"></span>
+                <button type="button" id="week-next" class="mini" aria-label="Next week">›</button>
+              </div>
+            </div>
+            <p id="history-error" class="error" role="alert" hidden></p>
+            <p id="history-note" class="hint" hidden></p>
+            <dl id="week-totals"></dl>
+            <table class="days">
+              <caption class="sr-only">Daily totals</caption>
+              <thead><tr><th scope="col">Day</th><th scope="col">Shifts</th><th scope="col">Worked</th><th scope="col">Breaks</th></tr></thead>
+              <tbody id="days-body"></tbody>
+            </table>
+            <p class="hint" id="policy-note"></p>
+          </section>
+          <section class="card" aria-labelledby="shifts-heading">
+            <h2 id="shifts-heading">Shifts and breaks</h2>
+            <ul id="shift-list" class="list"></ul>
+          </section>
+        </div>
+
+        <div id="tab-corrections" role="tabpanel" aria-labelledby="tab-btn-corrections" class="stack" hidden>
+          <section class="card" aria-labelledby="correction-heading">
+            <h2 id="correction-heading">Request a correction</h2>
+            <p class="muted">An administrator reviews every request. Nothing changes until it is approved, and your original records are kept.</p>
+            <form id="correction-form" class="stack">
+              <p id="correction-error" class="error" role="alert" hidden></p>
+              <p id="correction-ok" class="success" role="status" hidden></p>
+              <label>What needs fixing?
+                <select name="type">
+                  <option value="MISSING_CLOCK_OUT">I forgot to clock out</option>
+                  <option value="MISSING_CLOCK_IN">A whole shift is missing</option>
+                  <option value="ATTENDANCE_TIME">A clock-in or clock-out time is wrong</option>
+                  <option value="BREAK_TIME">A break time is wrong</option>
+                </select>
+              </label>
+              <label data-field="sessionId">Shift <select name="sessionId"></select></label>
+              <label data-field="breakId">Break <select name="breakId"></select></label>
+              <label data-field="clockInAt">Clock-in <input type="datetime-local" name="clockInAt" /></label>
+              <label data-field="startedAt">Break started <input type="datetime-local" name="startedAt" /></label>
+              <label data-field="breakEndedAt">Break ended <input type="datetime-local" name="breakEndedAt" /></label>
+              <label data-field="endedAt">Break ended <input type="datetime-local" name="endedAt" /></label>
+              <label data-field="clockOutAt">Clock-out <input type="datetime-local" name="clockOutAt" /></label>
+              <label>Reason <textarea name="reason" rows="2" maxlength="1000" required></textarea></label>
+              <p id="correction-tz" class="hint"></p>
+              <button type="submit" id="correction-submit">Send for approval</button>
+            </form>
+          </section>
+          <section class="card" aria-labelledby="requests-heading">
+            <h2 id="requests-heading">My requests</h2>
+            <ul id="correction-list" class="list"></ul>
+          </section>
+        </div>
+
+        <section class="card">
+          <p id="logout-warning" class="muted" hidden></p>
+          <button type="button" id="logout" class="secondary">Sign out</button>
+        </section>
+      </div>
+
+      <section class="card" aria-labelledby="tracking-heading">
+        <h2 id="tracking-heading">What is recorded</h2>
+        <dl>
+          <dt>Attendance</dt>
+          <dd id="tracking-attendance">Only when you press the buttons above</dd>
+          <dt>Application activity</dt>
+          <dd id="tracking-state">Off</dd>
+          <dt>Keystrokes, window titles, websites, clipboard</dt>
+          <dd>Never recorded</dd>
+          <dt>Screenshots</dt>
+          <dd id="tracking-screenshots">Off</dd>
+        </dl>
+      </section>
+    </main>
+
+    <footer class="muted" id="version"></footer>
+  </body>
+</html>

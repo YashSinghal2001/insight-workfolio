@@ -1,0 +1,25 @@
+{
+  "name": "@workfolio/database",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "SERVER-ONLY libSQL/Turso access. Never import from dashboard or desktop code.",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint src",
+    "test": "tsc -p tsconfig.json && node --test"
+  },
+  "dependencies": {
+    "@libsql/client": "0.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "26.6.5"
+  }
+}

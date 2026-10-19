@@ -1,0 +1,27 @@
+{
+  "name": "insight-workfolio",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@11.9.0",
+  "engines": {
+    "node": ">=24.7",
+    "pnpm": ">=10"
+  },
+  "scripts": {
+    "build:packages": "pnpm --filter \"./packages/*\" build",
+    "dev": "pnpm build:packages && pnpm --parallel --filter \"./apps/*\" dev",
+    "dev:api": "pnpm build:packages && pnpm --filter @workfolio/api dev",
+    "dev:dashboard": "pnpm build:packages && pnpm --filter @workfolio/dashboard dev",
+    "dev:desktop": "pnpm build:packages && pnpm --filter @workfolio/desktop tauri dev",
+    "build": "pnpm -r build",
+    "lint": "pnpm -r lint",
+    "typecheck": "pnpm build:packages && pnpm -r typecheck",
+    "test": "pnpm build:packages && pnpm -r test"
+  },
+  "devDependencies": {
+    "@eslint/js": "9.39.5",
+    "eslint": "9.39.5",
+    "typescript": "6.0.3",
+    "typescript-eslint": "8.71.1"
+  }
+}

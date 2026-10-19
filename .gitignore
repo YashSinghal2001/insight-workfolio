@@ -1,0 +1,32 @@
+node_modules/
+dist/
+.next/
+out/
+coverage/
+*.tsbuildinfo
+
+# Secrets: environment files, private keys and certificates (Graph certificate, signing identities).
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.p8
+*.cer
+*.mobileprovision
+
+# Local databases (API dev database, test/verification copies). Unanchored: matches apps/api/data too.
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+# Development screenshot storage (LOCAL_DEV adapter): screen contents, never commit.
+**/data/screenshots/
+*.webp
+
+apps/desktop/src-tauri/target/
+apps/desktop/src-tauri/gen/
+*.log
+.DS_Store
