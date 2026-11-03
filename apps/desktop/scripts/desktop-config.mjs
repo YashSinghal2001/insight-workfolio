@@ -134,6 +134,17 @@ export function windowsSigningPlan(env) {
   return null;
 }
 
+/**
+ * The `tauri build` arguments for this script's argv. pnpm passes the separator in
+ * `pnpm package -- --bundles nsis` through to the script; forwarded as-is, `tauri build … -- --bundles nsis`
+ * hands everything after `--` to `cargo build`, which rejects `--bundles`. So one leading `--` is dropped;
+ * a later `--` (deliberate Cargo args, e.g. `-- -- --features x`) is kept.
+ */
+export function tauriBuildArgs(configFile, argv) {
+  const args = argv[0] === "--" ? argv.slice(1) : argv;
+  return ["exec", "tauri", "build", "--config", configFile, ...args];
+}
+
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const args = process.argv.slice(2);
   const base = JSON.parse(readFileSync(join(DESKTOP, "src-tauri/tauri.conf.json"), "utf8"));
@@ -180,7 +191,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     console.warn(windowsSigning ? `Windows signing: ${windowsSigning.method}` : "Unsigned Windows installer: for testing only, SmartScreen will warn (docs/deployment.md)");
   }
   console.warn(signing.identity ? `Signing as ${signing.identity}; notarization ${signing.notarize ? "on" : "off"}` : "Unsigned build (no APPLE_SIGNING_IDENTITY): for testing only, Gatekeeper will block it");
-  const run = spawnSync("pnpm", ["exec", "tauri", "build", "--config", file, ...args], {
+  const run = spawnSync("pnpm", tauriBuildArgs(file, args), {
     cwd: DESKTOP,
     stdio: "inherit",
     shell: process.platform === "win32",

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 // @ts-expect-error -- plain .mjs script without type declarations
-import { environmentIdentity, releaseDashboardUrl, signingPlan, windowsSigningPlan } from "../scripts/desktop-config.mjs";
+import { environmentIdentity, releaseDashboardUrl, signingPlan, tauriBuildArgs, windowsSigningPlan } from "../scripts/desktop-config.mjs";
 
 test("WORKFOLIO_ENV: production keeps tauri.conf.json's identity, staging gets its own identifier, name and keychain service", () => {
   const conf = JSON.parse(readFileSync(new URL("../src-tauri/tauri.conf.json", import.meta.url), "utf8"));
@@ -83,4 +83,16 @@ test("Windows signing: unsigned by default, a certificate thumbprint or Azure Tr
   assert.throws(() => windowsSigningPlan({ ...azure, AZURE_CLIENT_SECRET: "" }), /missing AZURE_CLIENT_SECRET/);
   assert.throws(() => windowsSigningPlan({ AZURE_TRUSTED_SIGNING_ENDPOINT: "x" }), /must all be set/);
   assert.throws(() => windowsSigningPlan({ ...azure, WINDOWS_CERTIFICATE_THUMBPRINT: thumb, WINDOWS_TIMESTAMP_URL: ts }), /choose one/);
+});
+
+test("tauriBuildArgs: pnpm's leading `--` is dropped so --bundles reaches tauri build, not cargo", () => {
+  const base = ["exec", "tauri", "build", "--config", "f.json"];
+  // CI: `pnpm --filter @workfolio/desktop package -- --bundles nsis` arrives as ["--", "--bundles", "nsis"].
+  assert.deepEqual(tauriBuildArgs("f.json", ["--", "--bundles", "nsis"]), [...base, "--bundles", "nsis"]);
+  // macOS docs form, no separator: unchanged.
+  assert.deepEqual(tauriBuildArgs("f.json", ["--bundles", "app,dmg"]), [...base, "--bundles", "app,dmg"]);
+  assert.deepEqual(tauriBuildArgs("f.json", []), base);
+  // A deliberate second `--` still forwards Cargo args.
+  assert.deepEqual(tauriBuildArgs("f.json", ["--", "--bundles", "nsis", "--", "--features", "x"]), [...base, "--bundles", "nsis", "--", "--features", "x"]);
+  assert.ok(!tauriBuildArgs("f.json", ["--", "--bundles", "nsis"]).slice(base.length).includes("--"), "no `--` before --bundles");
 });
