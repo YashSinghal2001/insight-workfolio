@@ -14,7 +14,7 @@ import {
   type ActivitySyncResponse,
   type AttendanceCurrent,
 } from "@workfolio/shared";
-import { decideMonitoring, type MonitoringDecision, type MonitoringMode } from "./monitoring.ts";
+import { appNapText, collectorStateText, decideMonitoring, type MonitoringDecision, type MonitoringMode } from "./monitoring.ts";
 import { HttpError, type ApiClient, type CachedProfile } from "./session.ts";
 import { project, SyncEngine, type QueuedEvent, type SyncPhase } from "./sync.ts";
 
@@ -25,6 +25,16 @@ interface CollectorStatus {
   currentApp: { id: string | null; name: string } | null;
   idle: boolean;
   locked: boolean;
+  /** Going to sleep (until wake). */
+  asleep?: boolean;
+  /** Another user's session in front, or logging out. */
+  sessionInactive?: boolean;
+  /** Seconds since the last keyboard/mouse input at the last sample. */
+  idleSeconds?: number | null;
+  idleThresholdSeconds?: number;
+  sampleSeconds?: number;
+  /** App Nap opt-out in force (only while recording). */
+  appNapPrevented?: boolean;
   error: string | null;
   lastSampleMs: number | null;
   idleSinceMs: number | null;
@@ -143,7 +153,9 @@ export function initActivity(ctx: ActivityContext) {
     decision = decide();
     const sc = scope();
     const active = decision.mode === "ACTIVE" && sc;
-    const key = `${decision.mode}|${active ? `${sc.userId}|${sc.deviceId}` : ""}|${policy().sampleSeconds}|${policy().idleThresholdSeconds}`;
+    // Older servers send no exclusion list (W22): nothing is excluded.
+    const idleExcludedApps = policy().idleExcludedApps ?? [];
+    const key = `${decision.mode}|${active ? `${sc.userId}|${sc.deviceId}` : ""}|${policy().sampleSeconds}|${policy().idleThresholdSeconds}|${idleExcludedApps.join("\n")}`;
     if (key === applied) return;
     applied = key;
     collector = await call<CollectorStatus>(
@@ -154,6 +166,7 @@ export function initActivity(ctx: ActivityContext) {
         deviceId: active ? sc.deviceId : null,
         sampleSeconds: policy().sampleSeconds,
         idleThresholdSeconds: policy().idleThresholdSeconds,
+        idleExcludedApps,
       },
       OFF,
     );
@@ -233,15 +246,9 @@ export function initActivity(ctx: ActivityContext) {
 
     $("#mon-state").textContent = decision.pendingConfirmation ? "On (pending)" : label;
     $("#mon-state").dataset.tone = tone;
-    $("#mon-reason").textContent = decision.reason;
-    $("#mon-app").textContent =
-      decision.mode !== "ACTIVE" || !collector.collecting
-        ? "—"
-        : collector.locked
-          ? "Screen locked (counted as idle)"
-          : collector.idle
-            ? `Idle since ${clock(collector.idleSinceMs)} (no keyboard or mouse input)`
-            : (collector.currentApp?.name ?? "—");
+    const nap = decision.mode === "ACTIVE" ? appNapText(collector) : null;
+    $("#mon-reason").textContent = nap ? `${decision.reason} ${nap}` : decision.reason;
+    $("#mon-app").textContent = collectorStateText(collector, decision.mode === "ACTIVE", clock);
 
     const today = status && status.today.date === todayIn(s.profile!.timezone) ? status.today : { activeMs: 0, idleMs: 0 };
     $("#mon-today-active").textContent = formatDuration(today.activeMs + unsynced.activeMs);
@@ -272,7 +279,7 @@ export function initActivity(ctx: ActivityContext) {
     const showGap = !!gap && gap[1] - gap[0] >= GAP_NOTICE_MS && Date.now() - gap[1] < 12 * 3_600_000;
     $("#mon-gap").hidden = !showGap;
     $("#mon-gap").textContent = showGap
-      ? `Not recorded from ${clock(gap[0])} to ${clock(gap[1])}: the computer was asleep or the app was suspended. That time is not counted as active or idle.`
+      ? `Not recorded from ${clock(gap[0])} to ${clock(gap[1])}: the computer was asleep or locked, another user was signed in, or the app was suspended. That time is not counted as active or idle.`
       : "";
     $("#mon-recovered").hidden = !recovered;
     $("#mon-recovered-text").textContent = recovered

@@ -1,8 +1,15 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+  auditQuerySchema,
+  createCorrectionSchema,
   createEmployeeSchema,
   hasPermission,
+  loginSchema,
+  reviewCorrectionSchema,
+  screenshotGallerySchema,
+  timeZoneSchema,
+  updateAccountStatusSchema,
   listEmployeesQuerySchema,
   passwordSchema,
   updateEmployeeSchema,
@@ -41,4 +48,25 @@ test("password policy: 12–128 chars, not whitespace padding", () => {
 test("list query coerces and bounds pagination", () => {
   assert.deepEqual(listEmployeesQuerySchema.parse({ page: "2", pageSize: "5" }), { page: 2, pageSize: 5 });
   assert.equal(listEmployeesQuerySchema.safeParse({ pageSize: "500" }).success, false);
+});
+
+test("timeZoneSchema: one rule for every time-zone field", () => {
+  for (const tz of ["UTC", "Asia/Kolkata", "America/Argentina/Buenos_Aires", "Etc/GMT+5"]) assert.equal(timeZoneSchema.safeParse(tz).success, true, tz);
+  for (const tz of ["EST", "GMT", "PST8PDT", "Mars/Olympus", "", "a".repeat(65)]) assert.equal(timeZoneSchema.safeParse(tz).success, false, tz);
+  const range = { from: "2026-10-01", to: "2026-10-02" };
+  assert.equal(auditQuerySchema.safeParse({ ...range, timeZone: "EST" }).success, false);
+  assert.equal(auditQuerySchema.parse(range).timeZone, "UTC");
+  assert.equal(screenshotGallerySchema.safeParse({ ...range, tz: "EST" }).success, false);
+  assert.equal(screenshotGallerySchema.parse({ ...range, tz: "Asia/Kolkata" }).tz, "Asia/Kolkata");
+});
+
+test("admin and web bodies are strict; desktop login stays lenient", () => {
+  const employee = { email: "a@example.com", fullName: "Asha", employeeCode: "EMP-01" };
+  assert.equal(createEmployeeSchema.safeParse({ ...employee, role: "ADMIN" }).success, false);
+  assert.equal(updateAccountStatusSchema.safeParse({ status: "ACTIVE", extra: 1 }).success, false);
+  assert.equal(reviewCorrectionSchema.safeParse({ reason: "Looks right", approve: true }).success, false);
+  const correction = { type: "MISSING_CLOCK_OUT", sessionId: "6f1c1f8e-2f37-4d55-9a66-6a2b9d3d1a10", clockOutAt: "2026-10-01T18:00:00Z", reason: "Forgot" };
+  assert.equal(createCorrectionSchema.safeParse(correction).success, true);
+  assert.equal(createCorrectionSchema.safeParse({ ...correction, employeeId: "x" }).success, false);
+  assert.equal(loginSchema.safeParse({ email: "a@example.com", password: "x", client: "desktop", appVersion: "0.1.0" }).success, true);
 });

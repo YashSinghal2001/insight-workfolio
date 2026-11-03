@@ -1,0 +1,12 @@
+{
+  "name": "@workfolio/browser-extension",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Chromium (MV3) extension for F04: website domain names only, user-installed and visible. Load unpacked from this folder.",
+  "scripts": {
+    "test": "node --test tracker.test.mjs",
+    "icons": "python3 scripts/make-icons.py",
+    "package": "node scripts/package.mjs"
+  }
+}

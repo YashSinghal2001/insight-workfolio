@@ -1,25 +1,33 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { Suspense, useCallback, useEffect, useRef, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import {
+  SCREENSHOT_MASK_SCALE,
   SCREENSHOT_MIME,
-  type Employee,
   type Paginated,
+  type ScreenshotDeleteResponse,
   type ScreenshotDetail,
   type ScreenshotGalleryItem,
   type ScreenshotOverview,
 } from "@workfolio/shared";
+import { Button, ConfirmDialog, EmptyState, ErrorState, PageHeader, SkeletonRows, SuccessNotice } from "@/components/kit";
 import { RangePicker, weekRange, type Range } from "@/components/range-picker";
-import { Badge, Card, inputClass, Notice, secondaryButtonClass } from "@/components/ui";
-import { api, apiBlob, errorMessage } from "@/lib/api";
+import { TimelapsePanel } from "@/components/timelapse-panel";
+import { Badge, Card, secondaryButtonClass } from "@/components/ui";
+import { api, apiBlob, ApiRequestError, errorMessage } from "@/lib/api";
+import { zonedTime } from "@/lib/zoned-time";
+import { EmployeePicker } from "../_components/employee-picker";
 
 const PAGE_SIZE = 24;
 const TZ = Intl.DateTimeFormat().resolvedOptions().timeZone;
 const when = (iso: string | null) => (iso ? new Intl.DateTimeFormat("en-GB", { dateStyle: "medium", timeStyle: "medium" }).format(new Date(iso)) : "—");
+/** Capture time in the employee's own time zone (OD-14); the viewer's zone, labelled, if it is not a valid zone. */
+const captured = (iso: string, zone: string | undefined) => (zone && zonedTime(iso, zone)) || `${when(iso)} (${TZ})`;
 const STATUS = {
   STORED: ["Stored", true],
   REGISTERED: ["Awaiting upload", false],
-  DELETED: ["Deleted (retention)", false],
+  DELETED: ["Deleted", false],
 } as const;
 
 /**
@@ -50,46 +58,77 @@ function useImage(id: string | null, variant: "thumbnail" | "full") {
 }
 
 function Thumbnail({ item, onOpen }: { item: ScreenshotGalleryItem; onOpen: () => void }) {
+  const zone = item.employee.timezone;
   const { url, error } = useImage(item.uploadStatus === "STORED" ? item.id : null, "thumbnail");
   const [label, ok] = STATUS[item.uploadStatus];
   return (
     <li className="overflow-hidden rounded-lg border border-border bg-surface">
-      <button type="button" onClick={onOpen} disabled={item.uploadStatus !== "STORED"} className="block aspect-video w-full bg-background text-xs text-muted disabled:cursor-default" aria-label={`Open screenshot of ${item.employee.fullName} at ${when(item.capturedAt)}`}>
+      <button type="button" onClick={onOpen} disabled={item.uploadStatus !== "STORED"} className="block aspect-video w-full bg-background text-xs text-muted disabled:cursor-default" aria-label={`Open screenshot of ${item.employee.fullName} at ${captured(item.capturedAt, zone)}`}>
         {/* eslint-disable-next-line @next/next/no-img-element -- next/image would proxy and cache the screenshot; blob URLs only */}
         {item.uploadStatus !== "STORED" ? label : url ? <img src={url} alt="" className="h-full w-full object-cover object-top" /> : error ? <span className="text-red-700 dark:text-red-300">{error}</span> : "Loading…"}
       </button>
       <div className="flex flex-col gap-1 px-3 py-2 text-xs">
         <span className="font-medium">{item.employee.fullName} <span className="text-muted">({item.employee.employeeCode})</span></span>
-        <span className="tabular-nums text-muted">{when(item.capturedAt)}</span>
-        <span><Badge ok={ok}>{label}</Badge> <span className="text-muted">{item.width}×{item.height} · {Math.round(item.fileSizeBytes / 1024)} KB</span></span>
+        <span className="tabular-nums text-muted">{captured(item.capturedAt, zone)}</span>
+        <span><Badge ok={ok}>{label}</Badge> <span className="text-muted">{item.width}×{item.height} · {Math.round(item.fileSizeBytes / 1024)} KB{item.maskCount ? ` · ${item.maskCount} masked area(s)` : ""}</span>{item.blurred && <> <BlurredBadge /></>}</span>
       </div>
     </li>
   );
 }
 
-function Viewer({ item, onClose }: { item: ScreenshotGalleryItem; onClose: () => void }) {
+/** The whole image was blurred on the employee's computer before upload (policy or per-person setting). */
+function BlurredBadge() {
+  return <span title="The whole image was blurred on the employee's computer before it was uploaded" className="rounded bg-sky-500/15 px-1.5 py-0.5 font-medium text-sky-800 dark:text-sky-300">Blurred on device</span>;
+}
+
+const pct = (units: number) => `${+(units / (SCREENSHOT_MASK_SCALE / 100)).toFixed(2)}%`;
+
+function deleteError(err: unknown) {
+  if (err instanceof ApiRequestError && err.status === 409) return `The screenshot could not be deleted: ${err.message}`;
+  if (err instanceof ApiRequestError && err.status === 502) return `Storage did not confirm the deletion, so nothing was changed. Try again later. (${err.message})`;
+  return errorMessage(err);
+}
+
+function Viewer({ item, onClose, onDeleted }: { item: ScreenshotGalleryItem; onClose: () => void; onDeleted: (r: ScreenshotDeleteResponse) => void }) {
+  const zone = item.employee.timezone;
   const ref = useRef<HTMLDialogElement>(null);
   const { url, error } = useImage(item.id, "full");
   const [detail, setDetail] = useState<ScreenshotDetail | null>(null);
+  const [detailError, setDetailError] = useState<string | null>(null);
+  const [confirming, setConfirming] = useState(false);
   useEffect(() => {
     ref.current?.showModal();
     // After the image request, so the access log includes this view.
-    if (url || error) api<ScreenshotDetail>(`/screenshots/${item.id}`).then(setDetail, () => setDetail(null));
+    if (url || error) api<ScreenshotDetail>(`/screenshots/${item.id}`).then((d) => (setDetail(d), setDetailError(null)), (e) => (setDetail(null), setDetailError(errorMessage(e))));
   }, [item.id, url, error]);
   return (
-    <dialog ref={ref} onClose={onClose} className="m-auto max-h-[95vh] w-[min(1200px,95vw)] rounded-lg border border-border bg-surface p-0 text-foreground backdrop:bg-black/70">
-      <div className="flex items-center justify-between gap-3 border-b border-border px-4 py-2 text-sm">
-        <span><strong>{item.employee.fullName}</strong> · {when(item.capturedAt)} · {item.width}×{item.height}</span>
-        <button type="button" onClick={() => ref.current?.close()} className={secondaryButtonClass} autoFocus>Close</button>
+    <dialog ref={ref} onClose={(e) => e.target === ref.current && onClose()} aria-label={`Screenshot of ${item.employee.fullName}`} className="m-auto max-h-[95vh] w-[min(1200px,95vw)] rounded-lg border border-border bg-surface p-0 text-foreground backdrop:bg-black/70">
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border px-4 py-2 text-sm">
+        <span><strong>{item.employee.fullName}</strong> · {captured(item.capturedAt, zone)} · {item.width}×{item.height}{item.blurred && <> <BlurredBadge /></>}</span>
+        <span className="flex flex-wrap gap-2">
+          <Button variant="danger" onClick={() => setConfirming(true)}>Delete screenshot</Button>
+          <button type="button" onClick={() => ref.current?.close()} className={secondaryButtonClass} autoFocus>Close</button>
+        </span>
       </div>
-      <div className="max-h-[70vh] overflow-auto bg-black">
+      <div className="max-h-[60vh] overflow-auto bg-black">
         {/* eslint-disable-next-line @next/next/no-img-element -- next/image would proxy and cache the screenshot; blob URLs only */}
-        {url ? <img src={url} alt={`Screenshot of ${item.employee.fullName}'s main screen at ${when(item.capturedAt)}`} className="mx-auto" /> : <p className="p-6 text-sm text-white">{error ?? "Loading…"}</p>}
+        {url ? <img src={url} alt={`Screenshot of ${item.employee.fullName}'s main screen at ${captured(item.capturedAt, zone)}`} className="mx-auto" /> : <p className="p-6 text-sm text-white">{error ?? "Loading…"}</p>}
       </div>
-      <div className="px-4 py-3 text-xs text-muted">
-        Confidential: may contain personal information. This view is logged.
+      <div className="flex flex-col gap-2 px-4 py-3 text-xs text-muted">
+        <p>Confidential: may contain personal information. This view is logged.</p>
+        {detailError && <p role="alert" className="text-danger">Details could not be loaded: {detailError}</p>}
+        {detail && (
+          <p>
+            Privacy masks:{" "}
+            {detail.masks === null
+              ? "unknown (the settings in force at capture could not be matched)"
+              : detail.masks.length === 0
+                ? "none: the whole main screen was captured"
+                : detail.masks.map((m) => `${m.label} (left ${pct(m.x)}, top ${pct(m.y)}, ${pct(m.w)} × ${pct(m.h)})`).join("; ")}
+          </p>
+        )}
         {detail?.accessLog && (
-          <details className="mt-2">
+          <details>
             <summary className="cursor-pointer">Access log ({detail.accessLog.length})</summary>
             <ul className="mt-1 max-h-32 overflow-auto">
               {detail.accessLog.map((a, i) => <li key={i} className="tabular-nums">{when(a.accessedAt)} · {a.viewer.email} · {a.action === "VIEW" ? "viewed" : "thumbnail"}</li>)}
@@ -97,23 +136,53 @@ function Viewer({ item, onClose }: { item: ScreenshotGalleryItem; onClose: () =>
           </details>
         )}
       </div>
+      <ConfirmDialog
+        open={confirming}
+        title="Delete this screenshot?"
+        tone="danger"
+        confirmLabel="Delete screenshot"
+        description={
+          <>
+            The image is deleted from storage now and cannot be viewed again; its metadata stays, marked deleted, and the deletion is recorded
+            in the audit log with your account. Timelapse videos containing it are removed. A reason is required to confirm, but it is not stored.
+          </>
+        }
+        reason={{ label: "Reason (required to confirm; not stored)", minLength: 3, maxLength: 500 }}
+        onConfirm={async (reason) => {
+          try {
+            const r = await api<ScreenshotDeleteResponse>(`/screenshots/${item.id}`, { method: "DELETE", body: { reason } });
+            onDeleted(r);
+            ref.current?.close();
+          } catch (err) {
+            throw new Error(deleteError(err));
+          }
+        }}
+        onClose={() => setConfirming(false)}
+      />
     </dialog>
   );
 }
 
 export default function ScreenshotsPage() {
-  const [employees, setEmployees] = useState<Employee[] | null>(null);
-  const [employeeId, setEmployeeId] = useState("");
+  // useSearchParams suspends for request-time params under cacheComponents.
+  return (
+    <Suspense fallback={<SkeletonRows label="screenshots" />}>
+      <Screenshots />
+    </Suspense>
+  );
+}
+
+function Screenshots() {
+  const preset = useSearchParams().get("employeeId");
+  const [employeeId, setEmployeeId] = useState(() => (preset && /^[0-9a-f-]{36}$/i.test(preset) ? preset : ""));
+  const [retry, setRetry] = useState(0);
+  const [ok, setOk] = useState<string | null>(null);
   const [range, setRange] = useState<Range>(() => weekRange());
   const [page, setPage] = useState(1);
   const [gallery, setGallery] = useState<Paginated<ScreenshotGalleryItem> | null>(null);
   const [overview, setOverview] = useState<ScreenshotOverview | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [open, setOpen] = useState<ScreenshotGalleryItem | null>(null);
-
-  useEffect(() => {
-    api<Paginated<Employee>>("/employees?pageSize=100").then((r) => setEmployees(r.items), (e) => setError(errorMessage(e)));
-  }, []);
 
   useEffect(() => {
     let active = true;
@@ -128,36 +197,37 @@ export default function ScreenshotsPage() {
     return () => {
       active = false;
     };
-  }, [employeeId, range, page]);
+  }, [employeeId, range, page, retry]);
 
   const reset = () => (setGallery(null), setOverview(null), setPage(1));
+  const pick = useCallback((id: string) => (setGallery(null), setOverview(null), setPage(1), setEmployeeId(id)), []);
   const pages = gallery ? Math.max(1, Math.ceil(gallery.total / gallery.pageSize)) : 1;
   const r = overview?.retention;
 
   return (
     <div className="mx-auto flex max-w-6xl flex-col gap-6">
-      <div>
-        <h1 className="text-2xl font-semibold">Screenshots</h1>
-        <p className="mt-1 text-sm text-muted">
-          Screenshots of employees&apos; main screens, taken only while clocked in, not on a break, after they acknowledged the screenshot
-          notice. They may contain personal or sensitive information; nothing is masked. Images are loaded through the API on demand,
-          never cached, and every thumbnail and view is logged with your account. Times are in your time zone ({TZ}).
-        </p>
-      </div>
+      <PageHeader
+        title="Screenshots"
+        description={
+          <>
+            Screenshots of employees&apos; main screens, taken only while clocked in, not on a break, after they acknowledged the screenshot
+            notice. They may contain personal or sensitive information. Only the privacy masks set in Settings are blacked out, on the employee&apos;s computer
+            before saving (new screenshots only); nothing is detected automatically. When blur is on (for the organisation or one person), the whole
+            image is blurred on the employee&apos;s computer before upload and marked &quot;Blurred on device&quot;. Images are loaded through the API on demand,
+            never cached, and every thumbnail and view is logged with your account. The date range is in your time zone ({TZ}); each capture time is
+            shown in the employee&apos;s own time zone, which is named next to it.
+          </>
+        }
+      />
 
       <div className="flex flex-wrap items-end gap-3">
-        <label className="flex flex-col gap-1 text-sm">
-          <span className="text-xs text-muted">Employee</span>
-          <select value={employeeId} onChange={(e) => (reset(), setEmployeeId(e.target.value))} className={inputClass} disabled={!employees}>
-            <option value="">All employees</option>
-            {employees?.map((e) => <option key={e.id} value={e.id}>{e.fullName} ({e.employeeCode})</option>)}
-          </select>
-        </label>
-        <RangePicker value={range} onChange={(x) => (reset(), setRange(x))} />
+        <EmployeePicker value={employeeId} onChange={pick} allLabel="All employees" />
+        <RangePicker value={range} maxDays={31} timeZone={TZ} onChange={(x) => (reset(), setRange(x))} />
       </div>
 
-      {error && <Notice tone="error">{error}</Notice>}
-      {!gallery && !error && <p role="status" className="text-sm text-muted">Loading…</p>}
+      <SuccessNotice message={ok} onDismiss={() => setOk(null)} />
+      {error && <ErrorState message={error} onRetry={() => setRetry((n) => n + 1)} />}
+      {!gallery && !error && <SkeletonRows label="screenshots" />}
 
       {overview && r && (
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
@@ -183,10 +253,16 @@ export default function ScreenshotsPage() {
         </div>
       )}
 
+      {employeeId ? (
+        <TimelapsePanel key={`${employeeId}|${range.from}|${range.to}`} employeeId={employeeId} range={range} tz={TZ} />
+      ) : (
+        <p className="text-sm text-muted">Choose an employee to create a timelapse video of one of their work sessions.</p>
+      )}
+
       {gallery && (
         <section aria-label="Screenshot gallery" className="flex flex-col gap-3">
           {gallery.items.length === 0 ? (
-            <p className="text-sm text-muted">No screenshots in this range.</p>
+            <EmptyState title="No screenshots in this range." />
           ) : (
             <ul className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
               {gallery.items.map((item) => <Thumbnail key={item.id} item={item} onOpen={() => setOpen(item)} />)}
@@ -200,7 +276,16 @@ export default function ScreenshotsPage() {
         </section>
       )}
 
-      {open && <Viewer item={open} onClose={() => setOpen(null)} />}
+      {open && (
+        <Viewer
+          item={open}
+          onClose={() => setOpen(null)}
+          onDeleted={(r) => {
+            setOk(r.alreadyDeleted ? "This screenshot had already been deleted." : `Screenshot deleted ${when(r.deletedAt)}. Timelapse videos that contained it were removed.`);
+            setRetry((n) => n + 1);
+          }}
+        />
+      )}
     </div>
   );
 }

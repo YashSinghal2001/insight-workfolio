@@ -118,3 +118,39 @@ export const historyQuerySchema = pageQuerySchema.extend({
   to: z.iso.date().optional(),
   employeeId: z.uuid().optional(),
 });
+
+// ---- Admin overview summary -------------------------------------------------
+
+/** `date` (YYYY-MM-DD) is read as a local date in each employee's own time zone; omitted = each one's today. */
+export const attendanceSummaryQuerySchema = z.strictObject({ date: z.iso.date().optional() });
+export type AttendanceSummaryQuery = z.infer<typeof attendanceSummaryQuerySchema>;
+
+/**
+ * Organisation-wide counts, computed on request from stored records only. "Active employee" = account
+ * ACTIVE and employment not TERMINATED. Day figures use each employee's own time zone for the date.
+ * `currentlyWorking` and `onBreak` are the state now, whatever the date.
+ */
+export interface AttendanceSummary {
+  /** The requested date, or null when each employee's own today was used. */
+  date: string | null;
+  totalActiveEmployees: number;
+  /** Open session, not on a break (now). */
+  currentlyWorking: number;
+  /** Open session with an open break (now). */
+  onBreak: number;
+  /** A session overlapped the day and none is open now. */
+  clockedOutToday: number;
+  /** No session clocked in on that local date. Not "absent": leave, rest days and schedules are not considered. */
+  notClockedInToday: number;
+  /** Worked (session minus breaks) and break time inside the local day, clipped to it; open ones run to now. */
+  netWorkMsToday: number;
+  breakMsToday: number;
+  pendingLeaveCount: number;
+  pendingCorrectionCount: number;
+  activeProjectCount: number;
+  /** OPEN tasks of ACTIVE projects. */
+  openTaskCount: number;
+  /** STORED screenshots captured in the day (any storage provider, any employee). */
+  screenshotsStoredToday: number;
+  generatedAt: string;
+}

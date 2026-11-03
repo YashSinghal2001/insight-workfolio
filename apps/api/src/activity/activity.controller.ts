@@ -1,20 +1,27 @@
-import { Body, Controller, Get, Headers, HttpCode, Post, Query } from "@nestjs/common";
+import { Body, Controller, Delete, Get, Headers, HttpCode, Param, ParseUUIDPipe, Patch, Post, Query } from "@nestjs/common";
 import {
+  activityOverviewQuerySchema,
   activityQuerySchema,
   activitySyncSchema,
+  applicationCategorySchema,
+  applicationCategoryUpdateSchema,
   consentSchema,
   DEVICE_HEADER,
   employeeFilterSchema,
   retentionRunSchema,
+  type ActivityOverviewQuery,
+  type ActivityOverviewResponse,
   type ActivityQuery,
   type ActivitySyncRequest,
+  type ApplicationCategoryInput,
 } from "@workfolio/shared";
-import { CurrentUser, RequirePermission } from "../auth/auth.guard.js";
+import { CurrentUser, RequirePermission, TeamScoped } from "../auth/auth.guard.js";
 import type { AuthContext } from "../auth/auth.service.js";
 import { ZodPipe } from "../common/zod.pipe.js";
 import { DevicesService } from "../devices/devices.service.js";
 import { EmployeesService } from "../employees/employees.service.js";
 import { ActivityService } from "./activity.service.js";
+import { ActivityCategoriesService } from "./categories.service.js";
 import { RetentionService } from "./retention.service.js";
 
 /**
@@ -28,6 +35,7 @@ export class ActivityController {
     private readonly devices: DevicesService,
     private readonly employees: EmployeesService,
     private readonly retention: RetentionService,
+    private readonly categories: ActivityCategoriesService,
   ) {}
 
   @Post("sync")
@@ -77,6 +85,32 @@ export class ActivityController {
     return this.retention.run(user);
   }
 
+  /** Application productivity labels (current rules). Applied when summaries are read. */
+  @Get("categories")
+  @RequirePermission("settings:manage")
+  categoryRules() {
+    return this.categories.rules();
+  }
+
+  @Post("categories")
+  @RequirePermission("settings:manage")
+  addCategoryRule(@CurrentUser() user: AuthContext, @Body(new ZodPipe(applicationCategorySchema)) body: ApplicationCategoryInput) {
+    return this.categories.add(user, body);
+  }
+
+  @Patch("categories/:id")
+  @RequirePermission("settings:manage")
+  updateCategoryRule(@CurrentUser() user: AuthContext, @Param("id", new ParseUUIDPipe({ version: "4" })) id: string, @Body(new ZodPipe(applicationCategoryUpdateSchema)) body: Pick<ApplicationCategoryInput, "category">) {
+    return this.categories.update(user, id, body.category);
+  }
+
+  /** Ends the rule (kept for history); the application becomes Unclassified again. */
+  @Delete("categories/:id")
+  @RequirePermission("settings:manage")
+  removeCategoryRule(@CurrentUser() user: AuthContext, @Param("id", new ParseUUIDPipe({ version: "4" })) id: string) {
+    return this.categories.remove(user, id);
+  }
+
   @Get("summary")
   @RequirePermission("activity:read-own")
   async summary(@CurrentUser() user: AuthContext, @Query(new ZodPipe(activityQuerySchema)) q: ActivityQuery) {
@@ -87,6 +121,17 @@ export class ActivityController {
   @RequirePermission("activity:read-own")
   async timeline(@CurrentUser() user: AuthContext, @Query(new ZodPipe(activityQuerySchema)) q: ActivityQuery) {
     return this.activity.timeline(await this.target(user, q.employeeId), q);
+  }
+
+  /** Admin: per-employee range totals (each in the employee's own time zone), searchable and paginated; ≤ 31 days. */
+  @Get("overview")
+  @RequirePermission("activity:read-all")
+  @TeamScoped()
+  async overview(@Query(new ZodPipe(activityOverviewQuerySchema)) q: ActivityOverviewQuery, @CurrentUser() user: AuthContext): Promise<ActivityOverviewResponse> {
+    const page = await this.employees.list(q, user, "activity:read-all");
+    const refs = page.items.map((e) => ({ id: e.id, fullName: e.fullName, employeeCode: e.employeeCode, timezone: e.timezone }));
+    const { items, categoriesConfigured } = await this.activity.overview(refs, q.from, q.to);
+    return { ...page, items, from: q.from, to: q.to, categoriesConfigured };
   }
 
   private target(user: AuthContext, employeeId?: string) {

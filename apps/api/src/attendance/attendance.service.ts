@@ -4,6 +4,7 @@ import { guardViolation, isUniqueViolation, type DatabaseClient, type InStatemen
 import {
   addDays,
   invalidTransitionMessage,
+  todayIn,
   transition,
   uuidSchema,
   zonedToUtc,
@@ -13,18 +14,21 @@ import {
   type AttendanceOverviewRow,
   type AttendanceSession,
   type AttendanceState,
+  type AttendanceSummary,
   type ListEmployeesQuery,
   type Paginated,
   type SyncRequest,
   type SyncResponse,
   type SyncResult,
 } from "@workfolio/shared";
+import type { AuthContext } from "../auth/auth.service.js";
 import { EmployeeLocks } from "../common/employee-locks.js";
 import { POLICY } from "../common/policy.js";
+import { scopeSql } from "../common/scope.js";
 import { DATABASE } from "../database/database.module.js";
 import type { DeviceContext } from "../devices/devices.service.js";
 import { EmployeesService } from "../employees/employees.service.js";
-import { iso, SESSION_COLUMNS, stateOf, str, withBreaks } from "./sessions.js";
+import { ACTIVE_EMPLOYEE, iso, SESSION_COLUMNS, stateOf, str, withBreaks } from "./sessions.js";
 
 /** Device timestamps may lead the send time by this much (sub-second clock jitter, rounding). */
 const FUTURE_TOLERANCE_MS = 5_000;
@@ -133,9 +137,9 @@ export class AttendanceService {
     return { items: await withBreaks(this.db, rows!.rows), total: Number(count!.rows[0]!.n), page: q.page, pageSize: q.pageSize };
   }
 
-  /** Admin view: one row per employee with their latest session and last sync. Read-only. */
-  async overview(query: ListEmployeesQuery): Promise<Paginated<AttendanceOverviewRow>> {
-    const page = await this.employees.list(query);
+  /** Admin view: one row per employee with their latest session and last sync. Read-only. Team heads: their teams. */
+  async overview(query: ListEmployeesQuery, caller: AuthContext): Promise<Paginated<AttendanceOverviewRow>> {
+    const page = await this.employees.list(query, caller, "attendance:read-all");
     const ids = page.items.map((e) => e.id);
     if (!ids.length) return { ...page, items: [] };
     const marks = ids.map(() => "?").join(", ");
@@ -187,6 +191,103 @@ export class AttendanceService {
           deviceLastSeenAt: seenBy.get(e.id) ?? null,
         };
       }),
+    };
+  }
+
+  /**
+   * Organisation-wide counts for one local date (each employee's own time zone; default: each one's
+   * today). Five queries in two round trips, whatever the head count; the day's sessions are clipped in memory.
+   * Team heads (W41): people, pending leave/corrections and screenshots of their teams only; project and
+   * task counts stay organisation-wide (not per employee).
+   */
+  async summary(date?: string, now = Date.now(), caller?: AuthContext): Promise<AttendanceSummary> {
+    const scope = (column: string) => (caller ? scopeSql(caller, "attendance:read-all", column) : { sql: "", args: [] });
+    const [emps, zones, counts] = await this.db.batch(
+      [
+        { sql: `SELECT p.id, p.timezone FROM employee_profiles p JOIN users u ON u.id = p.user_id WHERE ${ACTIVE_EMPLOYEE}${scope("p.id").sql}`, args: scope("p.id").args },
+        "SELECT DISTINCT timezone FROM employee_profiles",
+        {
+          sql: `SELECT (SELECT count(*) FROM leave_requests WHERE status = 'PENDING'${scope("employee_id").sql}) AS leave,
+                (SELECT count(*) FROM correction_requests WHERE status = 'PENDING'${scope("employee_id").sql}) AS corrections,
+                (SELECT count(*) FROM projects WHERE status = 'ACTIVE') AS projects,
+                (SELECT count(*) FROM project_tasks t JOIN projects pr ON pr.id = t.project_id WHERE t.status = 'OPEN' AND pr.status = 'ACTIVE') AS tasks`,
+          args: [...scope("employee_id").args, ...scope("employee_id").args],
+        },
+      ],
+      "read",
+    );
+    // The local day [start, end) as UTC instants, per time zone.
+    const day = new Map<string, [number, number]>();
+    for (const r of zones!.rows) {
+      const tz = String(r.timezone);
+      const d = date ?? todayIn(tz, now);
+      day.set(tz, [Date.parse(zonedToUtc(`${d}T00:00`, tz)), Date.parse(zonedToUtc(`${addDays(d, 1)}T00:00`, tz))]);
+    }
+    const windows = [...day.entries()];
+    const minStart = iso(Math.min(...windows.map(([, w]) => w[0]), now));
+    const maxEnd = iso(Math.max(...windows.map(([, w]) => w[1]), now));
+    const shotWhere = windows.map(() => "(p.timezone = ? AND s.captured_at >= ? AND s.captured_at < ?)").join(" OR ") || "0";
+    const [sessions, shots] = await this.db.batch(
+      [
+        {
+          // Every session overlapping the widest day window (which reaches now, so open sessions are all included), with breaks.
+          // ponytail: scans attendance_sessions (no index on clock_out_at); add one if the table gets large.
+          sql: `SELECT s.id, s.employee_id, s.clock_in_at, s.clock_out_at, b.started_at AS b_start, b.ended_at AS b_end
+                FROM attendance_sessions s LEFT JOIN break_sessions b ON b.attendance_session_id = s.id
+                WHERE s.clock_in_at < ? AND coalesce(s.clock_out_at, '9999') > ?`,
+          args: [maxEnd, minStart],
+        },
+        {
+          sql: `SELECT count(*) AS n FROM screenshots s JOIN employee_profiles p ON p.id = s.employee_id
+                WHERE s.upload_status = 'STORED' AND (${shotWhere})${scope("s.employee_id").sql}`,
+          args: [...windows.flatMap(([tz, [a, b]]) => [tz, iso(a), iso(b)]), ...scope("s.employee_id").args],
+        },
+      ],
+      "read",
+    );
+    const bySession = new Map<string, { employeeId: string; start: number; end: number | null; breaks: [number, number | null][] }>();
+    for (const r of sessions!.rows) {
+      const id = String(r.id);
+      if (!bySession.has(id)) bySession.set(id, { employeeId: String(r.employee_id), start: Date.parse(String(r.clock_in_at)), end: r.clock_out_at ? Date.parse(String(r.clock_out_at)) : null, breaks: [] });
+      if (r.b_start) bySession.get(id)!.breaks.push([Date.parse(String(r.b_start)), r.b_end ? Date.parse(String(r.b_end)) : null]);
+    }
+    const tzOf = new Map(emps!.rows.map((r) => [String(r.id), String(r.timezone)]));
+    const per = new Map<string, { open: "WORKING" | "BREAK" | null; overlapped: boolean; clockedIn: boolean }>();
+    let netWorkMsToday = 0;
+    let breakMsToday = 0;
+    for (const s of bySession.values()) {
+      const tz = tzOf.get(s.employeeId);
+      if (!tz) continue; // not an active employee
+      const [ws, we] = day.get(tz)!;
+      const e = per.get(s.employeeId) ?? { open: null, overlapped: false, clockedIn: false };
+      per.set(s.employeeId, e);
+      if (s.end === null) e.open = s.breaks.some(([, be]) => be === null) ? "BREAK" : "WORKING";
+      if (s.start >= ws && s.start < we) e.clockedIn = true;
+      const clip = (a: number, b: number) => Math.max(0, Math.min(b, we) - Math.max(a, ws));
+      const sessionEnd = s.end ?? now;
+      if (s.start < we && sessionEnd > ws) e.overlapped = true;
+      const sessionMs = clip(s.start, sessionEnd);
+      const breakMs = Math.min(sessionMs, s.breaks.reduce((n, [bs, be]) => n + clip(Math.max(bs, s.start), Math.min(be ?? now, sessionEnd)), 0));
+      netWorkMsToday += sessionMs - breakMs;
+      breakMsToday += breakMs;
+    }
+    const states = [...per.values()];
+    const c = counts!.rows[0]!;
+    return {
+      date: date ?? null,
+      totalActiveEmployees: emps!.rows.length,
+      currentlyWorking: states.filter((e) => e.open === "WORKING").length,
+      onBreak: states.filter((e) => e.open === "BREAK").length,
+      clockedOutToday: states.filter((e) => e.overlapped && !e.open).length,
+      notClockedInToday: emps!.rows.length - states.filter((e) => e.clockedIn).length,
+      netWorkMsToday,
+      breakMsToday,
+      pendingLeaveCount: Number(c.leave),
+      pendingCorrectionCount: Number(c.corrections),
+      activeProjectCount: Number(c.projects),
+      openTaskCount: Number(c.tasks),
+      screenshotsStoredToday: Number(shots!.rows[0]!.n),
+      generatedAt: iso(now),
     };
   }
 

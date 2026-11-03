@@ -6,11 +6,21 @@ import {
   Inject,
   Injectable,
   Logger,
+  NotFoundException,
   UnauthorizedException,
 } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import type { DatabaseClient } from "@workfolio/database";
-import type { AuthUser, DesktopTokens, Role } from "@workfolio/shared";
+import {
+  platformRoleOf,
+  type AuthUser,
+  type DesktopTokens,
+  type Role,
+  type SessionClient,
+  type SessionInfo,
+} from "@workfolio/shared";
+import { accountAudit } from "../audit/account-audit.js";
+import { str } from "../attendance/sessions.js";
 import { jwtVerify, SignJWT } from "jose";
 import type { Env } from "../config/env.js";
 import { DATABASE } from "../database/database.module.js";
@@ -33,11 +43,15 @@ const INVALID_LOGIN = "Invalid email or password";
 /** The authenticated caller, attached to the request by AuthGuard. Role always comes from the DB. */
 export interface AuthContext extends AuthUser {
   sessionId: string;
+  /** Heads at least one active team (W41): team-scoped reads of those teams' members (common/scope.ts). */
+  teamHead?: boolean;
 }
 
 export interface IssuedSession extends DesktopTokens {
   user: AuthUser;
 }
+
+const SESSIONS_LIST_LIMIT = 100;
 
 const tooMany = () => new HttpException("Too many attempts. Try again later.", HttpStatus.TOO_MANY_REQUESTS);
 
@@ -49,6 +63,10 @@ export class AuthService {
   readonly loginByEmail = new RateLimiter(10, 15 * 60_000);
   readonly loginByIp = new RateLimiter(100, 15 * 60_000);
   readonly setupByIp = new RateLimiter(20, 15 * 60_000);
+  // Clients refresh about once per access-token lifetime (15 min); these only stop floods. The IP limit
+  // covers made-up session ids; it is looser for office NAT.
+  readonly refreshBySession = new RateLimiter(30, 15 * 60_000);
+  readonly refreshByIp = new RateLimiter(600, 15 * 60_000);
 
   constructor(
     @Inject(DATABASE) private readonly db: DatabaseClient,
@@ -59,13 +77,13 @@ export class AuthService {
     this.key = secret ? new TextEncoder().encode(secret) : randomBytes(32);
   }
 
-  async login(email: string, password: string, ip: string): Promise<IssuedSession> {
-    const ipOk = this.loginByIp.hit(ip);
-    if (!this.loginByEmail.hit(email) || !ipOk) throw tooMany();
+  async login(email: string, password: string, ip: string, client: SessionClient): Promise<IssuedSession> {
+    // A blocked IP is refused before its attempt counts against the email, so it can't lock others out.
+    if (!this.loginByIp.hit(ip) || !this.loginByEmail.hit(email)) throw tooMany();
 
     const user = (
       await this.db.execute({
-        sql: "SELECT id, email, role, status, password_hash FROM users WHERE email = ?",
+        sql: "SELECT id, email, role, admin_title, status, password_hash FROM users WHERE email = ?",
         args: [email],
       })
     ).rows[0];
@@ -76,16 +94,18 @@ export class AuthService {
       throw new UnauthorizedException(INVALID_LOGIN);
     }
     this.loginByEmail.reset(email);
-    return this.createSession({ id: String(user.id), email: String(user.email), role: user.role as Role });
+    return this.createSession({ id: String(user.id), email: String(user.email), role: user.role as Role, platformRole: platformRoleOf(user.role as Role, str(user.admin_title)) }, client);
   }
 
   /** Rotates the refresh token. Presenting a superseded token revokes the session (theft signal). */
-  async refresh(refreshToken: string): Promise<IssuedSession> {
+  async refresh(refreshToken: string, ip: string): Promise<IssuedSession> {
     const sessionId = refreshToken.split(".")[0] ?? "";
+    // IP first, so a blocked IP can't use up a session's budget.
+    if (!this.refreshByIp.hit(ip) || !this.refreshBySession.hit(sessionId)) throw tooMany();
     const now = new Date().toISOString();
     const row = (
       await this.db.execute({
-        sql: `SELECT s.refresh_token_hash, s.expires_at, s.revoked_at, u.id, u.email, u.role, u.status
+        sql: `SELECT s.refresh_token_hash, s.expires_at, s.revoked_at, u.id, u.email, u.role, u.admin_title, u.status
               FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.id = ?`,
         args: [sessionId],
       })
@@ -95,7 +115,13 @@ export class AuthService {
     const presented = sha256(refreshToken);
     if (!safeEqual(String(row.refresh_token_hash), presented)) {
       if (!row.revoked_at) {
-        await this.revokeSession(sessionId);
+        await this.db.batch(
+          [
+            { sql: "UPDATE sessions SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL", args: [now, sessionId] },
+            accountAudit({ actorUserId: null, targetUserId: String(row.id), action: "SESSION_REUSE_DETECTED", resourceType: "SESSION", resourceId: sessionId }, "changes() > 0"),
+          ],
+          "write",
+        );
         this.logger.warn({ sessionId }, "Refresh token reuse detected; session revoked");
       }
       throw new UnauthorizedException();
@@ -107,13 +133,13 @@ export class AuthService {
     const next = `${sessionId}.${randomToken()}`;
     // Compare-and-swap: of two concurrent refreshes with the same token, exactly one wins.
     const swapped = await this.db.execute({
-      sql: `UPDATE sessions SET refresh_token_hash = ?
+      sql: `UPDATE sessions SET refresh_token_hash = ?, refreshed_at = ?
             WHERE id = ? AND refresh_token_hash = ? AND revoked_at IS NULL AND expires_at > ?`,
-      args: [sha256(next), sessionId, presented, now],
+      args: [sha256(next), now, sessionId, presented, now],
     });
     if (swapped.rowsAffected !== 1) throw new UnauthorizedException();
 
-    const user: AuthUser = { id: String(row.id), email: String(row.email), role: row.role as Role };
+    const user: AuthUser = { id: String(row.id), email: String(row.email), role: row.role as Role, platformRole: platformRoleOf(row.role as Role, str(row.admin_title)) };
     return { user, refreshToken: next, ...(await this.accessToken(user.id, sessionId)) };
   }
 
@@ -142,13 +168,15 @@ export class AuthService {
     }
     const row = (
       await this.db.execute({
-        sql: `SELECT u.id, u.email, u.role FROM sessions s JOIN users u ON u.id = s.user_id
+        sql: `SELECT u.id, u.email, u.role, u.admin_title,
+                EXISTS (SELECT 1 FROM teams t WHERE t.head_user_id = u.id AND t.active = 1) AS team_head
+              FROM sessions s JOIN users u ON u.id = s.user_id
               WHERE s.id = ? AND u.id = ? AND s.revoked_at IS NULL AND s.expires_at > ? AND u.status = 'ACTIVE'`,
         args: [sessionId, userId, new Date().toISOString()],
       })
     ).rows[0];
     if (!row) throw new UnauthorizedException();
-    return { id: String(row.id), email: String(row.email), role: row.role as Role, sessionId };
+    return { id: String(row.id), email: String(row.email), role: row.role as Role, platformRole: platformRoleOf(row.role as Role, str(row.admin_title)), sessionId, teamHead: Boolean(row.team_head) };
   }
 
   /** Consumes a one-time setup token, sets the password and signs out any existing sessions. */
@@ -158,11 +186,19 @@ export class AuthService {
     const now = new Date().toISOString();
     const owner = "(SELECT user_id FROM account_setup_tokens WHERE token_hash = ? AND used_at IS NULL AND expires_at > ?)";
     const ownerArgs = [sha256(token), now];
+    // Who the link belongs to (for the audit row). The batch below re-checks the link itself.
+    const link = (
+      await this.db.execute({ sql: "SELECT id, user_id FROM account_setup_tokens WHERE token_hash = ? AND used_at IS NULL AND expires_at > ?", args: ownerArgs })
+    ).rows[0];
+    if (!link) throw new BadRequestException("This setup link is invalid or has expired");
+    const userId = String(link.user_id);
     // One transaction; the token is consumed last because consuming it empties the subquery.
     const [setPassword] = await this.db.batch(
       [
         { sql: `UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ${owner}`, args: [hash, now, ...ownerArgs] },
         { sql: `UPDATE sessions SET revoked_at = ? WHERE revoked_at IS NULL AND user_id = ${owner}`, args: [now, ...ownerArgs] },
+        // Directly after the session revocation (changes() = sessions revoked), while the link is still unused.
+        accountAudit({ actorUserId: userId, targetUserId: userId, action: "PASSWORD_SET", resourceType: "SETUP_LINK", resourceId: String(link.id) }, `${owner} = ?`, { whenArgs: [...ownerArgs, userId], changesAs: "sessionsRevoked" }),
         { sql: `UPDATE account_setup_tokens SET used_at = ? WHERE used_at IS NULL AND user_id = ${owner}`, args: [now, ...ownerArgs] },
       ],
       "write",
@@ -170,19 +206,59 @@ export class AuthService {
     if (setPassword?.rowsAffected !== 1) throw new BadRequestException("This setup link is invalid or has expired");
   }
 
-  async revokeSession(sessionId: string): Promise<void> {
-    await this.db.execute({
-      sql: "UPDATE sessions SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL",
-      args: [new Date().toISOString(), sessionId],
+  /** The caller's live sessions, newest first. Never selects token hashes. */
+  async listSessions(caller: AuthContext): Promise<SessionInfo[]> {
+    const { rows } = await this.db.execute({
+      sql: `SELECT id, client, created_at, refreshed_at, expires_at FROM sessions
+            WHERE user_id = ? AND revoked_at IS NULL AND expires_at > ?
+            ORDER BY created_at DESC, id DESC LIMIT ${SESSIONS_LIST_LIMIT}`,
+      args: [caller.id, new Date().toISOString()],
     });
+    return rows.map((r) => ({
+      id: String(r.id),
+      client: str(r.client) as SessionClient | null,
+      createdAt: String(r.created_at),
+      refreshedAt: str(r.refreshed_at),
+      expiresAt: String(r.expires_at),
+      current: String(r.id) === caller.sessionId,
+    }));
   }
 
-  private async createSession(user: AuthUser): Promise<IssuedSession> {
+  /** Revokes one of the caller's own live sessions; anything else (unknown, someone else's, already revoked) is 404. */
+  async revokeOwnSession(caller: AuthContext, sessionId: string): Promise<void> {
+    const now = new Date().toISOString();
+    const [revoked] = await this.db.batch(
+      [
+        { sql: "UPDATE sessions SET revoked_at = ? WHERE id = ? AND user_id = ? AND revoked_at IS NULL AND expires_at > ?", args: [now, sessionId, caller.id, now] },
+        accountAudit({ actorUserId: caller.id, targetUserId: caller.id, action: "SESSION_REVOKED", resourceType: "SESSION", resourceId: sessionId }, "changes() > 0"),
+      ],
+      "write",
+    );
+    if (revoked?.rowsAffected !== 1) throw new NotFoundException("Session not found");
+  }
+
+  /** Revokes the caller's live sessions: all of them, or all but the current one. Audited with the count. */
+  async revokeOwnSessions(caller: AuthContext, includeCurrent: boolean): Promise<number> {
+    const now = new Date().toISOString();
+    const [revoked] = await this.db.batch(
+      [
+        {
+          sql: `UPDATE sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL AND expires_at > ?${includeCurrent ? "" : " AND id <> ?"}`,
+          args: includeCurrent ? [now, caller.id, now] : [now, caller.id, now, caller.sessionId],
+        },
+        accountAudit({ actorUserId: caller.id, targetUserId: caller.id, action: includeCurrent ? "SESSIONS_REVOKED_ALL" : "SESSIONS_REVOKED_OTHERS", resourceType: "SESSION" }, "changes() > 0", { changesAs: "count" }),
+      ],
+      "write",
+    );
+    return revoked?.rowsAffected ?? 0;
+  }
+
+  private async createSession(user: AuthUser, client: SessionClient): Promise<IssuedSession> {
     const sessionId = randomUUID();
     const refreshToken = `${sessionId}.${randomToken()}`;
     await this.db.execute({
-      sql: "INSERT INTO sessions (id, user_id, refresh_token_hash, expires_at) VALUES (?, ?, ?, ?)",
-      args: [sessionId, user.id, sha256(refreshToken), new Date(Date.now() + SESSION_TTL_MS).toISOString()],
+      sql: "INSERT INTO sessions (id, user_id, refresh_token_hash, expires_at, client) VALUES (?, ?, ?, ?, ?)",
+      args: [sessionId, user.id, sha256(refreshToken), new Date(Date.now() + SESSION_TTL_MS).toISOString(), client],
     });
     return { user, refreshToken, ...(await this.accessToken(user.id, sessionId)) };
   }

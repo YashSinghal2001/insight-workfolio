@@ -101,10 +101,11 @@ export class CorrectionsService {
   /** Employees: their own requests. Admins: everyone's, optionally filtered. */
   async list(
     caller: AuthContext,
-    q: { status?: CorrectionStatus; employeeId?: string; page: number; pageSize: number },
+    q: { status?: CorrectionStatus; employeeId?: string; mine?: boolean; page: number; pageSize: number },
   ): Promise<Paginated<CorrectionRequest>> {
     const employeeId =
-      q.employeeId || !this.isReviewer(caller) ? (await this.employees.attendanceTarget(caller, q.employeeId)).id : null;
+      // mine: the caller's own profile from the session (the schema rejects mine together with employeeId).
+      q.mine || q.employeeId || !this.isReviewer(caller) ? (await this.employees.attendanceTarget(caller, q.mine ? undefined : q.employeeId)).id : null;
     const where = "WHERE (?1 IS NULL OR r.employee_id = ?1) AND (?2 IS NULL OR r.status = ?2)";
     const [rows, count] = await this.db.batch(
       [

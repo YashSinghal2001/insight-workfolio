@@ -1,5 +1,5 @@
 // Auth transport and session restoration. No Tauri imports, so node tests can drive it.
-import { API_PREFIX, type DesktopLoginResponse, type MeResponse } from "@workfolio/shared";
+import { API_PREFIX, type DesktopLoginResponse, type MeResponse, type PlatformRole } from "@workfolio/shared";
 
 /** Refresh-token storage: the OS credential store in the app. */
 export interface TokenStore {
@@ -26,6 +26,8 @@ export class ApiClient {
   private readonly baseUrl: string;
   private readonly tokens: TokenStore;
   private readonly fetchFn: typeof fetch;
+  /** Called when the server refuses the refresh token (expired, revoked, account disabled): the session is gone. */
+  onSessionEnded: (() => void) | null = null;
 
   constructor(baseUrl: string, tokens: TokenStore, fetchFn: typeof fetch = (...a) => fetch(...a)) {
     this.baseUrl = baseUrl;
@@ -34,7 +36,7 @@ export class ApiClient {
   }
 
   /** JSON bodies by default; binary bodies (screenshots) are sent as-is with the caller's content-type. */
-  private async send(method: string, path: string, body?: unknown, headers: Record<string, string> = {}) {
+  private async send(method: string, path: string, body?: unknown, headers: Record<string, string> = {}, as: "json" | "blob" | "response" = "json", signal?: AbortSignal) {
     const binary = body instanceof ArrayBuffer || body instanceof Uint8Array;
     const res = await this.fetchFn(`${this.baseUrl}${API_PREFIX}${path}`, {
       method,
@@ -44,12 +46,13 @@ export class ApiClient {
         ...(this.accessToken && { authorization: `Bearer ${this.accessToken}` }),
       },
       body: body === undefined ? undefined : binary ? (body as BodyInit) : JSON.stringify(body),
+      signal,
     });
     if (!res.ok) {
       const msg = await res.json().then((b: { message?: unknown }) => b.message, () => undefined);
       throw new HttpError(res.status, Array.isArray(msg) ? msg.join("; ") : typeof msg === "string" ? msg : `HTTP ${res.status}`);
     }
-    return res.status === 204 ? undefined : res.json();
+    return res.status === 204 ? undefined : as === "response" ? res : as === "blob" ? res.blob() : res.json();
   }
 
   async login(email: string, password: string): Promise<DesktopLoginResponse> {
@@ -83,6 +86,7 @@ export class ApiClient {
       if (err instanceof HttpError && err.status === 401) {
         this.accessToken = null;
         await this.tokens.clear();
+        this.onSessionEnded?.();
         return false;
       }
       throw err;
@@ -96,6 +100,34 @@ export class ApiClient {
     } catch (err) {
       if (!(err instanceof HttpError && err.status === 401) || !(await this.refresh())) throw err;
       return (await this.send(method, path, body, headers)) as T;
+    }
+  }
+
+  /** Authenticated binary GET (screenshot images), same refresh rule; the body stays in memory. */
+  async blob(path: string): Promise<Blob> {
+    try {
+      return (await this.send("GET", path, undefined, {}, "blob")) as Blob;
+    } catch (err) {
+      if (!(err instanceof HttpError && err.status === 401) || !(await this.refresh())) throw err;
+      return (await this.send("GET", path, undefined, {}, "blob")) as Blob;
+    }
+  }
+
+  /**
+   * Authenticated file download (timesheet export), cancellable, with the server's shift count
+   * (`x-export-rows`). The file stays in memory; the caller decides what to do with it.
+   */
+  async download(path: string, signal?: AbortSignal): Promise<{ blob: Blob; rows: number | null }> {
+    const get = async () => {
+      const res = (await this.send("GET", path, undefined, {}, "response", signal)) as Response;
+      const rows = res.headers.get("x-export-rows");
+      return { blob: await res.blob(), rows: rows === null ? null : Number(rows) };
+    };
+    try {
+      return await get();
+    } catch (err) {
+      if (!(err instanceof HttpError && err.status === 401) || !(await this.refresh())) throw err;
+      return await get();
     }
   }
 
@@ -115,6 +147,9 @@ export interface CachedProfile {
   employeeCode: string;
   email: string;
   timezone: string;
+  /** Display only (the API decides every permission): Super Admin, Admin or Employee. */
+  platformRole?: PlatformRole;
+  hasEmployeeProfile?: boolean;
 }
 
 export function profileOf(me: MeResponse): CachedProfile {
@@ -124,6 +159,9 @@ export function profileOf(me: MeResponse): CachedProfile {
     employeeCode: me.employee?.employeeCode ?? "—",
     email: me.user.email,
     timezone: me.employee?.timezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone,
+    // Typed as always present, but a desktop build can outlive its server: older APIs omitted it.
+    platformRole: (me.user.platformRole as PlatformRole | undefined) ?? (me.user.role === "ADMIN" ? "ADMIN" : "EMPLOYEE"),
+    hasEmployeeProfile: !!me.employee,
   };
 }
 

@@ -1,36 +1,94 @@
 @import "tailwindcss";
 
+/*
+ * Theme tokens (light; dark below). Existing names are stable: background, surface, foreground,
+ * muted, border, brand. Added: surface-muted, border-strong, focus, and status colours
+ * (success / warning / danger / info, each with a -soft background).
+ */
 :root {
-  --background: #f7f8fa;
+  color-scheme: light;
+  --background: #f6f7f9;
   --surface: #ffffff;
+  --surface-muted: #f1f3f6;
   --foreground: #14171f;
-  --muted: #5f6675;
-  --border: #e3e6eb;
+  --muted: #5b6272;
+  --border: #e2e5ea;
+  --border-strong: #c9ced8;
   --brand: #2f5bea;
+  --focus: #2f5bea;
+  --success: #047857;
+  --success-soft: #ecfdf5;
+  --warning: #b45309;
+  --warning-soft: #fffbeb;
+  --danger: #c81e1e;
+  --danger-soft: #fef2f2;
+  --info: #0369a1;
+  --info-soft: #f0f9ff;
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --background: #0d0f14;
-    --surface: #161a22;
+    color-scheme: dark;
+    --background: #0c0e13;
+    --surface: #151922;
+    --surface-muted: #1b202b;
     --foreground: #e8eaef;
     --muted: #9aa1ae;
     --border: #262b36;
+    --border-strong: #363d4b;
     --brand: #6f8fff;
+    --focus: #8ba4ff;
+    --success: #34d399;
+    --success-soft: #052e22;
+    --warning: #fbbf24;
+    --warning-soft: #2f2205;
+    --danger: #f87171;
+    --danger-soft: #3a1010;
+    --info: #38bdf8;
+    --info-soft: #062638;
   }
 }
 
 @theme inline {
   --color-background: var(--background);
   --color-surface: var(--surface);
+  --color-surface-muted: var(--surface-muted);
   --color-foreground: var(--foreground);
   --color-muted: var(--muted);
   --color-border: var(--border);
+  --color-border-strong: var(--border-strong);
   --color-brand: var(--brand);
+  --color-focus: var(--focus);
+  --color-success: var(--success);
+  --color-success-soft: var(--success-soft);
+  --color-warning: var(--warning);
+  --color-warning-soft: var(--warning-soft);
+  --color-danger: var(--danger);
+  --color-danger-soft: var(--danger-soft);
+  --color-info: var(--info);
+  --color-info-soft: var(--info-soft);
 }
 
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  font-size: 0.9375rem;
+  line-height: 1.5;
+  text-rendering: optimizeLegibility;
+}
+
+/* Visible keyboard focus everywhere (zero specificity: utility classes still win). */
+:where(a, button, input, select, textarea, summary, [tabindex]):focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
 }

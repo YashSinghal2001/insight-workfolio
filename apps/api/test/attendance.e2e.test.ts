@@ -136,6 +136,10 @@ describe("devices", () => {
     assert.equal(revoked.status, 200);
     assert.ok(revoked.body.revokedAt);
 
+    // The device's session was revoked with it (API-08); sign in again on the same installation.
+    assert.equal((await act(e, "clock-in")).status, 401);
+    const email = String((await db.execute({ sql: "SELECT u.email FROM users u JOIN employee_profiles p ON p.user_id = u.id WHERE p.id = ?", args: [e.id] })).rows[0]!.email);
+    e.bearer = (await api("/auth/login", { method: "POST", body: { email, password: PASSWORD, client: "desktop" } })).body.accessToken;
     assert.equal((await act(e, "clock-in")).status, 403);
     assert.equal((await sync(e, [{ type: "CLOCK_IN", occurredAt: iso(Date.now()) }])).status, 403);
     assert.equal((await api("/devices/me", { bearer: e.bearer, device: e.device })).body.status, "REVOKED");

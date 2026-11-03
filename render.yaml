@@ -1,0 +1,91 @@
+# Render Blueprint for the API (apps/api). NOT DEPLOYED and not validated by Render (needs an account):
+# check it in the Render dashboard (Blueprints › New) before the first sync. docs/deployment.md has the full plan.
+#
+# SINGLE INSTANCE ONLY (API-13). Rate limiters, per-employee write locks, OAuth state, in-process caches
+# and the retention/report schedulers live in memory. Keep numInstances: 1 and never add `scaling`
+# (autoscaling). The persistent disk also pins the service to one instance.
+#
+# MIGRATIONS ARE NOT RUN AT BOOT on a hosted (libsql:// or https://) database. The API only runs a
+# read-only schema check and refuses to start while any migration is pending (or the database has an
+# unknown id or an edited checksum). Apply migrations first with `db:migrate` (the approval-gated
+# .github/workflows/deploy-staging.yml job, or a trusted machine with approval); docs/database-operations.md.
+services:
+  - type: web
+    name: insight-workfolio-api
+    runtime: node
+    plan: starter # paid, always on (free instances sleep, so the schedulers would not run, and have no disk)
+    # region: pick the one closest to the Turso database (default oregon). Turso staging is aws-ap-south-1
+    # (Mumbai); the closest Render region is singapore. Not set here until the Render account exists.
+    rootDir: apps/api
+    # Commands run in rootDir; install and package builds run at the pnpm workspace root.
+    # --prod=false: NODE_ENV=production would otherwise skip devDependencies such as @nestjs/cli.
+    buildCommand: cd ../.. && corepack enable pnpm && pnpm install --frozen-lockfile --prod=false && pnpm build:packages && pnpm --filter @workfolio/api build
+    # Verifies the schema at boot (read-only); refuses to start on a pending, edited or unknown migration.
+    # It never migrates a hosted database: deploy only after db:migrate has run.
+    startCommand: node dist/main.js
+    # Liveness only. /api/v1/ready probes the database and the storage provider on every call: a Turso
+    # or Graph blip there must page (uptime monitor), not make Render restart the service.
+    healthCheckPath: /api/v1/health
+    numInstances: 1
+    # Deploys come only from .github/workflows/deploy-staging.yml (deploy hook, after the approved
+    # migration and its read-only verify). A manual deploy before migrating fails at boot by design.
+    # If auto-deploy is ever enabled, add a buildFilter for packages/** and the lockfile.
+    autoDeploy: false
+    disk:
+      name: workfolio-data
+      mountPath: /var/data
+      sizeGB: 5 # timelapse cache (24 h TTL); size per docs/timelapse.md
+    envVars:
+      # Public, fixed settings
+      - key: NODE_VERSION
+        value: "24"
+      - key: NODE_ENV
+        value: production
+      - key: TRUST_PROXY
+        value: "1" # one proxy hop (Render's load balancer)
+      - key: LOG_LEVEL
+        value: info
+      - key: TIMELAPSE_DIR
+        value: /var/data/timelapses
+      - key: SCREENSHOT_STORAGE
+        value: graph
+      - key: GRAPH_PERMANENT_DELETE
+        value: "false"
+      - key: REPORT_MAIL_PROVIDER
+        value: none
+      - key: WEBSITE_TRACKING_APPROVED
+        value: "false" # true only after HR/Legal approval (docs/website-usage.md)
+      - key: WEBSITE_RETENTION_APPROVED
+        value: "false"
+      # Per-environment values, entered in the Render dashboard (never committed)
+      - key: CORS_ORIGINS
+        sync: false
+      - key: DASHBOARD_URL
+        sync: false
+      - key: GRAPH_FOLDER
+        sync: false
+      # Secrets and tenant identifiers, entered in the Render dashboard (never committed)
+      - key: DATABASE_URL
+        sync: false
+      - key: DATABASE_AUTH_TOKEN
+        sync: false
+      - key: JWT_SECRET
+        sync: false
+      - key: GRAPH_TENANT_ID
+        sync: false
+      - key: GRAPH_CLIENT_ID
+        sync: false
+      - key: GRAPH_SITE_ID
+        sync: false
+      - key: GRAPH_DRIVE_ID
+        sync: false
+      - key: GRAPH_FOLDER_ID
+        sync: false
+      # Exactly one Graph credential: a client secret, or (preferred) a certificate key uploaded as a
+      # Render Secret File (/etc/secrets/<name>) plus its SHA-1 thumbprint. Leave the other unset.
+      - key: GRAPH_CLIENT_SECRET
+        sync: false
+      - key: GRAPH_CERT_KEY_PATH
+        sync: false
+      - key: GRAPH_CERT_THUMBPRINT
+        sync: false

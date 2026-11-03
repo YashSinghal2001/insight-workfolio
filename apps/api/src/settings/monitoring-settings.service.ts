@@ -3,7 +3,9 @@ import { ConfigService } from "@nestjs/config";
 import { isUniqueViolation, type DatabaseClient, type Row } from "@workfolio/database";
 import {
   DEFAULT_MONITORING_SETTINGS,
+  effectiveIdleThreshold,
   type AttendancePolicy,
+  type MonitoringPolicy,
   type AuthUser,
   type MonitoringNotice,
   type MonitoringSettingsInput,
@@ -22,13 +24,14 @@ export interface PolicyPeriod {
   noticeVersion: string;
 }
 
-const COLUMNS = `p.monitoring_enabled, p.sample_seconds, p.idle_threshold_seconds, p.retention_days, p.retention_approved,
+const COLUMNS = `p.monitoring_enabled, p.sample_seconds, p.idle_threshold_seconds, p.idle_excluded_apps, p.retention_days, p.retention_approved,
   p.notice_version, p.reason, p.effective_at, u.id AS user_id, u.email AS user_email`;
 
 const toVersion = (r: Row): MonitoringSettingsVersion => ({
   enabled: Boolean(r.monitoring_enabled),
   sampleSeconds: Number(r.sample_seconds),
   idleThresholdSeconds: Number(r.idle_threshold_seconds),
+  idleExcludedApps: JSON.parse(String(r.idle_excluded_apps)) as string[],
   retentionDays: Number(r.retention_days),
   retentionApproved: Boolean(r.retention_approved),
   noticeVersion: String(r.notice_version),
@@ -74,6 +77,29 @@ export class MonitoringSettingsService {
     return rows[0] ? toVersion(rows[0]) : this.defaults;
   }
 
+  /** What one employee's desktop applies: the organisation policy with their idle-threshold override (W21). */
+  async policyFor(employeeId: string, settings?: MonitoringSettingsVersion): Promise<MonitoringPolicy> {
+    const [s, { rows }] = await Promise.all([
+      settings ?? this.current(),
+      this.db.execute({
+        sql: "SELECT idle_threshold_seconds FROM employee_tracking_overrides WHERE employee_id = ? ORDER BY effective_at DESC, rowid DESC LIMIT 1",
+        args: [employeeId],
+      }),
+    ]);
+    const o = rows[0]?.idle_threshold_seconds;
+    return { enabled: s.enabled, sampleSeconds: s.sampleSeconds, idleThresholdSeconds: effectiveIdleThreshold(s, o == null ? null : Number(o)), idleExcludedApps: s.idleExcludedApps };
+  }
+
+  /** F08: the employee's own-screenshot override in force (true allow, false deny), or null = the organisation switch. */
+  async screenshotSelfView(employeeId: string): Promise<boolean | null> {
+    const { rows } = await this.db.execute({
+      sql: "SELECT screenshot_self_view FROM employee_tracking_overrides WHERE employee_id = ? ORDER BY effective_at DESC, rowid DESC LIMIT 1",
+      args: [employeeId],
+    });
+    const v = rows[0]?.screenshot_self_view;
+    return v == null ? null : Boolean(v);
+  }
+
   /** Ascending; the first period (defaults) starts at -Infinity. */
   async periods(): Promise<PolicyPeriod[]> {
     const { rows } = await this.db.execute("SELECT monitoring_enabled, notice_version, effective_at FROM monitoring_policies ORDER BY seq");
@@ -109,12 +135,14 @@ export class MonitoringSettingsService {
       throw new BadRequestException("noticeVersion: no such notice");
     });
     const { reason, ...next } = input;
+    // Omitted by older clients: the current exclusion list carries over.
+    const excluded = next.idleExcludedApps ?? (await this.current()).idleExcludedApps;
     await this.db.execute({
       sql: `INSERT INTO monitoring_policies
-              (monitoring_enabled, sample_seconds, idle_threshold_seconds, retention_days, retention_approved, notice_version, reason, changed_by, effective_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`,
+              (monitoring_enabled, sample_seconds, idle_threshold_seconds, idle_excluded_apps, retention_days, retention_approved, notice_version, reason, changed_by, effective_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`,
       args: [
-        next.enabled ? 1 : 0, next.sampleSeconds, next.idleThresholdSeconds, next.retentionDays,
+        next.enabled ? 1 : 0, next.sampleSeconds, next.idleThresholdSeconds, JSON.stringify(excluded), next.retentionDays,
         next.retentionApproved ? 1 : 0, next.noticeVersion, reason, admin.id,
       ],
     });

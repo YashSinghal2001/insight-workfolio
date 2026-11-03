@@ -20,8 +20,18 @@
       <div class="notice" role="note">
         <strong>Transparent monitoring.</strong>
         This app records your clock-in, break and clock-out times. While you are clocked in and not on a
-        break, it also records which application is in front and when you are idle. It never records
-        keystrokes, window titles, websites or screenshots.
+        break, it may also record which application is in front, when you are idle and, if your organization turns them
+        on and you acknowledge the notice, screenshots of your main screen. Each is shown below with whether it is on right
+        now. It never records keystrokes or window titles, and it reads nothing from your browsers.
+      </div>
+
+      <div id="hidden-notice" class="notice" role="status" hidden>
+        <p id="hidden-notice-text">
+          Insight Workfolio keeps running in the menu bar while you are signed in, so attendance, activity monitoring and
+          screenshots continue exactly as shown here. Open this window again from the menu bar icon. To stop recording, choose
+          Quit Insight Workfolio from that menu.
+        </p>
+        <button type="button" id="hidden-notice-dismiss" class="secondary">OK</button>
       </div>
 
       <p id="auth-loading" class="muted" role="status">Checking sign-in…</p>
@@ -43,16 +53,48 @@
             <div id="identity-name" class="name"></div>
             <div class="muted"><span id="identity-code"></span> · <span id="identity-email"></span></div>
           </div>
+          <span id="role-badge" class="badge" hidden></span>
           <span id="mode-badge" class="badge" hidden>Offline</span>
         </section>
+        <section id="admin-panel" class="card" aria-labelledby="admin-panel-heading" hidden>
+          <h2 id="admin-panel-heading">Administrator account</h2>
+          <p class="muted">
+            You are signed in as <strong id="admin-panel-role"></strong>. Organization-wide records, website usage reports, tracking
+            policies, categories, roles and audit logs are in the web dashboard: <span id="admin-panel-url" class="mono"></span>.
+            This app shows only your own records, and the server checks every permission.
+          </p>
+          <p id="admin-panel-note" class="hint" hidden>This account has no employee profile, so attendance, tasks and website tracking do not apply to it.</p>
+        </section>
+
+        <p id="offline-banner" class="notice" role="status" hidden>
+          You are offline. Clock-in, break and clock-out changes are saved on this computer and upload automatically when the
+          connection returns.
+        </p>
 
         <nav class="tabs" role="tablist" aria-label="Sections">
           <button type="button" role="tab" id="tab-btn-today" data-tab="today" aria-selected="true" aria-controls="tab-today">Today</button>
           <button type="button" role="tab" id="tab-btn-history" data-tab="history" aria-selected="false" aria-controls="tab-history">History</button>
           <button type="button" role="tab" id="tab-btn-corrections" data-tab="corrections" aria-selected="false" aria-controls="tab-corrections">Corrections</button>
+          <button type="button" role="tab" id="tab-btn-leave" data-tab="leave" aria-selected="false" aria-controls="tab-leave">Leave</button>
+          <button type="button" role="tab" id="tab-btn-tasks" data-tab="tasks" aria-selected="false" aria-controls="tab-tasks">Tasks</button>
+          <button type="button" role="tab" id="tab-btn-websites" data-tab="websites" aria-selected="false" aria-controls="tab-websites">Websites</button>
+          <button type="button" role="tab" id="tab-btn-screenshots" data-tab="screenshots" aria-selected="false" aria-controls="tab-screenshots">My screenshots</button>
+          <button type="button" role="tab" id="tab-btn-settings" data-tab="settings" aria-selected="false" aria-controls="tab-settings">Settings</button>
         </nav>
 
         <div id="tab-today" role="tabpanel" aria-labelledby="tab-btn-today" class="stack">
+        <section id="status-summary" class="card" aria-labelledby="status-heading">
+          <div class="row">
+            <h2 id="status-heading">Status</h2>
+            <span id="status-state" class="pill" role="status" aria-live="polite"></span>
+          </div>
+          <p id="status-label"></p>
+          <p id="status-monitoring" class="muted" hidden></p>
+          <p id="status-hint" class="hint">
+            The menu bar shows the same status. Below: attendance, then screenshots (permission, next and last capture, uploads,
+            storage, privacy masks and your acknowledgement) and activity monitoring.
+          </p>
+        </section>
         <!-- Device enrolment: required once before attendance can be recorded. -->
         <section id="device-register" class="card" aria-labelledby="device-heading" hidden>
           <h2 id="device-heading">Register this device</h2>
@@ -114,7 +156,7 @@
           <p id="shot-reason" class="muted"></p>
           <p id="shot-taken" class="notice" role="status" aria-live="polite" hidden></p>
           <dl>
-            <dt>Screen recording permission</dt><dd id="shot-permission">—</dd>
+            <dt id="shot-permission-label">Screen recording permission</dt><dd id="shot-permission">—</dd>
             <dt>Next screenshot</dt><dd id="shot-next">—</dd>
             <dt>Last taken (on this computer)</dt><dd id="shot-last-local">—</dd>
             <dt>Last confirmed in cloud storage</dt><dd id="shot-last-cloud">Never</dd>
@@ -225,10 +267,61 @@
               <tbody id="days-body"></tbody>
             </table>
             <p class="hint" id="policy-note"></p>
+            <details id="export">
+              <summary>Download my timesheet (CSV or Excel)</summary>
+              <form id="export-form" class="stack" novalidate>
+                <p class="hint">
+                  One row per shift, in your time zone, with the recorded clock-in, clock-out and break times and the
+                  calculated minutes. <strong>Draft format</strong>: the columns are not yet approved for payroll or accounting.
+                  Open shifts have no clock-out and no worked minutes. Up to 92 days. The Excel file also has a Summary sheet
+                  with the column totals.
+                </p>
+                <div class="row wrap">
+                  <label>From <input type="date" name="from" required /></label>
+                  <label>To <input type="date" name="to" required /></label>
+                  <label>File type
+                    <select name="format">
+                      <option value="csv">CSV (.csv)</option>
+                      <option value="xlsx">Excel (.xlsx)</option>
+                    </select>
+                  </label>
+                </div>
+                <p id="export-error" class="error" role="alert" hidden></p>
+                <p id="export-status" class="hint" role="status" aria-live="polite"></p>
+                <div class="row wrap">
+                  <button type="submit" id="export-submit" class="secondary">Download CSV</button>
+                  <button type="button" id="export-cancel" class="secondary" hidden>Cancel</button>
+                </div>
+              </form>
+            </details>
           </section>
           <section class="card" aria-labelledby="shifts-heading">
             <h2 id="shifts-heading">Shifts and breaks</h2>
+            <p class="hint">The clock-in, break and clock-out times exactly as recorded. The hours above are calculated from them.</p>
             <ul id="shift-list" class="list"></ul>
+          </section>
+          <section class="card" aria-labelledby="activity-heading">
+            <h2 id="activity-heading">Application activity</h2>
+            <p class="hint">
+              Calculated from the application and idle intervals this app uploaded for the same week. Only the application
+              name and idle time are recorded: no window titles, websites or keystrokes, and no productivity score.
+            </p>
+            <p id="activity-status" class="hint" role="status" aria-live="polite"></p>
+            <p id="activity-error" class="error" role="alert" hidden></p>
+            <ul id="activity-notes" class="points" hidden></ul>
+            <dl id="activity-totals"></dl>
+            <table class="days">
+              <caption class="sr-only">Daily activity</caption>
+              <thead><tr><th scope="col">Day</th><th scope="col">Clocked in</th><th scope="col">Active</th><th scope="col">Idle</th><th scope="col">No record</th></tr></thead>
+              <tbody id="activity-days"></tbody>
+            </table>
+            <h3 class="sub">Applications in front</h3>
+            <ul id="activity-apps" class="list"></ul>
+            <p class="hint">
+              "No record" is clocked-in time with no activity data (computer asleep or off, app closed, monitoring paused, or not
+              uploaded yet). It is not counted as active or idle.
+            </p>
+            <button type="button" id="activity-screenshots" class="secondary">See my screenshots</button>
           </section>
         </div>
 
@@ -262,6 +355,189 @@
           <section class="card" aria-labelledby="requests-heading">
             <h2 id="requests-heading">My requests</h2>
             <ul id="correction-list" class="list"></ul>
+          </section>
+        </div>
+
+        <div id="tab-leave" role="tabpanel" aria-labelledby="tab-btn-leave" class="stack" hidden>
+          <section class="card" aria-labelledby="leave-heading">
+            <h2 id="leave-heading">Request leave</h2>
+            <p class="muted">
+              An administrator approves or rejects every request. This records your request and the decision only: it does not
+              show leave balances or types, and it does not change your attendance records.
+            </p>
+            <form id="leave-form" class="stack" novalidate>
+              <p id="leave-error" class="error" role="alert" hidden></p>
+              <p id="leave-ok" class="success" role="status" hidden></p>
+              <label>How much time?
+                <select name="portion">
+                  <option value="FULL_DAY">Full day(s)</option>
+                  <option value="FIRST_HALF">First half of a day</option>
+                  <option value="SECOND_HALF">Second half of a day</option>
+                  <option value="SHORT">Part of a day (short leave)</option>
+                </select>
+              </label>
+              <div class="row wrap">
+                <label><span id="leave-start-label">From</span> <input type="date" name="startDate" required /></label>
+                <label data-leave="range">To <input type="date" name="endDate" /></label>
+              </div>
+              <div class="row wrap" data-leave="times">
+                <label>Start time <input type="time" name="startTime" /></label>
+                <label>End time <input type="time" name="endTime" /></label>
+              </div>
+              <label>Reason (optional)
+                <textarea name="reason" rows="2" maxlength="500" aria-describedby="leave-reason-hint"></textarea>
+              </label>
+              <p id="leave-reason-hint" class="hint">Administrators can read it. Please do not include medical or other sensitive details.</p>
+              <p id="leave-tz" class="hint"></p>
+              <button type="submit" id="leave-submit">Send for approval</button>
+            </form>
+          </section>
+          <section class="card" aria-labelledby="leave-requests-heading">
+            <h2 id="leave-requests-heading">My leave requests</h2>
+            <p id="leave-status" class="hint" role="status" aria-live="polite"></p>
+            <p id="leave-list-error" class="error" role="alert" hidden></p>
+            <ul id="leave-list" class="list"></ul>
+          </section>
+        </div>
+
+        <div id="tab-tasks" role="tabpanel" aria-labelledby="tab-btn-tasks" class="stack" hidden>
+          <section class="card" aria-labelledby="tasks-heading">
+            <h2 id="tasks-heading">Task timer</h2>
+            <p class="muted">
+              Record time on the project tasks assigned to you. Timer time is separate from your attendance hours and is not a
+              productivity measure: it is simply how long the timer ran, including any idle time. It ends when you start a break or
+              clock out. Only one timer runs at a time.
+            </p>
+            <p id="tasks-status" class="hint" role="status" aria-live="polite"></p>
+            <p id="tasks-error" class="error" role="alert" hidden></p>
+            <div id="tasks-timer" class="stack" hidden>
+              <p id="tasks-attendance" class="hint" role="status" hidden></p>
+              <div id="tasks-running" class="stack" hidden>
+                <p><strong id="tasks-current"></strong></p>
+                <p class="timer" aria-live="off"><span id="tasks-elapsed"></span> <span id="tasks-since" class="muted"></span></p>
+                <div class="row wrap">
+                  <button type="button" id="tasks-pause" class="secondary">Pause</button>
+                  <button type="button" id="tasks-stop">Stop</button>
+                </div>
+              </div>
+              <div id="tasks-paused" class="row wrap" hidden>
+                <span id="tasks-paused-text"></span>
+                <button type="button" id="tasks-resume" class="mini">Resume</button>
+              </div>
+              <form id="tasks-start-form" class="stack">
+                <label>Task <select id="tasks-task" name="task"></select></label>
+                <p id="tasks-empty" class="hint" hidden></p>
+                <button type="submit" id="tasks-start">Start timer</button>
+              </form>
+            </div>
+          </section>
+          <section class="card" aria-labelledby="tasks-history-heading">
+            <h2 id="tasks-history-heading">My task time</h2>
+            <p id="tasks-total" class="hint"></p>
+            <ul id="tasks-history" class="list"></ul>
+          </section>
+        </div>
+
+        <div id="tab-websites" role="tabpanel" aria-labelledby="tab-btn-websites" class="stack" hidden>
+          <section class="card" aria-labelledby="web-heading">
+            <div class="row">
+              <h2 id="web-heading">Website tracking</h2>
+              <span id="web-state" class="state" role="status" aria-live="polite"></span>
+            </div>
+            <p id="web-status" class="hint" role="status"></p>
+            <p id="web-error" class="error" role="alert" hidden></p>
+            <div id="web-body" class="stack" hidden>
+              <ul id="web-reasons" class="hint"></ul>
+              <p id="web-policy" class="hint"></p>
+              <p class="muted">
+                This app reads nothing from your browsers. Website time is recorded only by the Insight Workfolio browser
+                extension, only if you connect it below, and only domain names.
+              </p>
+              <div class="row wrap">
+                <div><strong>Recorded</strong><ul id="web-collected" class="hint"></ul></div>
+                <div><strong>Never recorded</strong><ul id="web-never" class="hint"></ul></div>
+              </div>
+            </div>
+          </section>
+          <section id="web-notice" class="card" aria-labelledby="web-notice-title" hidden>
+            <h2 id="web-notice-title"></h2>
+            <ul id="web-notice-points"></ul>
+            <button type="button" id="web-ack">I have read this notice</button>
+          </section>
+          <section class="card" aria-labelledby="web-links-heading">
+            <h2 id="web-links-heading">Connected browsers</h2>
+            <ul id="web-links" class="list"></ul>
+            <button type="button" id="web-connect" class="secondary">Connect a browser</button>
+            <div id="web-pairing" hidden>
+              <p class="timer" aria-live="polite"><strong id="web-code"></strong></p>
+              <p id="web-code-help" class="hint"></p>
+            </div>
+          </section>
+          <section class="card" aria-labelledby="web-usage-heading">
+            <h2 id="web-usage-heading">My website activity</h2>
+            <form id="web-range" class="row wrap" novalidate>
+              <label>From <input type="date" name="from" /></label>
+              <label>To <input type="date" name="to" /></label>
+              <button type="submit" class="secondary">Show</button>
+            </form>
+            <p id="web-total" class="hint"></p>
+            <ul id="web-usage" class="list"></ul>
+          </section>
+        </div>
+
+        <div id="tab-screenshots" role="tabpanel" aria-labelledby="tab-btn-screenshots" class="stack" hidden>
+          <section class="card" aria-labelledby="myshots-heading">
+            <div class="row">
+              <h2 id="myshots-heading">My screenshots</h2>
+              <div class="pager">
+                <button type="button" id="myshots-prev" class="mini" aria-label="Newer screenshots">‹</button>
+                <span id="myshots-page"></span>
+                <button type="button" id="myshots-next" class="mini" aria-label="Older screenshots">›</button>
+              </div>
+            </div>
+            <p class="muted">
+              The screenshots of your main screen that this app took and your organization stored, newest first. Black areas are
+              privacy masks set by your organization, blacked out on this computer before saving. Nothing else is detected or hidden
+              automatically, so other personal information on your screen can appear. Administrators can see these screenshots too.
+              Each time a screenshot is shown here, the view is logged with your account.
+            </p>
+            <p id="myshots-status" class="hint" role="status" aria-live="polite"></p>
+            <p id="myshots-error" class="error" role="alert" hidden></p>
+            <ul id="myshots-list" class="shots" aria-label="Screenshots"></ul>
+          </section>
+          <dialog id="myshots-viewer" aria-labelledby="myshots-viewer-title">
+            <h2 id="myshots-viewer-title"></h2>
+            <p id="myshots-viewer-error" class="error" role="alert" hidden></p>
+            <img id="myshots-image" alt="" />
+            <p id="myshots-masks"></p>
+            <p class="hint">Confidential. This view was logged with your account.</p>
+            <button type="button" id="myshots-close" class="secondary">Close</button>
+          </dialog>
+        </div>
+
+        <div id="tab-settings" role="tabpanel" aria-labelledby="tab-btn-settings" class="stack" hidden>
+          <section class="card" aria-labelledby="settings-heading">
+            <h2 id="settings-heading">Settings</h2>
+            <p id="prefs-status" class="hint" role="status" hidden></p>
+            <p id="prefs-error" class="error" role="alert" hidden></p>
+            <div class="stack">
+              <div>
+                <label class="check"><input type="checkbox" id="pref-showSeconds" aria-describedby="pref-showSeconds-hint" /> <span id="pref-showSeconds-label">Show seconds in the menu bar</span></label>
+                <p id="pref-showSeconds-hint" class="hint">The menu bar shows how long you have been working or on your break. Turn this on to see seconds too.</p>
+              </div>
+              <div>
+                <label class="check"><input type="checkbox" id="pref-hideDockIcon" aria-describedby="pref-hideDockIcon-hint" /> <span id="pref-hideDockIcon-label">Hide the Dock icon (menu bar only)</span></label>
+                <p id="pref-hideDockIcon-hint" class="hint">Insight Workfolio then appears only in the menu bar at the top of the screen. Open this window from the menu bar icon.</p>
+              </div>
+              <div>
+                <label class="check"><input type="checkbox" id="pref-launchAtLogin" aria-describedby="pref-launchAtLogin-hint" /> <span id="pref-launchAtLogin-label">Open at login</span></label>
+                <p id="pref-launchAtLogin-hint" class="hint">Starts Insight Workfolio when you log in to this Mac. It does not clock you in: you still clock in yourself.</p>
+              </div>
+            </div>
+            <p id="close-hint" class="hint">
+              Closing this window keeps the app running in the menu bar. Quitting Insight Workfolio stops activity monitoring and
+              screenshots until you open it again. It does not clock you out: clock out first if your shift is over.
+            </p>
           </section>
         </div>
 

@@ -80,3 +80,5 @@ export async function clockedInSegments(db: DatabaseClient, employeeId: string, 
   }
   return out;
 }
+/** For `employee_profiles p JOIN users u`: account active and employment not ended. */
+export const ACTIVE_EMPLOYEE = "u.status = 'ACTIVE' AND p.employment_status <> 'TERMINATED'";

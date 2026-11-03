@@ -8,17 +8,71 @@
 | 2 | Schema + migrations, email/password auth, sessions, RBAC, employee management API, dashboard sign-in and employee admin, desktop sign-in, admin bootstrap CLI | **Done** |
 | 3 | Device registration (random installation ID), attendance state machine + API, desktop attendance UI with offline SQLite queue and sync, admin attendance overview | **Done** |
 | 4 | Configurable attendance policy, timesheet engine (daily/weekly, overtime, incomplete shifts), history with date ranges, correction request/approval workflow with audit trail, dashboard timesheets and corrections, desktop history and corrections, reliability hardening | **Done** |
-| 5 | Transparent activity monitoring on macOS (foreground app + idle, consent-gated, attendance-driven), offline activity queue and sync, activity API and dashboard page | **Done** |
+| 5 | Transparent activity monitoring on macOS (foreground app + idle, consent-gated, attendance-driven), offline activity queue and sync, activity API and dashboard page | **Done** (except: targeted native run of the 2026-10-19 automatic-switch idle fix not yet conclusive; see checklist item 8) |
 | 6 | Activity accuracy review (midpoint app switches, unobserved gaps, batched ingestion), server-controlled monitoring settings with history, server-hosted notice versions and consent history, approval-gated activity retention with dry run, activity reports (weekly, observed vs unobserved, freshness, warnings), dashboard Settings, native verification harness, Windows collector plan | **Partial** (native lock/sleep verification pending) |
 | 7 | Consent-gated screenshot engine on macOS (ScreenCaptureKit, primary display, WebP), durable local screenshot queue, screenshot policy and notice, metadata API with brokered upload and storage confirmation, storage adapter interface with dev-only local adapter and Microsoft Graph adapter scaffold, access log, approval-gated screenshot retention | **Partial** (Graph not verified against a tenant; lock/sleep capture checks need a person) |
 | 8 | Admin screenshot gallery with secure viewer and real counts, self-view policy, access audit actions, hardened image delivery, Graph adapter completion (site scope, certificate auth, QuickXorHash confirmation, recycle-bin vs permanent delete, throttling retry, `verify:graph`), retention run log, single-instance desktop, privacy safeguards review, master checklist | **Partial** (real Graph BLOCKED on credentials; lock/sleep native checks need a person) |
-| 9 | Real Graph verification once credentials exist; packaging and signing (macOS, Windows); auto-update decision; deployment plan; employee overview / exports | Next |
+| 9 | Production-readiness audit: local Git baseline and ignore rules, production config enforcement, API response headers, desktop file permissions, deployment/backup/hosting requirements. Still open: real Graph verification, signing, hosting, Turso, Windows | **Partial** (started 2026-10-19; external inputs below) |
 | 10 | Hardening, end-to-end testing, pilot readiness review | |
 
 Day 2 delivered most of the original Day 3 scope (auth, RBAC, dashboard sign-in) and the
 desktop sign-in from Day 4, so later days shift forward.
 
-## Day 9 prerequisites
+## Day 9 progress (2026-10-19)
+
+**Tracker:** item 8 (automatic foreground-switch idle overcount) stays **PARTIAL**: regression tests
+pass, `pnpm build` succeeded on 2026-10-19, the new-build `verify:native` passed 8/8 with none
+skipped. The exact automatic-switch + idle-threshold case is covered by deterministic tests only, not
+natively: the targeted runs gave INCONCLUSIVE twice and one FAIL caused by the harness accepting
+idle from before clock-in (docs/audit-report.md §5). Harness corrected 2026-10-27 (input after
+monitoring start required, otherwise INCONCLUSIVE); a new native run is still needed.
+
+**Done, with evidence:**
+- **Local Git:** none existed. `.gitignore` reviewed and fixed (its `data/*.db*` pattern was
+  anchored to the root and did not match `apps/api/data/dev.db`); added keys/certificates and
+  unanchored database and screenshot patterns. `git init -b main`; the 170 files from
+  `git add --dry-run` were reviewed and scanned for keys/tokens (none found), staged by explicit
+  list, and committed as `0534823`. No remote, nothing pushed.
+- **Production config:** the API now also refuses to boot in production with localhost or plain-http
+  `CORS_ORIGINS` (including the unset default) or a non-https `DASHBOARD_URL`. Checked by
+  `apps/api/test/env.test.ts` and by starting the built API with `NODE_ENV=production`: exit 1, the
+  five failing variables named, no values printed.
+- **API headers:** every response sends `Cache-Control: no-store` (desktop login/refresh bodies
+  carry tokens and were cacheable), `nosniff`, `no-referrer`, `X-Frame-Options: DENY`.
+  Screenshot image headers unchanged. Test in `health.e2e.test.ts`.
+- **Desktop files:** the queue database and its WAL/SHM files were 0644 (inside a 0700 folder);
+  now 0600 on open. Rust test `queue_files_are_owner_only`.
+- **Audit, no change needed:** argon2id passwords; HttpOnly SameSite=Strict cookies, Secure in
+  production; CSRF check on cookie requests; RBAC + ownership checks; zod validation with
+  whitelisting; 1 MB JSON / 10 MB screenshot body caps; login and screenshot rate limits; error
+  envelope without stack traces or query strings; atomic per-migration batches.
+- **Documented:** docs/deployment.md (runtime, single-instance limits, config checks, backups,
+  Bluehost checks to run, signing, Windows gaps).
+
+**Commands run:** `pnpm install --frozen-lockfile`, `pnpm typecheck`, `pnpm lint`, `pnpm build`,
+`pnpm test`: all exit 0 (shared 27, database 9, desktop TS 21, desktop Rust 41 + 1 ignored
+benchmark, API 88, dashboard smoke). `pnpm --filter @workfolio/api verify:graph`: BLOCKED (exit 2,
+nothing contacted).
+
+**Partial / limitations:** single API instance only (in-memory locks, rate limits, timers);
+desktop data not encrypted at rest; the new production checks have run in tests and a local boot,
+not on a real host.
+
+**Blocked, with the input needed:**
+- Microsoft Graph: tenant, Entra app with `Sites.Selected` + site grant, site ID, drive ID,
+  certificate or secret on the API host, then `verify:graph` (docs/onedrive.md).
+- Hosting: Bluehost VPS SSH access and the outputs listed in docs/deployment.md (OS, Node ≥ 24.7,
+  root, systemd), DNS names, approval to deploy.
+- Turso: database URL and scoped token; then a restore rehearsal.
+- Signing: Apple Developer ID + notarization credentials; Windows Authenticode certificate.
+- Windows: a Windows machine (collector, screenshots, single-instance, Credential Manager, packaging).
+- HR/Legal: notice wording; activity and screenshot retention periods.
+- Git remote: an approved repository.
+
+**Manual checks still required:** `verify:screenshots` with the Mac asleep for at least 60 s;
+`verify:graph` and an end-to-end staging run once Graph exists; a restore rehearsal once Turso exists.
+
+## Day 9 prerequisites (historical)
 
 1. **Approve Day 8.**
 2. **Microsoft 365 (still blocking real storage):** dedicated SharePoint site, Entra app with

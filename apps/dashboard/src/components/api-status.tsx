@@ -47,7 +47,7 @@ export function ApiStatus() {
   return (
     <div role="status" aria-live="polite" className="flex items-center gap-2 text-sm text-muted">
       <span className={`h-2.5 w-2.5 rounded-full ${dot}`} aria-hidden />
-      <span>{label}</span>
+      <span className="sr-only sm:not-sr-only">{label}</span>
       {(state === "offline" || state === "degraded") && (
         <button
           type="button"

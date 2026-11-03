@@ -15,11 +15,11 @@ const reason = z.string().trim().min(3, "Please give a reason (at least 3 charac
 export const createCorrectionSchema = z
   .discriminatedUnion("type", [
     // A whole shift was never recorded.
-    z.object({ type: z.literal("MISSING_CLOCK_IN"), clockInAt: instant, clockOutAt: instant, reason }),
+    z.strictObject({ type: z.literal("MISSING_CLOCK_IN"), clockInAt: instant, clockOutAt: instant, reason }),
     // The shift is still open (forgotten clock-out). An open break must be closed too.
-    z.object({ type: z.literal("MISSING_CLOCK_OUT"), sessionId: z.uuid(), clockOutAt: instant, breakEndedAt: instant.optional(), reason }),
-    z.object({ type: z.literal("BREAK_TIME"), sessionId: z.uuid(), breakId: z.uuid(), startedAt: instant, endedAt: instant, reason }),
-    z.object({ type: z.literal("ATTENDANCE_TIME"), sessionId: z.uuid(), clockInAt: instant.optional(), clockOutAt: instant.optional(), reason }),
+    z.strictObject({ type: z.literal("MISSING_CLOCK_OUT"), sessionId: z.uuid(), clockOutAt: instant, breakEndedAt: instant.optional(), reason }),
+    z.strictObject({ type: z.literal("BREAK_TIME"), sessionId: z.uuid(), breakId: z.uuid(), startedAt: instant, endedAt: instant, reason }),
+    z.strictObject({ type: z.literal("ATTENDANCE_TIME"), sessionId: z.uuid(), clockInAt: instant.optional(), clockOutAt: instant.optional(), reason }),
   ])
   .superRefine((v, ctx) => {
     const pair = (a?: string, b?: string, msg = "End must be after start") => a && b && a >= b && ctx.addIssue({ code: "custom", message: msg });
@@ -34,11 +34,14 @@ export type CreateCorrectionInput = z.input<typeof createCorrectionSchema>;
 export type CreateCorrection = z.infer<typeof createCorrectionSchema>;
 
 /** Approving and rejecting both require the reviewer's reason (kept in the audit trail). */
-export const reviewCorrectionSchema = z.object({ reason });
+export const reviewCorrectionSchema = z.strictObject({ reason });
 
 export const listCorrectionsQuerySchema = z.object({
   status: z.enum(CORRECTION_STATUSES).optional(),
   employeeId: z.uuid().optional(),
+  /** "true": only the caller's own profile (from the session), even for administrators. */
+  mine: z.enum(["true", "false"]).optional().transform((v) => v === "true"),
   page: z.coerce.number().int().min(1).max(10_000).default(1),
   pageSize: z.coerce.number().int().min(1).max(100).default(20),
-});
+})
+  .refine((q) => !(q.mine && q.employeeId), { message: "Use either mine or employeeId, not both", path: ["mine"] });

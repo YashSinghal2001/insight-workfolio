@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { ROLES } from "./roles.js";
+import { PLATFORM_ROLES, ROLES, type PlatformRole } from "./roles.js";
 
 export const roleSchema = z.enum(ROLES);
 
@@ -22,14 +22,19 @@ export const passwordSchema = z
   .max(PASSWORD_MAX, `Password must be at most ${PASSWORD_MAX} characters`)
   .refine((p) => p.trim().length >= PASSWORD_MIN, "Password must not be mostly whitespace");
 
-export const timezoneSchema = z.string().trim().refine((tz) => {
+/**
+ * The one time-zone rule (employee profiles, report schedules, gallery and audit views): an IANA
+ * zone the runtime's Intl accepts, in Area/Location form or "UTC". Legacy abbreviations and bare
+ * aliases ("EST", "GMT", "PST8PDT") are rejected.
+ */
+export const timeZoneSchema = z.string().trim().max(64).refine((tz) => {
   try {
     new Intl.DateTimeFormat("en", { timeZone: tz });
     return tz.includes("/") || tz === "UTC";
   } catch {
     return false;
   }
-}, "Must be an IANA timezone, e.g. Asia/Kolkata");
+}, "Must be an IANA time zone, e.g. Asia/Kolkata");
 
 export const employeeCodeSchema = z
   .string()
@@ -59,11 +64,11 @@ export const setupPasswordSchema = z.object({
 
 // ---- Employees ------------------------------------------------------------
 
-export const createEmployeeSchema = z.object({
+export const createEmployeeSchema = z.strictObject({
   email: emailSchema,
   fullName: fullNameSchema,
   employeeCode: employeeCodeSchema,
-  timezone: timezoneSchema.default(DEFAULT_TIMEZONE),
+  timezone: timeZoneSchema.default(DEFAULT_TIMEZONE),
 });
 export type CreateEmployeeInput = z.input<typeof createEmployeeSchema>;
 
@@ -72,7 +77,7 @@ export const updateEmployeeSchema = z
     email: emailSchema,
     fullName: fullNameSchema,
     employeeCode: employeeCodeSchema,
-    timezone: timezoneSchema,
+    timezone: timeZoneSchema,
     employmentStatus: z.enum(EMPLOYMENT_STATUSES),
   })
   .partial()
@@ -80,7 +85,7 @@ export const updateEmployeeSchema = z
   .refine((v) => Object.keys(v).length > 0, "At least one field is required");
 export type UpdateEmployeeInput = z.input<typeof updateEmployeeSchema>;
 
-export const updateAccountStatusSchema = z.object({ status: z.enum(ACCOUNT_STATUSES) });
+export const updateAccountStatusSchema = z.strictObject({ status: z.enum(ACCOUNT_STATUSES) });
 
 export const listEmployeesQuerySchema = z.object({
   q: z.string().trim().max(100).optional(),
@@ -88,3 +93,23 @@ export const listEmployeesQuerySchema = z.object({
   pageSize: z.coerce.number().int().min(1).max(100).default(20),
 });
 export type ListEmployeesQuery = z.infer<typeof listEmployeesQuerySchema>;
+
+/** Change a user's identity (Super Admin, Admin, Employee); the reason is kept in the role history. */
+export const changeRoleSchema = z.strictObject({ platformRole: z.enum(PLATFORM_ROLES), reason: z.string().trim().min(3).max(500) });
+
+export interface RoleUser {
+  id: string;
+  email: string;
+  platformRole: PlatformRole;
+  status: AccountStatus;
+  employee: { id: string; fullName: string; employeeCode: string } | null;
+}
+
+export interface RoleChange {
+  target: { id: string; email: string };
+  by: { id: string; email: string };
+  from: PlatformRole;
+  to: PlatformRole;
+  reason: string;
+  at: string;
+}

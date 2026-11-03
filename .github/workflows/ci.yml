@@ -1,0 +1,177 @@
+# CI for the private repo. No secrets, no deploys, no network to Microsoft/Turso/Render/Vercel.
+# Browser suites (headless Chrome at the macOS path + FFmpeg) run only on manual dispatch.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    name: Lint, typecheck, tests, dashboard smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4 # version from packageManager in package.json
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24 # engines: node >=24.7
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build:packages
+
+      # Desktop's own lint script also runs cargo clippy; that part is in the macOS job.
+      - name: Lint
+        run: |
+          pnpm -r --filter '!@workfolio/desktop' lint
+          pnpm --filter @workfolio/desktop exec eslint src test
+      - name: Typecheck
+        run: pnpm -r typecheck
+
+      - name: Test packages/shared
+        run: pnpm --filter @workfolio/shared test
+      - name: Test packages/database
+        run: pnpm --filter @workfolio/database test
+      - name: Test apps/api
+        run: pnpm --filter @workfolio/api test
+      - name: Test browser extension
+        run: pnpm --filter @workfolio/browser-extension test
+      - name: Test desktop (TypeScript only)
+        run: pnpm --filter @workfolio/desktop exec node --test
+
+      # Next 16.4 intermittently aborts the build with a SecurityFatalError nudge; one retry.
+      - name: Build dashboard
+        working-directory: apps/dashboard
+        env:
+          NEXT_PUBLIC_API_URL: http://localhost:4000 # next build refuses it unset (next.config.ts)
+        run: pnpm exec next build || pnpm exec next build
+      - name: Dashboard smoke
+        working-directory: apps/dashboard
+        run: node scripts/smoke.mjs
+
+  desktop-rust:
+    name: Desktop Rust (cargo test + clippy)
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/desktop/src-tauri
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build:packages
+      # tauri::generate_context! embeds frontendDist (apps/desktop/dist): it must exist to compile.
+      - run: pnpm --filter @workfolio/desktop build
+      - name: cargo clippy
+        run: cargo clippy --manifest-path apps/desktop/src-tauri/Cargo.toml -- -D warnings
+      - name: cargo test
+        run: cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml
+
+  browser-suites:
+    name: Browser suites (manual)
+    if: github.event_name == 'workflow_dispatch'
+    # verify-*.mjs hardcode /Applications/Google Chrome.app (preinstalled on GitHub macOS runners).
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: brew install ffmpeg # verify-masks and verify-timelapse need FFmpeg with libx264
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build:packages
+      - run: pnpm --filter @workfolio/api build
+      - name: Build dashboard
+        working-directory: apps/dashboard
+        env:
+          NEXT_PUBLIC_API_URL: http://localhost:4000 # next build refuses it unset (next.config.ts)
+        run: pnpm exec next build || pnpm exec next build
+      # Each suite runs even if an earlier one failed, so one run reports all of them.
+      - name: verify:web-app
+        if: ${{ !cancelled() }}
+        run: pnpm --filter @workfolio/dashboard verify:web-app
+      - name: verify:my-panel
+        if: ${{ !cancelled() }}
+        run: pnpm --filter @workfolio/dashboard verify:my-panel
+      - name: verify:gallery
+        if: ${{ !cancelled() }}
+        run: pnpm --filter @workfolio/dashboard verify:gallery
+      - name: verify:timelapse
+        if: ${{ !cancelled() }}
+        run: pnpm --filter @workfolio/dashboard verify:timelapse
+      - name: verify:masks
+        if: ${{ !cancelled() }}
+        run: pnpm --filter @workfolio/dashboard verify:masks
+      - name: verify:reports
+        if: ${{ !cancelled() }}
+        run: pnpm --filter @workfolio/dashboard verify:reports
+
+  # Windows desktop: real Windows Server, so the cfg(windows) native smoke tests (activity sampling,
+  # session-event thread, GDI capture in memory, EcoQoS opt-out) actually run here. MSVC toolchain.
+  windows-desktop:
+    name: Windows desktop (cargo test + clippy, unsigned NSIS test installer)
+    runs-on: windows-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4 # version from packageManager in package.json
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable # x86_64-pc-windows-msvc on windows-latest
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/desktop/src-tauri
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build:packages
+      # tauri::generate_context! embeds frontendDist (apps/desktop/dist): it must exist to compile.
+      - run: pnpm --filter @workfolio/desktop build
+      - name: cargo clippy
+        working-directory: apps/desktop/src-tauri
+        run: cargo clippy --all-targets -- -D warnings
+      - name: cargo test (includes the Windows native smoke tests)
+        working-directory: apps/desktop/src-tauri
+        run: cargo test
+      - name: Test desktop (TypeScript)
+        run: pnpm --filter @workfolio/desktop exec node --test
+      # Placeholder API on the reserved .invalid TLD (RFC 2606): it can never resolve, so this
+      # installer cannot talk to any real server. Unsigned (no WINDOWS_*/AZURE_* variables).
+      - name: Build UNSIGNED NSIS installer (TEST ARTIFACT ONLY, placeholder API URL, not for distribution)
+        env:
+          WORKFOLIO_API_URL: https://api.example.invalid
+          WORKFOLIO_DASHBOARD_URL: https://app.example.invalid
+        run: pnpm --filter @workfolio/desktop package -- --bundles nsis
+      - name: Upload unsigned NSIS test installer (TEST ARTIFACT ONLY)
+        uses: actions/upload-artifact@v4
+        with:
+          name: insight-workfolio-windows-nsis-UNSIGNED-TEST-ONLY
+          path: apps/desktop/src-tauri/target/release/bundle/nsis/*.exe
+          if-no-files-found: error
+          retention-days: 7

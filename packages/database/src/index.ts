@@ -19,7 +19,9 @@ export function createDatabase(config: DatabaseConfig): Client {
   if (config.url.startsWith("file:")) {
     mkdirSync(dirname(config.url.slice("file:".length)), { recursive: true });
   }
-  return createClient({ url: config.url, authToken: remote ? config.authToken : undefined });
+  // Local files: every pooled connection waits up to 5 s for another process's write lock (a PRAGMA
+  // would reach only one connection of the pool). Remote Turso has no file lock.
+  return createClient({ url: config.url, authToken: remote ? config.authToken : undefined, ...(remote ? {} : { timeout: 5000 }) });
 }
 
 /** Round-trips a trivial query; throws if the database is unreachable. Returns latency in ms. */
@@ -29,7 +31,12 @@ export async function pingDatabase(db: Client): Promise<number> {
   return Math.round(performance.now() - started);
 }
 
-export { MIGRATIONS, migrate } from "./migrations.js";
+export { MIGRATIONS, migrate, migrationStatus, schemaVersion, type MigrationStatus } from "./migrations.js";
+
+/** Whether this connection enforces foreign keys (the schema relies on them). */
+export async function foreignKeysEnforced(db: Client): Promise<boolean> {
+  return Number((await db.execute("SELECT foreign_keys FROM pragma_foreign_keys")).rows[0]?.foreign_keys) === 1;
+}
 
 /** True for SQLITE_CONSTRAINT_UNIQUE errors; `column` narrows to e.g. "users.email". */
 export function isUniqueViolation(err: unknown, column?: string): boolean {
@@ -38,7 +45,7 @@ export function isUniqueViolation(err: unknown, column?: string): boolean {
   return unique && (!column || (e?.message ?? "").includes(column));
 }
 
-const GUARDS = ["attendance_overlap", "attendance_immutable", "break_overlap", "break_open", "append_only", "already_reviewed", "activity_overlap", "activity_too_long", "screenshot_immutable", "screenshot_transition"] as const;
+const GUARDS = ["attendance_overlap", "attendance_immutable", "break_overlap", "break_open", "append_only", "already_reviewed", "activity_overlap", "activity_too_long", "screenshot_immutable", "screenshot_transition", "website_overlap", "unknown_notice"] as const;
 export type GuardViolation = (typeof GUARDS)[number];
 
 /** Name of the schema trigger guard (migrations 0002–0007) that rejected a write, if any. */

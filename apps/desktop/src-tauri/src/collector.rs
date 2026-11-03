@@ -2,7 +2,8 @@
 //! attendance state; this thread samples only while the mode is ACTIVE.
 
 use crate::activity::{platform, App, Config, Kind, Sample, Tracker};
-use crate::queue;
+use crate::session_events::{self, SessionState, Transition};
+use crate::{power, queue};
 use rusqlite::Connection;
 use serde::Serialize;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -21,12 +22,47 @@ pub struct CollectorStatus {
     pub current_app: Option<App>,
     pub idle: bool,
     pub locked: bool,
+    /// The Mac is going to sleep (shown only until wake; nothing is recorded meanwhile).
+    pub asleep: bool,
+    /// Another user's session is in front, or this user is logging out: nothing is recorded.
+    pub session_inactive: bool,
+    /// Seconds since the last keyboard/mouse input at the last sample (a counter only).
+    pub idle_seconds: Option<i64>,
+    /// The policy in force (from the server via `activity_configure`).
+    pub idle_threshold_seconds: i64,
+    pub sample_seconds: i64,
+    /// App Nap is turned off for this app while monitoring is on (see power.rs).
+    pub app_nap_prevented: bool,
     pub error: Option<String>,
     pub last_sample_ms: Option<i64>,
     /// Start of the current idle interval (idle is attributed from the last input).
     pub idle_since_ms: Option<i64>,
     /// Latest unobserved stretch while monitoring (sleep, suspended app, clock change): [start, end] ms.
     pub last_gap_ms: Option<(i64, i64)>,
+}
+
+impl CollectorStatus {
+    fn new(mode: &str, error: Option<String>) -> CollectorStatus {
+        let cfg = Config::new(15, 300);
+        CollectorStatus {
+            supported: platform::SUPPORTED,
+            mode: mode.into(),
+            collecting: false,
+            current_app: None,
+            idle: false,
+            locked: false,
+            asleep: false,
+            session_inactive: false,
+            idle_seconds: None,
+            idle_threshold_seconds: cfg.idle_threshold_ms / 1000,
+            sample_seconds: cfg.sample_ms / 1000,
+            app_nap_prevented: false,
+            error,
+            last_sample_ms: None,
+            idle_since_ms: None,
+            last_gap_ms: None,
+        }
+    }
 }
 
 struct State {
@@ -54,18 +90,7 @@ impl Collector {
                 mode: "STOPPED".into(),
                 scope: None,
                 tracker: Tracker::new(Config::new(15, 300)),
-                status: CollectorStatus {
-                    supported: platform::SUPPORTED,
-                    mode: "STOPPED".into(),
-                    collecting: false,
-                    current_app: None,
-                    idle: false,
-                    locked: false,
-                    error: None,
-                    last_sample_ms: None,
-                    idle_since_ms: None,
-                    last_gap_ms: None,
-                },
+                status: CollectorStatus::new("STOPPED", None),
             }),
             started: Instant::now(),
             wake: AtomicBool::new(false),
@@ -76,12 +101,16 @@ impl Collector {
     pub fn spawn(app: AppHandle) -> Arc<Collector> {
         let collector = Arc::new(Collector::new());
         let worker = collector.clone();
+        let transitions = session_events::subscribe();
         std::thread::Builder::new()
             .name("activity-collector".into())
             .spawn(move || {
                 let mut last = Instant::now();
                 loop {
                     std::thread::sleep(Duration::from_millis(250));
+                    for t in transitions.try_iter() {
+                        worker.on_transition(&app.state::<Mutex<Connection>>(), t, session_events::current());
+                    }
                     let period = worker.state.lock().map(|s| s.tracker.cfg.sample_ms).unwrap_or(15_000);
                     if worker.wake.swap(false, Ordering::SeqCst) || last.elapsed() >= Duration::from_millis(period as u64) {
                         last = Instant::now();
@@ -99,7 +128,34 @@ impl Collector {
             mono_ms: self.started.elapsed().as_millis() as i64,
             app: platform::frontmost(),
             idle_ms: platform::idle_ms(),
-            locked: platform::screen_locked(),
+            locked: !session_events::observable_now(),
+        }
+    }
+
+    /// A lock, sleep or session switch from macOS (session_events): attribution stops at the moment
+    /// it happened, not at the next sample. Unlock, wake or the session coming back takes a sample
+    /// right away (it is unobserved until the screen is actually unlocked and this session in front).
+    fn on_transition(&self, db: &Mutex<Connection>, t: Transition, session: SessionState) {
+        let Ok(mut st) = self.state.lock() else { return };
+        st.status.locked = session.locked;
+        st.status.asleep = session.asleep;
+        st.status.session_inactive = session.session_inactive;
+        if st.mode != "ACTIVE" {
+            return;
+        }
+        if !t.event.interrupts() {
+            self.wake.store(true, Ordering::SeqCst);
+            return;
+        }
+        let closed = st.tracker.interrupt(t.at_ms);
+        st.status.current_app = None;
+        st.status.idle = false;
+        st.status.idle_since_ms = None;
+        if let (Some((user, device)), Ok(conn)) = (st.scope.clone(), db.lock()) {
+            // Everything is closed now: the open/held rows become uploadable, none stay open.
+            if let Err(e) = queue::activity_checkpoint(&conn, &user, &device, &closed, []) {
+                st.status.error = Some(format!("Could not save activity locally: {e}"));
+            }
         }
     }
 
@@ -119,15 +175,22 @@ impl Collector {
             return;
         }
         let Some((user, device)) = st.scope.clone() else { return };
+        let session = session_events::current();
+        if session.asleep {
+            return; // between WillSleep and the actual sleep: nothing to observe
+        }
         let sample = self.take_sample();
+        st.status.locked = platform::screen_locked() || session.locked;
+        st.status.session_inactive = !platform::on_console() || session.session_inactive;
+        st.status.asleep = false;
         Self::record(&mut st, db, &user, &device, sample);
     }
 
     /// One sample into the tracker and the local queue (split from `tick` so tests feed samples).
     fn record(st: &mut State, db: &Mutex<Connection>, user: &str, device: &str, sample: Sample) {
         let closed = st.tracker.sample(&sample);
-        st.status.current_app = sample.app.clone();
-        st.status.locked = sample.locked;
+        st.status.current_app = if sample.locked { None } else { sample.app.clone() };
+        st.status.idle_seconds = (sample.idle_ms >= 0 && !sample.locked).then_some(sample.idle_ms / 1000);
         st.status.idle = st.tracker.open.as_ref().is_some_and(|o| o.kind == Kind::Idle);
         st.status.idle_since_ms = st.tracker.open.as_ref().filter(|o| o.kind == Kind::Idle).map(|o| o.start_ms);
         st.status.last_gap_ms = st.tracker.last_gap;
@@ -147,6 +210,7 @@ impl Collector {
                 st.mode = "ERROR".into();
                 st.status.mode = st.mode.clone();
                 st.status.collecting = false;
+                st.status.app_nap_prevented = power::prevent_app_nap(false);
                 let closed = st.tracker.stop(sample.wall_ms);
                 if let Ok(conn) = db.lock() {
                     let _ = queue::activity_checkpoint(&conn, user, device, &closed, []);
@@ -167,15 +231,20 @@ impl Collector {
                 let _ = queue::activity_checkpoint(&conn, &user, &device, &closed, []);
             }
         }
+        st.status.idle_threshold_seconds = cfg.idle_threshold_ms / 1000;
+        st.status.sample_seconds = cfg.sample_ms / 1000;
         st.tracker.cfg = cfg;
         st.mode = mode;
         st.scope = scope;
         st.status.mode = st.mode.clone();
         st.status.collecting = st.mode == "ACTIVE" && platform::SUPPORTED && st.scope.is_some();
+        // Only while monitoring is on; released on break, clock-out, sign-out or error.
+        st.status.app_nap_prevented = power::prevent_app_nap(st.status.collecting);
         if !st.status.collecting {
             st.status.current_app = None;
             st.status.idle = false;
             st.status.idle_since_ms = None;
+            st.status.idle_seconds = None;
         }
         if st.status.collecting && (!was_active || scope_changed) {
             // First sample right away. Not sampled here: sync commands run on the main thread,
@@ -186,18 +255,7 @@ impl Collector {
     }
 
     pub fn status(&self) -> CollectorStatus {
-        self.state.lock().map(|s| s.status.clone()).unwrap_or(CollectorStatus {
-            supported: platform::SUPPORTED,
-            mode: "ERROR".into(),
-            collecting: false,
-            current_app: None,
-            idle: false,
-            locked: false,
-            error: Some("Collector unavailable".into()),
-            last_sample_ms: None,
-            idle_since_ms: None,
-            last_gap_ms: None,
-        })
+        self.state.lock().map(|s| s.status.clone()).unwrap_or_else(|_| CollectorStatus::new("ERROR", Some("Collector unavailable".into())))
     }
 }
 
@@ -276,6 +334,104 @@ mod tests {
         }
         assert_eq!(rows(&db, "PENDING").iter().map(|r| r.0.as_str()).collect::<Vec<_>>(), ["ACTIVE", "IDLE"]);
         assert!(rows(&db, "OPEN").is_empty());
+        crate::queue::tests::remove_db(&path);
+    }
+
+    /// FakeOs: transitions delivered the way session_events would, at chosen times.
+    fn deliver(c: &Collector, db: &Mutex<Connection>, session: &mut SessionState, event: session_events::Event, at_s: i64) {
+        let t = Transition { event, at_ms: at_s * 1000 };
+        *session = session.apply(t);
+        c.on_transition(db, t, *session);
+    }
+    fn feed(c: &Collector, db: &Mutex<Connection>, s: Sample) {
+        Collector::record(&mut c.state.lock().unwrap(), db, "user-1", "device-1", s);
+    }
+    fn locked(t: i64) -> Sample {
+        Sample { locked: true, ..sample(t, "loginwindow", 0) }
+    }
+
+    #[test]
+    fn lock_sleep_and_user_switch_record_nothing_and_close_at_the_transition() {
+        use session_events::Event::*;
+        let path = std::env::temp_dir().join(format!("wf-collector-test-{}.db", uuid::Uuid::new_v4()));
+        let db = Mutex::new(queue::open(&path).unwrap());
+        let c = Collector::new();
+        active(&c);
+        let mut os = SessionState::default();
+        let code = |a, b| ("ACTIVE".to_string(), Some("Code".to_string()), a, b);
+
+        // Lock at 20 s: the open interval is closed and uploadable at once, not at the next sample.
+        feed(&c, &db, sample(0, "Code", 0));
+        feed(&c, &db, sample(15, "Code", 0));
+        deliver(&c, &db, &mut os, Locked, 20);
+        assert_eq!(rows(&db, "PENDING"), vec![code(0, 20)]);
+        assert!(rows(&db, "OPEN").is_empty());
+        assert!(c.status().locked && c.status().current_app.is_none());
+        for t in (30..=90).step_by(15) {
+            feed(&c, &db, locked(t));
+        }
+        assert!(rows(&db, "OPEN").is_empty(), "no IDLE (or ACTIVE) while locked");
+        deliver(&c, &db, &mut os, Unlocked, 95);
+        assert!(c.wake.swap(false, Ordering::SeqCst), "unlock samples right away");
+        assert!(!c.status().locked);
+        feed(&c, &db, sample(95, "Code", 0));
+        assert_eq!(c.status().last_gap_ms, Some((20_000, 95_000)));
+
+        // Sleep at 100 s, wake an hour later (wall clock jumped, monotonic did not), locked at wake.
+        feed(&c, &db, sample(99, "Code", 0));
+        deliver(&c, &db, &mut os, WillSleep, 100);
+        assert!(c.status().asleep);
+        deliver(&c, &db, &mut os, DidWake, 3_700);
+        deliver(&c, &db, &mut os, Locked, 3_700);
+        feed(&c, &db, Sample { mono_ms: 115_000, ..locked(3_715) });
+        deliver(&c, &db, &mut os, Unlocked, 3_720);
+        feed(&c, &db, Sample { mono_ms: 120_000, ..sample(3_720, "Code", 1) });
+        assert_eq!(c.status().last_gap_ms, Some((100_000, 3_720_000)));
+
+        // Fast user switch at 3 730 s; the other user's input never counts.
+        deliver(&c, &db, &mut os, SessionResigned, 3_730);
+        assert!(c.status().session_inactive);
+        for t in (3_735..=4_000).step_by(15) {
+            feed(&c, &db, Sample { mono_ms: t * 1000 - 3_600_000, ..locked(t) });
+        }
+        deliver(&c, &db, &mut os, SessionActive, 4_005);
+        assert!(!c.status().session_inactive);
+        c.configure(&db, "STOPPED".into(), None, Config::new(15, 300));
+
+        assert_eq!(rows(&db, "PENDING"), vec![code(0, 20), code(95, 100), code(3_720, 3_730)]);
+        assert!(rows(&db, "OPEN").is_empty());
+        crate::queue::tests::remove_db(&path);
+    }
+
+    #[test]
+    fn transitions_while_not_monitoring_record_nothing_and_policy_is_applied() {
+        let path = std::env::temp_dir().join(format!("wf-collector-test-{}.db", uuid::Uuid::new_v4()));
+        let db = Mutex::new(queue::open(&path).unwrap());
+        let c = Collector::new();
+        let mut os = SessionState::default();
+        deliver(&c, &db, &mut os, session_events::Event::Locked, 10);
+        deliver(&c, &db, &mut os, session_events::Event::Unlocked, 11);
+        assert!(!c.wake.load(Ordering::SeqCst), "no sample while STOPPED");
+        assert!(rows(&db, "PENDING").is_empty() && rows(&db, "OPEN").is_empty());
+        let scope = Some(("user-1".to_string(), "device-1".to_string()));
+        let st = c.configure(&db, "PAUSED_BREAK".into(), scope, Config::new(5, 30));
+        assert_eq!((st.sample_seconds, st.idle_threshold_seconds), (5, 30), "server policy in force");
+        assert!(!st.app_nap_prevented, "App Nap opt-out only while monitoring is on");
+        assert_eq!(c.state.lock().unwrap().tracker.cfg.idle_threshold_ms, 30_000);
+        crate::queue::tests::remove_db(&path);
+    }
+
+    #[test]
+    fn a_deliberate_quit_closes_everything_so_nothing_is_reported_as_a_crash() {
+        let path = std::env::temp_dir().join(format!("wf-collector-test-{}.db", uuid::Uuid::new_v4()));
+        let db = Mutex::new(queue::open(&path).unwrap());
+        let c = Collector::new();
+        active(&c);
+        walk_away(&c, &db, 165);
+        // What RunEvent::Exit does (lib.rs).
+        c.configure(&db, "STOPPED".into(), None, Config::new(15, 300));
+        assert!(rows(&db, "OPEN").is_empty());
+        assert_eq!(queue::activity_recover(&db.lock().unwrap()).unwrap(), 0, "no 'closed unexpectedly' notice after Quit");
         crate::queue::tests::remove_db(&path);
     }
 

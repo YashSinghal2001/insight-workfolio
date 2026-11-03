@@ -8,7 +8,13 @@
     "build": "nest build",
     "start": "node dist/main.js",
     "admin:create": "node dist/cli/create-admin.js",
+    "db:migrate": "node dist/cli/migrate.js",
     "verify:graph": "node scripts/verify-graph.mjs",
+    "verify:onedrive": "node scripts/verify-onedrive.mjs",
+    "verify:google-drive": "node scripts/verify-google-drive.mjs",
+    "verify:turso": "node scripts/verify-turso.mjs",
+    "db:dump": "node scripts/db-dump.mjs",
+    "staging:suite": "node scripts/staging-suite.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "eslint src test",
     "test": "nest build && node --test"
@@ -28,7 +34,8 @@
     "pino-http": "11.0.0",
     "reflect-metadata": "0.2.2",
     "rxjs": "7.8.2",
-    "zod": "4.6.5"
+    "write-excel-file": "4.1.1",
+    "zod": "4.6.7"
   },
   "devDependencies": {
     "@nestjs/cli": "12.0.8",

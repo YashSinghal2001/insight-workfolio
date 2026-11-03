@@ -2,7 +2,8 @@
 
 import { useState } from "react";
 import Link from "next/link";
-import type { CorrectionRequest } from "@workfolio/shared";
+import type { CorrectionRequest, CorrectionValues } from "@workfolio/shared";
+import { StatusBadge, type Tone } from "@/components/kit";
 import { buttonClass, formatInZone, inputClass, secondaryButtonClass } from "@/components/ui";
 import { api, errorMessage } from "@/lib/api";
 
@@ -13,23 +14,21 @@ const TYPE = {
   BREAK_TIME: "Wrong break time",
 } as const;
 
-const STATUS = {
-  PENDING: "bg-amber-500/15 text-amber-800 dark:text-amber-300",
-  APPROVED: "bg-emerald-500/15 text-emerald-700 dark:text-emerald-300",
-  REJECTED: "bg-red-500/15 text-red-700 dark:text-red-300",
-} as const;
+const STATUS: Record<CorrectionRequest["status"], { label: string; tone: Tone }> = {
+  PENDING: { label: "Pending", tone: "warning" },
+  APPROVED: { label: "Approved", tone: "success" },
+  REJECTED: { label: "Rejected", tone: "danger" },
+};
 
 const label = (key: string) => key.replace(/At$/, "").replace(/([A-Z])/g, " $1").toLowerCase();
 
-type Values = { clockInAt?: string | null; clockOutAt?: string | null; breaks?: { startedAt: string; endedAt: string | null }[] } | null;
-
-function ValuesList({ values, tz }: { values: Values; tz: string }) {
+function ValuesList({ values, tz }: { values: CorrectionValues | null; tz: string }) {
   if (!values) return <span className="text-muted">No shift (added by this correction)</span>;
   return (
     <ul className="text-xs">
-      <li>Clock-in: {formatInZone(values.clockInAt ?? null, tz)}</li>
+      <li>Clock-in: {formatInZone(values.clockInAt, tz)}</li>
       <li>Clock-out: {values.clockOutAt ? formatInZone(values.clockOutAt, tz) : "open"}</li>
-      {values.breaks?.map((b, i) => (
+      {values.breaks.map((b, i) => (
         <li key={i}>Break: {formatInZone(b.startedAt, tz)} → {b.endedAt ? formatInZone(b.endedAt, tz) : "open"}</li>
       ))}
     </ul>
@@ -67,7 +66,7 @@ export function CorrectionCard({ request, currentUserId, onChanged }: { request:
           <span className="font-mono text-xs text-muted">{request.employee.employeeCode}</span>
           <span className="ml-2 font-medium">{TYPE[request.type]}</span>
         </div>
-        <span className={`rounded px-2 py-0.5 text-xs font-medium ${STATUS[request.status]}`}>{request.status.toLowerCase()}</span>
+        <StatusBadge tone={STATUS[request.status].tone}>{STATUS[request.status].label}</StatusBadge>
       </div>
 
       <dl className="mt-3 grid gap-x-4 gap-y-1 sm:grid-cols-[10rem_1fr]">
@@ -87,8 +86,8 @@ export function CorrectionCard({ request, currentUserId, onChanged }: { request:
 
       {request.applied && (
         <div className="mt-3 grid gap-3 rounded-md border border-border p-3 sm:grid-cols-2">
-          <div><div className="mb-1 text-xs font-medium text-muted uppercase">Before</div><ValuesList values={request.applied.original as Values} tz={tz} /></div>
-          <div><div className="mb-1 text-xs font-medium text-muted uppercase">After</div><ValuesList values={request.applied.corrected as Values} tz={tz} /></div>
+          <div><div className="mb-1 text-xs font-medium text-muted uppercase">Before</div><ValuesList values={request.applied.original} tz={tz} /></div>
+          <div><div className="mb-1 text-xs font-medium text-muted uppercase">After</div><ValuesList values={request.applied.corrected} tz={tz} /></div>
         </div>
       )}
 
@@ -100,6 +99,7 @@ export function CorrectionCard({ request, currentUserId, onChanged }: { request:
             <label className="flex flex-col gap-1">
               <span className="text-xs text-muted">Reason for your decision (kept in the audit trail)</span>
               <input value={reason} onChange={(e) => setReason(e.target.value)} maxLength={1000} className={inputClass} />
+              {reason.trim().length < 3 && <span className="text-xs text-muted">Enter at least 3 characters to approve or reject.</span>}
             </label>
             {error && <p role="alert" className="text-xs text-red-700 dark:text-red-300">{error}</p>}
             <div className="flex gap-2">

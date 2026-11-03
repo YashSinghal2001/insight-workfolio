@@ -26,7 +26,7 @@ export class DevicesController {
   @Post(":id/revoke")
   @HttpCode(200)
   @RequirePermission("devices:manage")
-  revoke(@Param("id", new ParseUUIDPipe({ version: "4" })) id: string) {
-    return this.devices.revoke(id);
+  revoke(@CurrentUser() admin: AuthContext, @Param("id", new ParseUUIDPipe({ version: "4" })) id: string) {
+    return this.devices.revoke(admin, id);
   }
 }

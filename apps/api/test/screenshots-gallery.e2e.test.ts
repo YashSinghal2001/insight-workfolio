@@ -162,6 +162,11 @@ describe("gallery", () => {
     assert.deepEqual(mine.body.items[1].id, ids[4]);
     assert.deepEqual(page2.body.items.map((i: { id: string }) => i.id), [ids[3], ids[2]], "second page continues without overlap");
     assert.equal(page2.body.items[0].employee.fullName.startsWith("Gallery"), true);
+    // AW-05: each item carries its employee's own zone, so two employees in different zones show local times.
+    await db.execute({ sql: "UPDATE employee_profiles SET timezone = 'America/New_York' WHERE id = ?", args: [b.id] });
+    const zones = await api(q(`&pageSize=60`), { cookie: admin });
+    const zoneOf = (id: string) => zones.body.items.find((i: { employee: { id: string } }) => i.employee.id === id).employee.timezone;
+    assert.deepEqual([zoneOf(a.id), zoneOf(b.id)], ["UTC", "America/New_York"]);
     assert.ok(!("storageKey" in page2.body.items[0]) && !JSON.stringify(page2.body).includes(STORAGE_DIR), "no storage keys or paths");
 
     const yesterday = iso(Date.now() - D).slice(0, 10);

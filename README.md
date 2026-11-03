@@ -46,7 +46,7 @@ Add employees from the dashboard; each gets a one-time setup link to deliver in 
 | `pnpm lint` | ESLint everywhere, plus `cargo clippy -D warnings` for the desktop |
 | `pnpm typecheck` | `tsc --noEmit` in every package |
 | `pnpm test` | Unit tests, API e2e tests, dashboard smoke test, `cargo test` |
-| `pnpm --filter @workfolio/desktop package` | Native installer via `tauri build` |
+| `WORKFOLIO_API_URL=https://api.example.com pnpm --filter @workfolio/desktop package` | Native release build for that API (https only; sets the CSP origin; see docs/deployment.md) |
 | `pnpm --filter @workfolio/api admin:create --email <e>` | Bootstrap the first admin (see [setup](docs/setup.md#first-admin)) |
 | `pnpm --filter @workfolio/desktop verify:native` | Guided macOS check of idle, lock, sleep, break and clock-out with real OS events |
 | `pnpm --filter @workfolio/desktop verify:screenshots` | Guided macOS check of real screenshot capture, upload, break, lock, sleep and clock-out |

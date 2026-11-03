@@ -11,10 +11,17 @@ export default function LoginPage() {
   const router = useRouter();
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
+  const [expired, setExpired] = useState(false);
 
   useEffect(() => {
-    if (auth.status === "authenticated") router.replace("/");
-  }, [auth.status, router]);
+    // Set by the layouts when a signed-in session ends (read once; no useSearchParams Suspense needed).
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- reading browser-only state once
+    setExpired(new URLSearchParams(window.location.search).get("expired") === "1");
+  }, []);
+
+  useEffect(() => {
+    if (auth.status === "authenticated") router.replace(auth.me.user.role === "ADMIN" ? "/" : "/my");
+  }, [auth, router]);
 
   async function onSubmit(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
@@ -36,8 +43,9 @@ export default function LoginPage() {
         <h1 className="mb-1 text-center text-2xl font-semibold">
           Insight <span className="text-brand">Workfolio</span>
         </h1>
-        <p className="mb-6 text-center text-sm text-muted">Sign in to the admin dashboard</p>
-        <form onSubmit={onSubmit} className="flex flex-col gap-4 rounded-lg border border-border bg-surface p-6">
+        <p className="mb-6 text-center text-sm text-muted">Sign in to the admin dashboard or your employee workspace</p>
+        <form onSubmit={onSubmit} className="flex flex-col gap-4 rounded-xl border border-border bg-surface p-6 shadow-sm">
+          {expired && !error && <Notice tone="info">Your session has ended. Sign in again to continue.</Notice>}
           {error && <Notice tone="error">{error}</Notice>}
           <Field label="Email">
             <input name="email" type="email" autoComplete="username" required className={inputClass} />
@@ -50,7 +58,7 @@ export default function LoginPage() {
           </button>
         </form>
         <p className="mt-4 text-center text-xs text-muted">
-          New accounts are activated with a one-time setup link from your administrator.
+          Administrators and employees use the same sign-in. New accounts are activated with a one-time setup link from your administrator.
         </p>
       </div>
     </main>

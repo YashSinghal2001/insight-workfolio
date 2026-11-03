@@ -4,6 +4,7 @@ import { useState } from "react";
 import Link from "next/link";
 import type { CreateEmployeeResponse } from "@workfolio/shared";
 import { EmployeeForm, SetupLinkNotice } from "@/components/employee-form";
+import { PageHeader } from "@/components/kit";
 import { Card } from "@/components/ui";
 import { api, errorMessage } from "@/lib/api";
 
@@ -12,10 +13,7 @@ export default function NewEmployeePage() {
 
   return (
     <div className="mx-auto flex max-w-3xl flex-col gap-6">
-      <div>
-        <Link href="/employees" className="text-sm text-muted hover:underline">← Employees</Link>
-        <h1 className="mt-1 text-2xl font-semibold">Add employee</h1>
-      </div>
+      <PageHeader title="Add employee" breadcrumbs={[{ label: "Employees", href: "/employees" }, { label: "Add employee" }]} />
 
       {created ? (
         <>

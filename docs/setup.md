@@ -9,6 +9,7 @@
 | Rust / Cargo | 1.98.1 stable | via `rustup` |
 | macOS | Xcode Command Line Tools | `xcode-select --install` |
 | Windows | Microsoft C++ Build Tools + WebView2 | WebView2 ships with Windows 10 (1803+) / 11 |
+| FFmpeg (optional) | 8.1.2 (Homebrew) | Only for screenshot timelapse videos: needs libx264 (`brew install ffmpeg`). Without it the feature shows "unavailable"; see docs/timelapse.md |
 
 Tauri prerequisites reference: https://v2.tauri.app/start/prerequisites/
 
@@ -27,7 +28,7 @@ pnpm 11 enforces a minimum release age for dependencies; do not add
 | --- | --- |
 | `apps/api/.env` | Server secrets and config (copy from `.env.example`). Never committed. |
 | `apps/dashboard/.env.local` | `NEXT_PUBLIC_API_URL` only. |
-| `apps/desktop/.env` | `VITE_API_URL` only. |
+| `apps/desktop/.env` | `VITE_API_URL` only (dev; default `http://localhost:4000`). Release builds: `WORKFOLIO_API_URL`, see docs/deployment.md "Desktop API URL". |
 
 Without an `.env`, the API uses safe local defaults: port 4000, a local SQLite file at
 `apps/api/data/dev.db`, CORS for the local dashboard and Tauri origins, and an ephemeral
@@ -74,6 +75,7 @@ pnpm --filter @workfolio/api admin:create --email you@company.com
 - Idempotent: re-running for an admin who already set a password does nothing; re-running
   for one who hasn't issues a fresh link (the old one stops working).
 - If a different admin already exists, it refuses unless you pass `--additional`.
+- `--super-admin` creates the Super Admin (CEO) identity instead of Admin; see [roles.md](roles.md).
 - In production, run it once from the server against Turso (same env as the API) and open
   the link yourself. Never paste the link into chat, email or tickets.
 
@@ -95,6 +97,18 @@ Admins revoke a device on the employee page and see live status under **Attendan
 The desktop **History** tab shows daily/weekly hours and shifts; **Corrections** sends
 requests (times in the employee's time zone). Admins review them under **Corrections** and
 see per-employee hours under **Timesheets**.
+
+**Menu bar (macOS):** the app keeps a menu-bar item (clock icon) showing the elapsed time of the
+current shift or break, the status and what is being recorded, **Open Insight Workfolio** and
+**Quit Insight Workfolio**. Closing the window only hides it; the app keeps running in the menu
+bar. Quitting (menu bar or Cmd+Q) while clocked in asks first, because it stops activity and
+screenshot recording until the app is opened again. Preferences (`prefs.json`, owner-only, in the
+same Application Support folder): show seconds in the menu bar, hide the Dock icon (the app is then
+only in the menu bar), launch at login (off by default; registered with macOS as a login item,
+visible and removable in System Settings > General > Login Items; works only for the installed
+`.app`, and macOS may ask the employee to approve it there). Opening the app while it runs brings
+up the existing window (macOS reuses the running copy; a second copy started another way exits at
+once, see the single-instance lock).
 
 ## Activity monitoring (macOS)
 
@@ -145,7 +159,8 @@ curl -i http://localhost:4000/api/v1/ready
 
 ```bash
 pnpm lint && pnpm typecheck && pnpm build && pnpm test
-pnpm --filter @workfolio/desktop package     # native .app/.dmg (macOS) or .msi/.exe (Windows)
+WORKFOLIO_API_URL=https://api.example.com pnpm --filter @workfolio/desktop package  # release .app/.dmg (macOS) or .msi/.exe (Windows); https API only
+pnpm --filter @workfolio/desktop tauri build --debug --bundles app              # local debug bundle against http://localhost:4000
 ```
 
 The first Rust build takes 2–3 minutes. Desktop tests: `node --test` (TypeScript sync/session
@@ -184,6 +199,167 @@ register/upload endpoints, then checks thumbnails, filters, pagination, empty an
 full-size viewer, no-cache headers and the access log. Prints PASS / FAIL and the folder with page
 captures; everything else is deleted.
 
+### Dashboard timelapse verification (headless Chrome, real FFmpeg)
+
+```bash
+pnpm build && pnpm --filter @workfolio/dashboard verify:timelapse
+```
+
+Same setup as the gallery check (API on port 4000, dashboard on port 3101, temporary database,
+storage and video folder). It uploads 17 WebP frames that Chrome encodes from synthetic canvases.
+Then it creates, previews, downloads (checked with `ffprobe`), deletes, retries and cancels a
+timelapse, and exercises the large-video confirmation on a 601-frame session (one real upload,
+then stored-row copies of that file, because the register endpoint allows 120 requests per
+employee per 10 minutes). It also checks the insufficient, unavailable and error states, the
+390 px layout and the access log. It needs FFmpeg with libx264 on `PATH`.
+
+### Employee History and "My screenshots" verification (desktop front end in headless Chrome)
+
+```bash
+pnpm build && pnpm --filter @workfolio/desktop verify:my-screenshots
+```
+
+Starts a throwaway API on port 4000 and the desktop front end with Vite on port 1420, and drives it
+in headless Chrome without the Tauri shell (tokens in memory). Employees sign in and open the tabs.
+History: the draft timesheet CSV and Excel downloads (file name, contents, the workbook read back with openpyxl, cancel, own data only, reversed,
+oversized, empty and offline states), the open shift, weekly activity totals and per-app totals (own data only), the recorded
+vs calculated labels, a row per day, week navigation and the empty week, 390 px, the link to My
+screenshots and the offline error. My screenshots: own screenshots only, pagination, deleted state, mask count and labels, black masked
+pixels in the viewer, access-log rows, Escape and focus, 390 px, self-view off (server refusal
+shown), the empty state and the network-error state. Frames are synthetic.
+
+### Timesheet export in the packaged app (real Tauri bundle)
+
+```bash
+pnpm build && pnpm --filter @workfolio/desktop tauri build --debug --bundles app
+pnpm --filter @workfolio/desktop verify:export-packaged
+```
+
+Builds the app bundle (debug profile, so the test hook works; front end embedded, served from
+`tauri://localhost` with the app's CSP), starts a throwaway API on port 4000 with a synthetic
+employee, launches the bundle, signs in and downloads CSV, Excel and CSV again into the real
+`~/Downloads`, plus a non-export file the native handler must refuse. Checks the files (including
+the ` (1)` copy instead of an overwrite), then moves the files it created out of Downloads into the
+output folder. Quit the desktop app first. The app's saved dev sign-in is replaced and cleared;
+macOS may ask once to allow Keychain access. Needs `unzip`; Python `openpyxl` for the workbook check.
+
+### Tasks in the packaged app (real Tauri bundle, attended)
+
+```bash
+pnpm build && pnpm --filter @workfolio/desktop tauri build --debug --bundles app
+pnpm --filter @workfolio/desktop verify:tasks-packaged [--sleep]
+```
+
+Two real launches of the bundle with a quit in between, against a throwaway API on port 4000 that is
+stopped and restarted mid-run (server unreachable, then back). Signs in, registers, clocks in (the
+monitoring notice is not acknowledged, so no activity is recorded), runs, stops and breaks timers,
+recovers the running timer after the relaunch and after the outage, and clocks out. `--sleep` puts the
+Mac to sleep (`pmset sleepnow`) with a timer running; wake it after about a minute. Choose "Always
+Allow" when macOS asks about the app's Keychain items. Quit the desktop app first.
+
+### Website usage with the real browser extension (headless Chrome)
+
+```bash
+pnpm build && pnpm --filter @workfolio/desktop verify:websites
+```
+
+Loads `apps/browser-extension` unpacked into Google Chrome over the DevTools pipe
+(`Extensions.loadUnpacked`, needed since branded Chrome ignores `--load-extension`), and drives the
+dashboard (admin turns tracking on, adds category rules), the desktop front end (employee acknowledges
+the notice, gets a connection code), the extension popup (connects) and real browsing of local test
+sites under mapped hostnames. Checks that only domains are stored, an off-the-record window is not
+recorded, breaks and the policy switch stop recording, disconnecting works, and reports and
+categories are correct. To try the extension by hand: chrome://extensions → Developer mode → Load
+unpacked → `apps/browser-extension`. `BROWSER=brave` runs the same checks in Brave Browser.
+
+```bash
+pnpm build && (cd apps/desktop && pnpm tauri build --debug --bundles app)
+pnpm --filter @workfolio/desktop verify:websites-packaged [--sleep]
+```
+
+Drives the **packaged** desktop app (signs in as a seeded employee, acknowledges the website notice,
+shows a connection code) while the harness pairs the extension in Chrome and browses. Then quits and
+relaunches the app (session restored), stops and restarts the API (outage and recovery), and
+disconnects the browser from the app. `--sleep` puts the Mac to sleep with a site in front; wake it
+after about two minutes. The gap rule must keep the time asleep out. Attended: choose "Always Allow"
+on Keychain prompts. Quit the desktop app first.
+
+### Employee web panel (P2)
+
+```bash
+pnpm build && pnpm --filter @workfolio/dashboard verify:my-panel
+```
+
+Every `/my/*` page in the production build with real data from a throwaway API (two employees, a
+Super Admin, an IT Admin): isolation, admin redirects, self-view off, leave create/cancel, export,
+phone width, sign-out. See [employee-panel.md](employee-panel.md).
+
+### Leave requests verification (desktop front end and dashboard in headless Chrome)
+
+```bash
+pnpm build && pnpm --filter @workfolio/desktop verify:leave
+```
+
+Starts a throwaway API on port 4000, the desktop front end with Vite on port 1420 and the dashboard
+production build on port 3102. An employee requests full-day, short and half-day leave (loading,
+empty, invalid, overlap, success, cancel and offline states, own requests only). An admin approves
+with a note, rejects without one, sees the history and the empty state; then the employee sees the
+decision; finally the dashboard error state with the API stopped. Synthetic people only.
+
+### Project and task time verification (desktop front end and dashboard in headless Chrome)
+
+```bash
+pnpm build && pnpm --filter @workfolio/desktop verify:tasks
+```
+
+Starts a throwaway API on port 4000, the desktop front end with Vite on port 1420 and the dashboard
+production build on port 3102. An admin creates, renames and archives projects, adds tasks and
+assigns an employee; the employee sees only assigned active tasks, starts, pauses, resumes and stops
+a timer, sees it again after a fresh sign-in, sees a break end it, and gets a clear offline error;
+the admin summary is checked against the stored entries and the attendance worked time. Synthetic
+people only; attendance actions go through the API.
+
+### Email reports verification (dashboard in headless Chrome, mock provider)
+
+```bash
+pnpm build && pnpm --filter @workfolio/dashboard verify:reports
+```
+
+Starts a throwaway API on port 4000 with `REPORT_MAIL_PROVIDER=mock` (messages stay in that
+process's memory; nothing is emailed) and the dashboard production build on port 3102. An admin
+creates reports, sees only eligible recipients, previews (attendance figures, no leave reason or
+addresses), runs one (shown as "Mock only: not emailed"), re-runs (no second message), sees a
+provider failure and pauses a report; then the error state with the API stopped.
+
+### Dashboard privacy-mask verification (headless Chrome, real FFmpeg)
+
+```bash
+pnpm build && pnpm --filter @workfolio/dashboard verify:masks
+```
+
+Same setup as the timelapse check, with the dashboard on port 3102. It enters two masks in the
+screenshot settings and saves them. It then checks that a mask outside the screen is refused, and
+that the page fits 390 px. Next it uploads synthetic WebP frames with the masks blacked out, the
+way the agent does it, and checks that a frame without masks is refused. Finally it checks the
+gallery count, the viewer pixels and a real H.264 timelapse (black inside both masks). The agent's
+own masking is covered by `cargo test`, not by this script.
+
+### Automatic foreground switch while idle (macOS)
+
+```bash
+pnpm build && pnpm --filter @workfolio/desktop verify:native -- --only=autoswitch
+```
+
+Checks the Day 5 idle-overcount fix on the real Mac (~2 minutes). Click once in the Workfolio window
+and take your hands off; about 12 s later the harness asks macOS to open Calculator (`open -a
+Calculator`, or `--app=<name>`), a normal app activation with no keyboard or mouse events. Stay
+hands-off until told (idle threshold 30 s), then move the mouse. The harness reads the system idle
+counter through a debug-only command (`e2e_idle_ms`, absent from release builds) to prove nobody
+touched the Mac, prints the server's recorded timeline, and reports PASS, FAIL or INCONCLUSIVE
+(input during the hands-off part, no input after clock-in, or the other app never came to the
+front). The click must come after clock-in: idle carried over from before monitoring started is
+never accepted as the starting point. Exit code 2 = inconclusive.
+
 ### Native screenshot verification (macOS, real captures)
 
 ```bash
@@ -203,9 +379,17 @@ unless `--keep`. `--skip=lock,sleep` for an unattended run.
 
 - **Port already in use:** `lsof -iTCP:<port> -sTCP:LISTEN` and stop the process. Vite uses
   `strictPort`, so the desktop app fails instead of silently moving ports.
-- **Desktop shows "API unreachable":** the API must be running, its `CORS_ORIGINS` must include
-  the Tauri origin, and the API origin must be in `connect-src` in
-  `apps/desktop/src-tauri/tauri.conf.json`.
+- **`next build` stops with `SecurityFatalError: Your version of Next.js is affected by a known
+  security vulnerability`** (so `pnpm build` / `pnpm test` fail once): Next.js 16.4.0 stops the
+  first build to show an upgrade recommendation and says to retry; the retry builds normally
+  (seen 2026-10-29). Treat it as an advisory to review and upgrade Next.js in its own change
+  (`pnpm --filter @workfolio/dashboard outdated next`); do not script around it in CI.
+- **Desktop shows "API unreachable":** the API must be running and its `CORS_ORIGINS` must
+  include the Tauri origin. Dev and debug builds allow `http://localhost:4000` in `connect-src`
+  (`apps/desktop/src-tauri/tauri.conf.json`); release builds made with `pnpm package` get the
+  `WORKFOLIO_API_URL` origin instead (docs/deployment.md "Desktop API URL").
+- **Desktop sign-in says "This build of the app is misconfigured":** the compiled-in API URL was
+  rejected (e.g. plain http to a remote host, or http in a release build). Rebuild with a valid URL.
 - **Dashboard "API up, dependencies not ready":** `GET /api/v1/ready` is failing; check the API
   logs for the database error.
 - **Dashboard sign-in loops back to the login page:** the dashboard and API must be on the

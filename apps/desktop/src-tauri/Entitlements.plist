@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Hardened runtime, not sandboxed: no exceptions are needed.
+  - No com.apple.security.cs.* exceptions: the app loads no unsigned code and needs no JIT
+    (WebKit's JIT runs in Apple's own WebContent process).
+  - No App Sandbox (com.apple.security.app-sandbox): Developer ID distribution does not require it,
+    and turning it on would move the app's data into a container (existing queue, screenshots and
+    prefs would no longer be found) and needs a review of the activity collector under the sandbox.
+    com.apple.security.network.client only applies to sandboxed apps, so it is not listed.
+  - Screen Recording (ScreenCaptureKit) and Keychain need no entitlement; Screen Recording is a
+    TCC permission the employee grants in System Settings.
+-->
+<plist version="1.0">
+<dict/>
+</plist>

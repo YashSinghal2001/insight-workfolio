@@ -1,7 +1,8 @@
 import { Global, Inject, Logger, Module, type OnApplicationShutdown } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
-import { createDatabase, migrate, type DatabaseClient } from "@workfolio/database";
+import { createDatabase, type DatabaseClient } from "@workfolio/database";
 import type { Env } from "../config/env.js";
+import { isHostedDatabaseUrl, prepareDatabase } from "./prepare.js";
 
 export const DATABASE = Symbol("DATABASE");
 
@@ -11,11 +12,21 @@ export const DATABASE = Symbol("DATABASE");
     {
       provide: DATABASE,
       inject: [ConfigService],
-      // Migrations are additive and idempotent, so applying them at boot is safe.
+      // Local databases are migrated at boot; hosted (Turso) ones are only checked, and the API refuses to
+      // start if a migration is pending, unknown or edited (see prepareDatabase).
       useFactory: async (config: ConfigService<Env, true>) => {
-        const db = createDatabase({ url: config.get("DATABASE_URL"), authToken: config.get("DATABASE_AUTH_TOKEN") });
-        const applied = await migrate(db);
-        if (applied.length) new Logger("Database").log(`Applied migrations: ${applied.join(", ")}`);
+        const url = config.get("DATABASE_URL");
+        const token = config.get("DATABASE_AUTH_TOKEN");
+        const db = createDatabase({ url, authToken: token });
+        const log = new Logger("Database");
+        try {
+          await prepareDatabase(db, isHostedDatabaseUrl(url), (line) => log.log(line));
+        } catch (err) {
+          db.close();
+          // Messages name migrations, never values; strip the token anyway in case a driver echoes it.
+          const message = String((err as Error).message ?? err);
+          throw new Error(token ? message.split(token).join("[redacted]") : message);
+        }
         return db;
       },
     },

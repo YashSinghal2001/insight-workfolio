@@ -7,13 +7,20 @@
     "dev": "tauri dev",
     "dev:web": "vite",
     "build": "tsc && vite build",
-    "package": "tauri build",
+    "package": "node scripts/desktop-config.mjs",
     "typecheck": "tsc",
     "lint": "eslint src test && cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings",
     "test": "node --test && cargo test --manifest-path src-tauri/Cargo.toml",
     "tauri": "tauri",
     "verify:native": "node scripts/verify-native.mjs",
-    "verify:screenshots": "node scripts/verify-screenshots.mjs"
+    "verify:screenshots": "node scripts/verify-screenshots.mjs",
+    "verify:my-screenshots": "node scripts/verify-my-screenshots.mjs",
+    "verify:leave": "node scripts/verify-leave.mjs",
+    "verify:tasks": "node scripts/verify-tasks.mjs",
+    "verify:export-packaged": "node scripts/verify-export-packaged.mjs",
+    "verify:tasks-packaged": "node scripts/verify-tasks-packaged.mjs",
+    "verify:websites": "node scripts/verify-websites.mjs",
+    "verify:websites-packaged": "node scripts/verify-websites-packaged.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "2.12.3",

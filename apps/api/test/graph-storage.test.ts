@@ -160,7 +160,89 @@ test("graph adapter: downloads are bounded to the screenshot size cap (declared 
       return new Response(body, { status: 200, headers: declared ? { "content-length": String(big) } : {} });
     }) as typeof fetch;
     const s = new GraphStorage(cfg, fetchFn, noSleep);
-    await assert.rejects(s.get("emp/2026-10/x.webp"), (e: Error) => e instanceof StorageError && /larger than a screenshot/.test(e.message));
+    await assert.rejects(s.get("emp/2026-10/x.webp"), (e: Error) => e instanceof StorageError && /larger than allowed/.test(e.message));
     assert.ok(pulled <= SCREENSHOT_LIMITS.maxBytes + 2 * 1024 * 1024, `stopped reading early (${declared ? "declared" : "streamed"}: ${pulled} bytes)`);
+  }
+});
+
+// ---- MOCKED Graph (fake fetch, no tenant): hardening ----------------------------------------------
+
+/** A fetch that never answers until its signal aborts (as real fetch does on AbortSignal.timeout). */
+const hang = (init?: RequestInit) =>
+  new Promise<Response>((_, reject) => {
+    const signal = init?.signal;
+    assert.ok(signal, "every request carries an abort signal");
+    signal.addEventListener("abort", () => reject(signal.reason));
+  });
+
+test("MOCKED graph adapter: token and Graph requests time out as StorageErrors", async () => {
+  const tokenHangs = new GraphStorage(cfg, ((_url: string, init?: RequestInit) => hang(init)) as typeof fetch, noSleep, 20);
+  await assert.rejects(tokenHangs.stat("a.webp"), (e: Error) => e instanceof StorageError && e.message === "Microsoft identity platform token request failed (timed out)");
+
+  const graphHangs = new GraphStorage(cfg, (async (url: string, init?: RequestInit) => {
+    if (String(url).startsWith("https://login.microsoftonline.com/")) return Response.json({ access_token: "t", expires_in: 3600 });
+    return hang(init);
+  }) as typeof fetch, noSleep, 20);
+  await assert.rejects(graphHangs.put("a.webp", new Uint8Array([1])), (e: Error) => e instanceof StorageError && e.message === "Microsoft Graph upload failed (timed out)");
+
+  // Headers arrive, then the body stalls: the same timeout aborts the download mid-stream.
+  const bodyStalls = new GraphStorage(cfg, (async (url: string, init?: RequestInit) => {
+    if (String(url).startsWith("https://login.microsoftonline.com/")) return Response.json({ access_token: "t", expires_in: 3600 });
+    const body = new ReadableStream<Uint8Array>({
+      start(c) {
+        c.enqueue(new Uint8Array([1]));
+        init!.signal!.addEventListener("abort", () => c.error(init!.signal!.reason));
+      },
+    });
+    return new Response(body, { status: 200 });
+  }) as typeof fetch, noSleep, 20);
+  await assert.rejects(bodyStalls.get("a.webp"), (e: Error) => e instanceof StorageError && e.message === "Microsoft Graph download failed (timed out)");
+});
+
+test("MOCKED graph adapter: a 401 is retried once with a fresh token, then reported", async () => {
+  const g = fakeGraph();
+  let rejectNext = 1;
+  const fetchFn = (async (url: string, init?: RequestInit) => {
+    if (!String(url).startsWith("https://login.microsoftonline.com/") && rejectNext-- > 0) return Response.json({ error: { code: "InvalidAuthenticationToken" } }, { status: 401 });
+    return g.fetchFn(url, init);
+  }) as typeof fetch;
+  const s = new GraphStorage(cfg, fetchFn, noSleep);
+  assert.equal((await s.put("r.webp", new Uint8Array([1, 2]))).size, 2, "recovers after re-authenticating");
+  assert.equal(g.tokens(), 2, "the cached token was dropped and a new one requested");
+  const put = g.calls.filter((c) => c.method === "PUT");
+  assert.deepEqual(put.map((c) => c.auth), ["Bearer token-2"], "the retry used the new token");
+
+  rejectNext = 5;
+  await assert.rejects(s.stat("r.webp"), (e: Error) => e instanceof StorageError && e.message === "Microsoft Graph lookup failed (HTTP 401, InvalidAuthenticationToken)");
+  assert.equal(g.tokens(), 3, "only one re-authentication per request");
+});
+
+test("MOCKED graph adapter: a body that is not JSON is a StorageError (the API answers 502, not 500)", async () => {
+  const html = new GraphStorage(cfg, (async (url: string) => {
+    if (String(url).startsWith("https://login.microsoftonline.com/")) return Response.json({ access_token: "t", expires_in: 3600 });
+    return new Response("<html>proxy error</html>", { status: 200, headers: { "content-type": "text/html" } });
+  }) as typeof fetch, noSleep);
+  for (const [op, call] of [["upload", () => html.put("j.webp", new Uint8Array([1]))], ["lookup", () => html.stat("j.webp")], ["site lookup", () => html.driveBelongsToSite()]] as const) {
+    await assert.rejects(call(), (e: Error) => e instanceof StorageError && e.message === `Microsoft Graph ${op} failed (invalid response)`, op);
+  }
+  const badToken = new GraphStorage(cfg, (async () => new Response("not json", { status: 200 })) as typeof fetch, noSleep);
+  await assert.rejects(badToken.stat("j.webp"), (e: Error) => e instanceof StorageError && e.message === "Microsoft identity platform token request failed (invalid response)");
+});
+
+test("local dev storage: root forced to 0700 even if it existed; download cap is a parameter", async () => {
+  const { LocalDevStorage } = await import("../dist/screenshots/storage.js");
+  const { mkdtempSync, statSync, chmodSync, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const root = mkdtempSync(join(tmpdir(), "wf-local-storage-"));
+  try {
+    chmodSync(root, 0o755);
+    const s = new LocalDevStorage(root);
+    await s.put("emp/2026-10/a.webp", new Uint8Array([1, 2, 3]));
+    if (process.platform !== "win32") assert.equal(statSync(root).mode & 0o777, 0o700);
+    assert.equal((await s.get("emp/2026-10/a.webp")).length, 3);
+    await assert.rejects(s.get("emp/2026-10/a.webp", 2), (e: Error) => e instanceof StorageError && /larger than allowed/.test(e.message));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
   }
 });

@@ -5,21 +5,29 @@ import Link from "next/link";
 import { useParams } from "next/navigation";
 import {
   formatDuration,
+  timesheetFilename,
+  TIMESHEET_CSV_FORMAT,
   type AttendanceSession,
+  type ExportFormat,
   type CorrectionRequest,
   type Paginated,
   type TimesheetResponse,
 } from "@workfolio/shared";
 import { useAuth } from "@/components/auth-provider";
 import { CorrectionCard } from "@/components/correction-card";
+import { Button, ErrorState, PageHeader, SkeletonRows, SuccessNotice } from "@/components/kit";
 import { RangePicker, weekRange, type Range } from "@/components/range-picker";
 import { Card, formatInZone, Notice } from "@/components/ui";
 import { api, ApiRequestError, errorMessage } from "@/lib/api";
+import { downloadFile } from "../../_components/download";
+
+const SHIFT_LIMIT = 100;
+const CORRECTION_LIMIT = 50;
 
 export default function EmployeeTimesheetPage() {
   // useParams suspends for request-time params under cacheComponents.
   return (
-    <Suspense fallback={<p role="status" className="text-sm text-muted">Loading…</p>}>
+    <Suspense fallback={<SkeletonRows label="timesheet" />}>
       <EmployeeTimesheet />
     </Suspense>
   );
@@ -38,8 +46,11 @@ function EmployeeTimesheet() {
   const { auth } = useAuth();
   const [range, setRange] = useState<Range>(() => weekRange());
   const [sheet, setSheet] = useState<TimesheetResponse | null>(null);
-  const [shifts, setShifts] = useState<AttendanceSession[] | null>(null);
-  const [corrections, setCorrections] = useState<CorrectionRequest[] | null>(null);
+  const [shifts, setShifts] = useState<Paginated<AttendanceSession> | null>(null);
+  const [corrections, setCorrections] = useState<Paginated<CorrectionRequest> | null>(null);
+  const [exporting, setExporting] = useState<ExportFormat | null>(null);
+  const [exportError, setExportError] = useState<string | null>(null);
+  const [ok, setOk] = useState<string | null>(null);
   const [error, setError] = useState<{ status?: number; message: string } | null>(null);
 
   const load = useCallback(async () => {
@@ -47,12 +58,12 @@ function EmployeeTimesheet() {
       const q = `employeeId=${id}&from=${range.from}&to=${range.to}`;
       const [t, h, c] = await Promise.all([
         api<TimesheetResponse>(`/attendance/timesheet?${q}`),
-        api<Paginated<AttendanceSession>>(`/attendance/history?${q}&pageSize=100`),
-        api<Paginated<CorrectionRequest>>(`/attendance/corrections?employeeId=${id}&pageSize=50`),
+        api<Paginated<AttendanceSession>>(`/attendance/history?${q}&pageSize=${SHIFT_LIMIT}`),
+        api<Paginated<CorrectionRequest>>(`/attendance/corrections?employeeId=${id}&pageSize=${CORRECTION_LIMIT}`),
       ]);
       setSheet(t);
-      setShifts(h.items);
-      setCorrections(c.items);
+      setShifts(h);
+      setCorrections(c);
       setError(null);
     } catch (err) {
       setError({ status: err instanceof ApiRequestError ? err.status : undefined, message: errorMessage(err) });
@@ -66,29 +77,64 @@ function EmployeeTimesheet() {
 
   if (error) {
     return (
-      <div className="mx-auto max-w-3xl">
-        <Notice tone="error">{error.status === 404 || error.status === 400 ? "Employee not found." : error.message}</Notice>
-        <Link href="/timesheets" className="mt-4 inline-block text-sm text-brand underline">Back to timesheets</Link>
+      <div className="mx-auto flex max-w-3xl flex-col gap-4">
+        <PageHeader title="Timesheet" breadcrumbs={[{ label: "Timesheets", href: "/timesheets" }, { label: "Timesheet" }]} />
+        <ErrorState
+          title={error.status === 404 ? "Employee not found" : "Could not load this timesheet"}
+          message={error.status === 404 ? "No employee has this ID. They may have been removed, or the link is wrong." : error.message}
+          onRetry={error.status === 404 ? undefined : () => void load()}
+        />
+        <Link href="/timesheets" className="text-sm text-brand underline">Back to timesheets</Link>
       </div>
     );
   }
-  if (!sheet || !shifts || !corrections || auth.status !== "authenticated") return <p role="status" className="text-sm text-muted">Loading…</p>;
+  if (!sheet || !shifts || !corrections || auth.status !== "authenticated") return <SkeletonRows label="timesheet" />;
+
+  async function exportOne(format: ExportFormat) {
+    setExporting(format);
+    setExportError(null);
+    try {
+      const rows = await downloadFile(
+        `/attendance/export?employeeId=${id}&from=${range.from}&to=${range.to}&format=${format}`,
+        timesheetFilename(sheet!.employee.employeeCode, range.from, range.to, format),
+      );
+      setOk(`Downloaded the ${format.toUpperCase()} draft${rows === null ? "" : ` (${rows} shift row(s))`}.`);
+    } catch (err) {
+      setExportError(errorMessage(err));
+    } finally {
+      setExporting(null);
+    }
+  }
 
   const tz = sheet.timeZone;
   const scheduled = formatDuration(sheet.policy.scheduledDailyMinutes * 60_000);
 
   return (
     <div className="mx-auto flex max-w-6xl flex-col gap-6">
-      <div>
-        <Link href="/timesheets" className="text-sm text-muted hover:underline">← Timesheets</Link>
-        <h1 className="mt-1 text-2xl font-semibold">{sheet.employee.fullName}</h1>
-        <p className="mt-1 text-sm text-muted">
-          {sheet.employee.employeeCode} · times in {tz} · scheduled day {scheduled} · weeks start{" "}
-          {["", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"][sheet.policy.weekStartsOn]}
-        </p>
-      </div>
+      <PageHeader
+        title={sheet.employee.fullName}
+        breadcrumbs={[{ label: "Timesheets", href: "/timesheets" }, { label: sheet.employee.fullName }]}
+        description={
+          <>
+            {sheet.employee.employeeCode} · times in {tz} · scheduled day {scheduled} · weeks start{" "}
+            {["", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"][sheet.policy.weekStartsOn]} ·{" "}
+            <Link href={`/employees/${id}`} className="text-brand underline">Employee profile</Link>
+          </>
+        }
+        actions={
+          <>
+            <Button variant="secondary" pending={exporting === "csv"} pendingLabel="Preparing…" disabled={!!exporting} onClick={() => void exportOne("csv")}>Export CSV</Button>
+            <Button variant="secondary" pending={exporting === "xlsx"} pendingLabel="Preparing…" disabled={!!exporting} onClick={() => void exportOne("xlsx")}>Export XLSX</Button>
+          </>
+        }
+      />
+      <p className="-mt-4 text-xs text-muted">
+        Exports cover the selected range (at most 92 days) in draft format <span className="font-mono">{TIMESHEET_CSV_FORMAT}</span>, not approved for payroll.
+      </p>
+      {exportError && <Notice tone="error">{exportError}</Notice>}
+      <SuccessNotice message={ok} onDismiss={() => setOk(null)} />
 
-      <RangePicker value={range} onChange={(r) => (setSheet(null), setRange(r))} />
+      <RangePicker value={range} maxDays={92} timeZone={tz} onChange={(r) => (setSheet(null), setRange(r))} />
 
       {sheet.totals.incompleteDays > 0 && (
         <Notice tone="warning">
@@ -101,7 +147,8 @@ function EmployeeTimesheet() {
         {sheet.weeks.length === 0 ? (
           <p className="text-sm text-muted">No shifts in this range.</p>
         ) : (
-          <table className="w-full text-left text-sm tabular-nums">
+          <div className="overflow-x-auto">
+          <table className="w-full min-w-[420px] text-left text-sm tabular-nums" aria-label="Weekly totals">
             <thead className="text-xs text-muted uppercase">
               <tr><th className="py-2 font-medium">Week of</th><th className="font-medium">Days</th><th className="font-medium">Worked</th><th className="font-medium">Breaks</th><th className="font-medium">Overtime</th></tr>
             </thead>
@@ -118,6 +165,7 @@ function EmployeeTimesheet() {
               </tr>
             </tbody>
           </table>
+          </div>
         )}
       </Card>
 
@@ -155,11 +203,14 @@ function EmployeeTimesheet() {
       </Card>
 
       <Card title="Shifts and breaks">
-        {shifts.length === 0 ? (
+        {shifts.total > shifts.items.length && (
+          <p className="mb-2 text-xs text-muted">Showing the {shifts.items.length} most recent of {shifts.total} shifts in this range. Narrow the range to see the others.</p>
+        )}
+        {shifts.items.length === 0 ? (
           <p className="text-sm text-muted">No shifts in this range.</p>
         ) : (
           <ul className="divide-y divide-border text-sm">
-            {shifts.map((s) => (
+            {shifts.items.map((s) => (
               <li key={s.id} className="py-2">
                 <span className="font-medium">{formatInZone(s.clockInAt, tz)} → {s.clockOutAt ? time(s.clockOutAt, tz) : "open"}</span>
                 {s.corrected && <Tag>corrected</Tag>}
@@ -176,10 +227,13 @@ function EmployeeTimesheet() {
 
       <section className="flex flex-col gap-3">
         <h2 className="text-lg font-semibold">Correction history</h2>
-        {corrections.length === 0 ? (
+        {corrections.total > corrections.items.length && (
+          <p className="text-xs text-muted">Showing the {corrections.items.length} most recent of {corrections.total} requests. <Link href="/corrections" className="text-brand underline">All corrections</Link></p>
+        )}
+        {corrections.items.length === 0 ? (
           <p className="text-sm text-muted">No correction requests.</p>
         ) : (
-          corrections.map((c) => (
+          corrections.items.map((c) => (
             <CorrectionCard key={c.id} request={c} currentUserId={auth.me.user.id} onChanged={() => void load()} />
           ))
         )}

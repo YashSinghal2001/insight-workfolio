@@ -87,7 +87,7 @@ describe("consent and policy", () => {
   test("activity is refused until the current monitoring notice is acknowledged, and never accepted from before it", async () => {
     const e = await employee({ consent: false });
     const me = await api("/activity/me", { bearer: e.bearer });
-    assert.deepEqual(me.body.policy, { enabled: true, sampleSeconds: 15, idleThresholdSeconds: 300 });
+    assert.deepEqual(me.body.policy, { enabled: true, sampleSeconds: 15, idleThresholdSeconds: 300, idleExcludedApps: [] });
     assert.deepEqual(me.body.consent, { noticeVersion: DEFAULT_NOTICE_VERSION, acknowledgedAt: null });
     assert.equal(me.body.notice.version, DEFAULT_NOTICE_VERSION);
     assert.equal(me.body.notice.points.length, 5, "notice text is served by the API");
@@ -188,7 +188,7 @@ describe("activity ingestion", () => {
     assert.equal((await upload(e, iv, iso(Date.now()), randomUUID())).status, 403);
     const dev = await api("/devices/me", { bearer: e.bearer, device: e.device });
     await api(`/devices/${dev.body.device.id}/revoke`, { method: "POST", cookie: admin });
-    assert.equal((await upload(e, iv)).status, 403);
+    assert.equal((await upload(e, iv)).status, 401, "the device's session is revoked with it (API-08)");
   });
 
   test("validation: no window titles/URLs/extra fields, bounded batches and ranges", async () => {

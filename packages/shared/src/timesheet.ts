@@ -55,6 +55,15 @@ export function toZonedLocal(instant: string | number, timeZone: string): string
   return `${localDate(instant, timeZone)}T${time}`;
 }
 
+/** UTC instant to ISO 8601 local time with its offset in `timeZone`, e.g. "2026-10-28T09:00:00+05:30". */
+export function zonedIso(instant: string | number, timeZone: string): string {
+  const ms = typeof instant === "number" ? instant : Date.parse(instant);
+  const off = offsetMs(ms, timeZone);
+  const abs = Math.abs(off) / 60_000;
+  const sign = off < 0 ? "-" : "+";
+  return `${new Date(Math.floor(ms / 1000) * 1000 + off).toISOString().slice(0, 19)}${sign}${String(Math.floor(abs / 60)).padStart(2, "0")}:${String(abs % 60).padStart(2, "0")}`;
+}
+
 /** Calendar arithmetic on YYYY-MM-DD strings (no time zone involved). */
 export function addDays(date: string, days: number): string {
   return new Date(Date.parse(`${date}T00:00:00Z`) + days * DAY_MS).toISOString().slice(0, 10);

@@ -1,0 +1,13 @@
+{
+  "manifest_version": 3,
+  "name": "Insight Workfolio – website time (domain names only)",
+  "version": "0.1.0",
+  "description": "Records the domain name of the website in front, and for how long, only while your organization's website tracking is on, you have acknowledged its notice and you are clocked in. Never paths, searches, titles, page content or private windows.",
+  "permissions": ["tabs", "storage", "alarms", "idle"],
+  "host_permissions": ["http://localhost:4000/*"],
+  "optional_host_permissions": ["https://*/*", "http://localhost/*", "http://127.0.0.1/*"],
+  "incognito": "not_allowed",
+  "background": { "service_worker": "background.js", "type": "module" },
+  "icons": { "16": "icons/icon16.png", "32": "icons/icon32.png", "48": "icons/icon48.png", "128": "icons/icon128.png" },
+  "action": { "default_popup": "popup.html", "default_title": "Insight Workfolio website time", "default_icon": { "16": "icons/icon16.png", "32": "icons/icon32.png" } }
+}

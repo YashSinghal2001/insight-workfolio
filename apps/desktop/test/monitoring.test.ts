@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { AttendanceCurrent } from "@workfolio/shared";
-import { decideMonitoring, type MonitoringInputs } from "../src/monitoring.ts";
+import { appNapText, collectorStateText, decideMonitoring, type MonitoringInputs } from "../src/monitoring.ts";
 import { project, type QueuedEvent } from "../src/sync.ts";
 
 const OUT: AttendanceCurrent = { state: "CLOCKED_OUT", session: null, serverTime: "2026-10-12T08:00:00.000Z" };
@@ -45,4 +45,18 @@ test("never monitors without an active device, consent, a supported OS or verifi
   assert.equal(mode({ projection: null }), "PAUSED_OFFLINE_OR_UNVERIFIED", "unknown attendance");
   assert.equal(mode({ projection: clockedIn, unverified: true }), "PAUSED_OFFLINE_OR_UNVERIFIED");
   assert.equal(mode({ projection: clockedIn, collectorError: "Could not save activity locally" }), "ERROR");
+});
+
+test("employee-facing collector states: locked, asleep, session inactive, idle, App Nap", () => {
+  const clock = () => "09:30";
+  const on = { collecting: true, currentApp: { name: "Code" }, idle: false, idleSinceMs: null, locked: false };
+  assert.equal(collectorStateText(on, true, clock), "Code");
+  assert.equal(collectorStateText(on, false, clock), "—", "nothing shown while not recording");
+  assert.match(collectorStateText({ ...on, locked: true }, true, clock), /^Screen locked\. Nothing is recorded/);
+  assert.match(collectorStateText({ ...on, asleep: true }, true, clock), /^Mac asleep/);
+  assert.equal(collectorStateText({ ...on, locked: true, sessionInactive: true }, true, clock), "Session inactive (another user or logged out). Nothing is recorded.");
+  assert.equal(collectorStateText({ ...on, idle: true }, true, clock), "Idle since 09:30 (no keyboard or mouse input)");
+  assert.equal(collectorStateText({ ...on, idleSeconds: 150, idleThresholdSeconds: 300 }, true, clock), "Code (no input for 2 min; idle after 5 min)");
+  assert.match(appNapText({ collecting: true, appNapPrevented: true })!, /App Nap is off.*can still sleep/);
+  assert.equal(appNapText({ collecting: false, appNapPrevented: false }), null);
 });

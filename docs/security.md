@@ -10,6 +10,10 @@ privilege are product requirements, not afterthoughts.
 - **No clipboard collection.**
 - **No covert monitoring.** The desktop app is always visible (window or tray) while
   tracking, shows the current tracking state, and cannot hide itself from the employee.
+  On macOS the menu-bar item is always present while the app runs (it cannot be turned off; only
+  the Dock icon can be hidden, by the employee) and shows the state, elapsed time and what is
+  recorded. Closing the window keeps the app in the menu bar; quitting while clocked in asks
+  first and stops all recording.
 - **No monitoring outside clocked-in time.** Tracking starts on clock-in, stops on clock-out.
 - No hardcoded credentials anywhere in the repository.
 
@@ -27,6 +31,36 @@ privilege are product requirements, not afterthoughts.
 - Production config is validated at boot: Turso (`libsql://`) required, never local SQLite;
   remote DB requires a token; `JWT_SECRET` (≥ 32 chars) required. Validation errors print
   variable names, never values.
+- Hosted secrets live only in platform settings: Render env vars / Secret Files (`render.yaml` lists
+  them with `sync: false`, no values), Vercel project env, GitHub `staging` environment secrets.
+
+### Microsoft app containment (SEC-11)
+
+- **Never re-consent `Files.SelectedOperations.Selected` for the Insight Workfolio app.** The rejected
+  OneDrive-folder test left two dormant SharePoint Limited Access entries for the app on a personal
+  OneDrive; re-consenting that scope re-activates them at once, with no new grant (observed
+  2026-11-02), and exposes that OneDrive's site, drive and root metadata again.
+- The only intended permission is `Sites.Selected` with a grant on the dedicated storage site.
+  Before and after any consent or grant change, run an app-only probe and confirm 403 outside the target.
+- Details and the remaining manual cleanup: docs/onedrive.md.
+
+#### Microsoft app re-consent guard
+
+Before **any** new admin consent or permission change on the Insight Workfolio app registration:
+
+1. **Do not add or consent `Files.SelectedOperations.Selected`** (or any `Files.*` scope). It is the scope
+   that re-activates folder-level Limited Access; storage uses `Sites.Selected` on the dedicated site only.
+2. **Confirm the dormant Limited Access entries are gone first (ST-04):** the app (SharePoint principal
+   `i:0i.t|ms.sp.ext|<app-id>@<tenant-id>`) must be absent from the role assignments of the personal
+   OneDrive site **and** its `Documents` library. Decision doc §7 records their removal on 2026-11-02;
+   re-check read-only, because a re-created entry would re-activate on consent.
+3. Confirm the app registration lists only `Sites.Selected` (the unconsented `Files.SelectedOperations.Selected`
+   was removed, §7) and that Graph Explorer's delegated `Files.ReadWrite` is not consented.
+4. After the change, run the app-only probe with a fresh token: `roles` must be exactly `["Sites.Selected"]`
+   and every check outside the storage site must return 403.
+
+If any check fails, stop and do not consent. Source of record:
+[INSIGHT-WORKFOLIO-FINAL-STORAGE-DECISION.md §6–§7](../INSIGHT-WORKFOLIO-FINAL-STORAGE-DECISION.md).
 
 ## Secret-safe logging
 
@@ -70,6 +104,23 @@ Design details are in [architecture.md](architecture.md#authentication).
   Credential Manager) through Rust commands. The access token is in memory only. Nothing is
   in `localStorage`. The webview CSP limits `connect-src` to the API origin.
 
+### Sessions and account audit (P1, 2026-10-30)
+
+- Every account can list its own live sessions (`GET /auth/sessions`: client Web/Desktop, signed in,
+  last renewed, expires, current; never tokens or hashes), revoke one (`DELETE /auth/sessions/:id`,
+  someone else's id → 404), sign out its other sessions or sign out everywhere. Ownership comes from
+  the authenticated session. Admins cannot revoke other users' sessions individually (disabling the
+  account revokes all of them).
+- Append-only `account_audit` (migration 0015) records account creation, updates (field names
+  only), disable/enable (with sessions revoked), setup links, password set, session revocations,
+  refresh-token reuse, device registration and revocation, each in the same transaction as the
+  change. Metadata keys that could carry secrets are refused. Admins read it, together with the
+  other audit tables, at `GET /audit` and the dashboard **Audit** page (docs/audit.md).
+- Every route declares `@Public()` or `@RequirePermission(...)`; `test/route-permissions.test.ts`
+  fails on any new route without one and pins the public allow-list.
+- Disabling an administrator checks "another active admin / Super Admin remains" inside the write
+  itself (race-safe, like role changes).
+
 ## Role-based authorization (implemented Day 2)
 
 Roles: `ADMIN`, `EMPLOYEE` (`packages/shared/src/roles.ts`). Enforcement happens in the API
@@ -90,6 +141,14 @@ only; client-side checks exist for UX only.
 - Employee update rejects unknown fields (`role` can't be changed via `PATCH /employees/:id`).
 - Every screenshot image view is recorded in `screenshot_access_log` (who, which, when; append-only).
 - Planned: audit log for other admin actions (status changes, exports).
+- **Identities (2026-10-30, [roles.md](roles.md)):** Super Admin (CEO) and Admin (IT) both have the
+  `ADMIN` permission role, so they pass the same checks (tested on 16 admin routes). Role changes go
+  through `PATCH /roles/users/:id` only: no self-change (403), only a Super Admin grants or removes
+  Super Admin (403), never zero active admins or Super Admins (409, guarded inside the `UPDATE`, race
+  tested), every change in append-only `role_changes` with a reason. Disabling the last active admin
+  account is refused (409).
+- **Extension routes (F04):** `/websites/extension/*` are not session routes (`@Public()` to the session guard); the service accepts only an extension bearer token (random, stored
+  as SHA-256); pairing is the one route both `@Public()` and `@CsrfExempt()` (no cookie involved).
 
 ## API response hygiene
 
@@ -113,6 +172,34 @@ only; client-side checks exist for UX only.
   approved audit row, and refuses a second review of a request. Every request, decision and
   applied before/after value is kept (append-only), and logged (`Correction requested /
   approved and applied / rejected`, with IDs only).
+- **Timesheet export (F03, docs/timesheet-export.md):** CSV and XLSX from the same rows, same
+  permission, employee rule and 92-day range; built in memory, never stored. CSV text starting with a
+  formula character gets an apostrophe; XLSX text is stored as string cells (never formulas). The
+  packaged app's download handler accepts only `blob:` export file names saved directly in Downloads
+  (no overwrite) and logs no file names.
+- **Leave requests (F10, docs/leave-requests.md):** employees request leave only for themselves
+  (identity from the session; the body cannot name an employee); another employee's request is
+  404. Approve and reject need `leave:review` (admins) and are refused for the requester. Each
+  request is decided once and never deleted. Reasons are optional, visible only to the employee
+  and admins, and never logged. Leave never changes attendance.
+- **Project and task time (F11, docs/project-time.md):** projects, tasks and assignments are
+  admin-only (`projects:manage`), checked by the API; every change is kept in `project_audit`.
+  Employees start and stop timers only for themselves, only on tasks of projects they are assigned
+  to (others 404), with server times. Timers read attendance but never write it. Entries are never
+  edited or deleted. No new data is collected: no activity, screenshots or idle data are used.
+- **Email reports (F12, docs/email-reports.md):** admin-only configuration (`reports:manage`).
+  Recipients are user accounts checked on the server when added and again at every send: active
+  admins, or the employee for a report about only them; never free-form addresses. Reports carry
+  attendance and task-time aggregates only (no screenshots, activity, leave details, websites or
+  scores). No real email provider exists; the default records "not emailed" and the mock is refused
+  in production. Delivery records keep a SHA-256 of the content, never the content; logs carry ids.
+- **Website usage (F04, docs/website-usage.md):** domain names only, from a browser extension the
+  employee connects with a one-time code (only hashes of codes and tokens are stored; the token is
+  limited to the extension routes and revocable). Off by default; needs the policy on, the employee's
+  acknowledgement of the website notice, an open shift without a break, and in production
+  `WEBSITE_TRACKING_APPROVED`. Paths, queries, titles, content, history and incognito windows are never
+  collected; the server rejects anything that is not a domain and any extra field. Pairing is the only
+  route exempt from the origin check (it reads no cookies). Logs carry ids and counts, never domains.
 - **Every action is auditable:** accepted and rejected events, with source (online/offline),
   raw device time and receive time.
 - **Local queue:** holds attendance events and non-secret cache (name, email, timezone,
@@ -165,7 +252,7 @@ tokens or passwords (those are in the OS credential store).
 **Threat model.**
 | Threat | Current mitigation |
 | --- | --- |
-| Other OS users on the same machine | App data directory is created `0700` (owner only) on macOS (Day 4); Windows `%APPDATA%` is per-user by default |
+| Other OS users on the same machine | App data directory is created `0700` (owner only) on macOS (Day 4); Windows `%LOCALAPPDATA%` (never roaming) is per-user by default (profile ACL: user, SYSTEM, Administrators) |
 | Lost/stolen laptop, disk removed | Requires full-disk encryption (FileVault / BitLocker), to be enforced by policy/MDM for pilot devices |
 | Backups (Time Machine, OneDrive) copying the file | Same: encrypted backups; the data is low-sensitivity attendance times |
 | Malware running as the employee | Out of scope for file encryption: it could read the screen, the webview or request the key as the user |
@@ -230,7 +317,7 @@ window title or URL) with 400.
   tried first and returned stale values inside the app during testing.
 - Idle: `CGEventSourceSecondsSinceLastEventType`, a counter of seconds since the last input
   event. No event tap, no keyboard hook, no input contents.
-- Screen lock: the session dictionary's `CGSSessionScreenIsLocked` flag (counted as idle).
+- Screen lock, sleep and fast user switching / logout: `com.apple.screenIsLocked`/`screenIsUnlocked` and NSWorkspace sleep/wake/session notifications (`session_events.rs`), with the session dictionary's `CGSSessionScreenIsLocked` and on-console flags as the authority. Since 2026-11-02 that time is **unobserved** (neither active nor idle; the open interval is closed at the transition), not counted as idle. While recording, the app opts out of App Nap without preventing system or display sleep (`power.rs`).
 - Invisible bidi marks in app names (e.g. WhatsApp's U+200E) are stripped before storage.
 - **No Accessibility, Input Monitoring or Screen Recording permission is required or
   requested.**
@@ -294,7 +381,9 @@ collector pending**: the Windows build compiles a stub that collects nothing and
   (monitoring simply stays off); how to handle that is an HR decision.
 - The desktop app shows a persistent indicator whenever tracking or screenshot capture is
   active, and a notice when a screenshot is taken.
-- Employees can view their own collected data (time, activity summaries, screenshots).
+- Employees can view their own collected data (time, activity summaries, screenshots): the desktop
+  History tab (shifts, breaks, weekly hours and application activity) and "My screenshots" tab,
+  over self-scoped API routes. Verified in headless Chrome, not yet in the packaged app.
 - Policy changes require re-acknowledgement.
 
 ## Activity retention (implemented Day 6, off until approved)
@@ -324,12 +413,14 @@ collector pending**: the Windows build compiles a stub that collects nothing and
 **What is captured:** the **primary display only** (`CGMainDisplayID`), scaled down to the
 policy's maximum resolution (default 1920 px on the longest edge), without the mouse cursor,
 encoded as lossy WebP (default quality 70). Other monitors are never captured. No window titles,
-app names, OCR or other content is extracted. **Nothing is masked or blurred:** passwords
-already hidden by apps stay hidden, but anything else on the main screen at that moment
-(messages, personal websites, documents, health or banking pages) can appear. Automatic
-masking of sensitive windows is not implemented and would need a separate decision (options:
-exclude specific apps via `SCContentFilter` window exclusion; pause while chosen apps are
-frontmost); the notice says plainly that screenshots may contain sensitive information.
+app names, OCR or other content is extracted. **Only admin-defined privacy masks are hidden**
+(2026-10-29, docs/screenshot-masks.md): fixed rectangles filled black on the device before
+encoding, so those pixels are never stored or uploaded. Masks are off (none) by default. Passwords
+already hidden by apps stay hidden, but anything else on the main screen outside the masks
+(messages, personal websites, documents, health or banking pages) can appear. Nothing is detected
+or blurred automatically, and app exclusions are not implemented (options: exclude specific apps
+via `SCContentFilter` window exclusion; pause while chosen apps are frontmost). The notice says
+plainly that screenshots may contain sensitive information.
 
 **When:** only when *all* of these hold, checked by the app before scheduling and again by the
 capture worker right before each capture, and once more by the server against the capture time:
@@ -425,14 +516,15 @@ ones are never deleted automatically; confirmed ones are removed 24 h after conf
 
 | Risk / topic | What the app does | Not done (decision needed) |
 | --- | --- | --- |
-| Sensitive content exposure | Notice states screenshots may contain personal or sensitive information; admins-only access with audit; retention | **No masking or blurring of any kind.** Password fields hidden by apps stay hidden; everything else visible on the main screen is captured |
+| Sensitive content exposure | Notice states screenshots may contain personal or sensitive information; admins-only access with audit; retention. Privacy masks (2026-10-29): admin-defined rectangles blacked out on the device before encoding; the API refuses screenshots captured without the masks in force; unreadable stored masks turn capture off | Masks cover fixed screen areas, not apps; none configured by default; no automatic detection or blur; existing screenshots are not redacted retroactively. Not verified on a real ScreenCaptureKit capture. Which areas to mask: HR/Legal |
 | Application exclusions | — | Not implemented. Feasible with ScreenCaptureKit (exclude windows of chosen bundle IDs via `SCContentFilter`, or skip the capture while such an app is frontmost). Needs an HR/Legal list (e.g. password managers, banking, health, HR portals, personal messaging) |
 | Display exclusions / multi-monitor | Only the primary display (`CGMainDisplayID`) is captured; other monitors are never captured, not even listed in the upload | Capturing more displays would be a policy change, a new notice and code change; not configurable |
 | Consent | Separate screenshot notice, acknowledged per version before any capture; server rejects captures from before the acknowledgement | Employee withdrawal of consent is not an in-app action (stopping is via HR/admin turning screenshots off or a new notice version); how to handle a refusal is an HR decision |
 | Employee notification | Always-visible state, next capture time, "Screenshot taken at HH:MM" for a minute after each capture, policy details in the app; macOS shows its own screen-recording permission UI | No sound or system notification per capture |
 | OS permission | Explicit macOS Screen Recording permission, never bypassed; revocation stops capture | — |
 | Retention | Approval-gated, dry run, run log, recycle-bin caveat documented | Final period from HR/Legal |
-| Authorized viewers | Admin role only (+ employee self-view if enabled); every view logged | No finer-grained "screenshot viewer" role yet; all admins can view all employees |
+| Authorized viewers | Admin role only (+ employee self-view if enabled: desktop "My screenshots" tab since 2026-10-29, own screenshots only, identity from the session, 403 when self-view is off); every view logged | No finer-grained "screenshot viewer" role yet; all admins can view all employees |
+| Timelapse videos (2026-10-28) | Built only from screenshots already stored under the notice (no extra capture, no interval change); admins only; the employee comes from the session, never the request; every create, view, download, cancel and delete logged (`timelapse_access_log`); delivered through the API only (no-store, sandbox CSP, Repr-Digest); kept on the API host 0700/0600 for 24 h and deleted as soon as a source screenshot is deleted (docs/timelapse.md) | Show exactly the stored screenshots: privacy masks applied at capture stay black, nothing else is masked. The current screenshot notice does not mention videos (HR/Legal decision). Timelapse views are not in the per-screenshot access log |
 | Hidden capture | Not possible by design: capture runs only from the visible app with the state on screen; one instance per user (lock) | — |
 
 ## Transport and client hardening

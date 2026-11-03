@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { AttendanceCurrent } from "@workfolio/shared";
 import { decideScreenshots, type ScreenshotInputs } from "../src/monitoring.ts";
-import { uploadScreenshots, type Outcome, type ShotDeps, type ShotRow } from "../src/screenshot-sync.ts";
+import { policyBlur, privacyText, uploadScreenshots, type Outcome, type ShotDeps, type ShotRow } from "../src/screenshot-sync.ts";
 import { ApiClient, HttpError } from "../src/session.ts";
 import { project, type QueuedEvent } from "../src/sync.ts";
 
@@ -36,7 +36,7 @@ test("screenshots: only while clocked in, not on break, after the screenshot not
 });
 
 const row = (id: string, status: ShotRow["status"] = "PENDING"): ShotRow => ({
-  id, sessionId: "s", capturedMs: Date.parse("2026-10-13T09:00:00.000Z"), width: 1920, height: 1200, sizeBytes: 3, checksum: "a".repeat(64), status, retries: 0, lastError: null,
+  id, sessionId: "s", capturedMs: Date.parse("2026-10-13T09:00:00.000Z"), width: 1920, height: 1200, sizeBytes: 3, checksum: "a".repeat(64), status, retries: 0, lastError: null, masks: [], blurred: false,
 });
 
 function fakes(rows: ShotRow[], { register = (_: object) => ({ status: "REGISTERED" }), upload = () => {} }: { register?: (b: object) => object; upload?: () => void } = {}) {
@@ -104,4 +104,62 @@ test("api client sends screenshot bytes as-is with their content type and the be
   const put = seen.at(-1)!;
   assert.equal(put.body, bytes, "not JSON-encoded");
   assert.deepEqual([put.headers.get("content-type"), put.headers.get("authorization"), put.headers.get("x-device-id")], ["image/webp", "Bearer t", "dev"]);
+});
+
+test("registration carries the masks applied at capture (none for rows from before masks)", async () => {
+  const masks = [{ x: 0, y: 0, w: 2500, h: 1000 }];
+  const bodies: object[] = [];
+  const f = fakes([{ ...row("m"), masks }, { ...row("old"), masks: undefined as never }], { register: (b) => (bodies.push(b), { status: "STORED" }) });
+  await uploadScreenshots(f.deps);
+  assert.deepEqual(bodies.map((b) => (b as { masks: unknown }).masks), [masks, []]);
+});
+
+test("the employee is told what is masked, or that nothing is", async () => {
+  const { maskText } = await import("../src/monitoring.ts");
+  assert.match(maskText([]), /Nothing is blurred or masked/);
+  const t = maskText([{ label: "Menu bar clock" }, { label: "Chat" }]);
+  assert.match(t, /2 area\(s\).*blacked out on this computer before each screenshot is saved \(Menu bar clock, Chat\)/);
+  assert.match(t, /never stored or uploaded/);
+});
+
+test("registration says whether the image was blurred (rows from before blur: not blurred)", async () => {
+  const bodies: object[] = [];
+  const f = fakes([{ ...row("b"), blurred: true }, row("n"), { ...row("old"), blurred: undefined as never }], { register: (b) => (bodies.push(b), { status: "STORED" }) });
+  await uploadScreenshots(f.deps);
+  assert.deepEqual(bodies.map((b) => (b as { id: string; blurred: unknown }).blurred), [true, false, false]);
+  assert.deepEqual(Object.keys(bodies[0]!), ["id", "capturedAt", "sentAt", "width", "height", "sizeBytes", "checksum", "mimeType", "masks", "blurred"]);
+});
+
+test("a blur mismatch rejected by the server is kept as rejected with its reason, not retried", async () => {
+  const reason = "Captured without the blur in force at that time";
+  const f = fakes([{ ...row("b"), blurred: false }], { register: () => ({ status: "REJECTED", reason }) });
+  const r = await uploadScreenshots(f.deps);
+  assert.deepEqual([r.rejected, f.marks], [1, [["b", "REJECTED", reason]]]);
+  assert.deepEqual(f.calls, ["register b"], "never uploaded");
+});
+
+test("blur setting from the policy: absent = off, a non-boolean pauses capture (null)", () => {
+  assert.equal(policyBlur({}), false, "a server from before blur");
+  assert.equal(policyBlur({ blur: true }), true);
+  assert.equal(policyBlur({ blur: false }), false);
+  for (const bad of [null, "true", 1, {}]) assert.equal(policyBlur({ blur: bad }), null, String(bad));
+});
+
+test("the employee is told when screenshots are blurred, alongside the masks", () => {
+  assert.match(privacyText([], false), /Nothing is blurred or masked/);
+  const blurred = privacyText([], true);
+  assert.match(blurred, /^Screenshots are blurred/);
+  assert.match(blurred, /No areas are blacked out/);
+  assert.doesNotMatch(blurred, /Nothing is blurred/);
+  assert.match(privacyText([{ label: "Chat" }], true), /^Screenshots are blurred.*1 area\(s\).*\(Chat\)/);
+  assert.equal(privacyText([], null), privacyText([], false), "unreadable setting: capture is paused and says so separately");
+});
+
+
+test("storage label names the provider, with neutral wording for unknown ones", async () => {
+  const { storageLabel } = await import("../src/screenshot-sync.ts");
+  assert.equal(storageLabel("MICROSOFT_GRAPH"), "Microsoft 365");
+  assert.equal(storageLabel("GOOGLE_DRIVE"), "Google Drive");
+  assert.match(storageLabel("LOCAL_DEV"), /development storage/);
+  assert.equal(storageLabel("SOMETHING_NEW"), "your organization's cloud storage");
 });

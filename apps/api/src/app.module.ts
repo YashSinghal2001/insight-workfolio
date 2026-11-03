@@ -4,8 +4,13 @@ import { ConfigModule, ConfigService } from "@nestjs/config";
 import { APP_GUARD } from "@nestjs/core";
 import { LoggerModule } from "nestjs-pino";
 import { ActivityController } from "./activity/activity.controller.js";
+import { AlertsController } from "./alerts/alerts.controller.js";
+import { AlertsService } from "./alerts/alerts.service.js";
 import { ActivityService } from "./activity/activity.service.js";
 import { RetentionService } from "./activity/retention.service.js";
+import { ActivityCategoriesService } from "./activity/categories.service.js";
+import { AuditController } from "./audit/audit.controller.js";
+import { AuditService } from "./audit/audit.service.js";
 import { AttendanceController } from "./attendance/attendance.controller.js";
 import { AttendanceService } from "./attendance/attendance.service.js";
 import { CorrectionsController } from "./attendance/corrections.controller.js";
@@ -23,12 +28,35 @@ import { DevicesService } from "./devices/devices.service.js";
 import { EmployeesController } from "./employees/employees.controller.js";
 import { EmployeesService } from "./employees/employees.service.js";
 import { HealthController } from "./health/health.controller.js";
+import { HolidaysController } from "./holidays/holidays.controller.js";
+import { HolidaysService } from "./holidays/holidays.service.js";
+import { TeamsController } from "./teams/teams.controller.js";
+import { TeamsService } from "./teams/teams.service.js";
+import { LeaveController } from "./leave/leave.controller.js";
+import { LeaveService } from "./leave/leave.service.js";
+import { ProjectsController, TaskTimeController } from "./projects/projects.controller.js";
+import { ProjectsService } from "./projects/projects.service.js";
+import { mailTransportProvider } from "./reports/mail.js";
+import { ReportsController } from "./reports/reports.controller.js";
+import { ReportsService } from "./reports/reports.service.js";
+import { WebsitesController } from "./websites/websites.controller.js";
+import { WebsitesService } from "./websites/websites.service.js";
+import { RolesController } from "./roles/roles.controller.js";
+import { RolesService } from "./roles/roles.service.js";
+import { DailyAttendanceController, ScheduleSettingsController } from "./schedule/schedule.controller.js";
+import { ScheduleService } from "./schedule/schedule.service.js";
 import { MonitoringSettingsController } from "./settings/monitoring-settings.controller.js";
 import { MonitoringSettingsService } from "./settings/monitoring-settings.service.js";
+import { EmployeeTrackingController, EmployeeTrackingService } from "./settings/employee-tracking.controller.js";
 import { ScreenshotSettingsService } from "./screenshots/screenshot-settings.service.js";
 import { ScreenshotSettingsController, ScreenshotsController } from "./screenshots/screenshots.controller.js";
 import { ScreenshotsService } from "./screenshots/screenshots.service.js";
-import { screenshotStorageProvider } from "./screenshots/storage.js";
+import { ONEDRIVE_AUTH, screenshotStorageProvider } from "./screenshots/storage.js";
+import { TimelapseController } from "./screenshots/timelapse.controller.js";
+import { timelapseEncoderProvider } from "./screenshots/timelapse-encoder.js";
+import { TimelapseService } from "./screenshots/timelapse.service.js";
+import { GoogleDriveOAuthController, GoogleDriveOAuthService } from "./storage/google-drive-oauth.js";
+import { OneDriveController, OneDriveService } from "./storage/onedrive.js";
 
 @Module({
   imports: [
@@ -68,8 +96,9 @@ import { screenshotStorageProvider } from "./screenshots/storage.js";
     }),
     DatabaseModule,
   ],
-  controllers: [HealthController, AuthController, EmployeesController, DevicesController, AttendanceController, CorrectionsController, ActivityController, MonitoringSettingsController, ScreenshotsController, ScreenshotSettingsController],
+  controllers: [AlertsController, HealthController, AuthController, EmployeesController, DevicesController, AttendanceController, CorrectionsController, ActivityController, MonitoringSettingsController, ScreenshotsController, ScreenshotSettingsController, TimelapseController, LeaveController, HolidaysController, TeamsController, ProjectsController, TaskTimeController, ReportsController, WebsitesController, RolesController, AuditController, ScheduleSettingsController, DailyAttendanceController, EmployeeTrackingController, GoogleDriveOAuthController, OneDriveController],
   providers: [
+    AlertsService,
     AuthService,
     EmployeesService,
     DevicesService,
@@ -79,11 +108,28 @@ import { screenshotStorageProvider } from "./screenshots/storage.js";
     EmployeeLocks,
     policyProvider,
     MonitoringSettingsService,
+    EmployeeTrackingService,
     ActivityService,
     RetentionService,
+    ActivityCategoriesService,
+    ScheduleService,
     screenshotStorageProvider,
     ScreenshotSettingsService,
     ScreenshotsService,
+    timelapseEncoderProvider,
+    TimelapseService,
+    LeaveService,
+    HolidaysService,
+    TeamsService,
+    ProjectsService,
+    mailTransportProvider,
+    ReportsService,
+    WebsitesService,
+    RolesService,
+    AuditService,
+    GoogleDriveOAuthService,
+    OneDriveService,
+    { provide: ONEDRIVE_AUTH, useExisting: OneDriveService },
     { provide: APP_GUARD, useClass: AuthGuard },
   ],
 })

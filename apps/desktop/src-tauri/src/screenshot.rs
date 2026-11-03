@@ -1,5 +1,5 @@
 //! Screenshot capture: one worker thread for the app's lifetime, a durable local queue (SQLite
-//! metadata + private WebP files) and the macOS capture itself (ScreenCaptureKit).
+//! metadata + private WebP files) and the capture itself (macOS ScreenCaptureKit, Windows GDI).
 //!
 //! The webview decides whether capture is allowed (clocked in, not on a break, device active,
 //! screenshots enabled, screenshot notice acknowledged). Right before every capture this worker
@@ -8,7 +8,7 @@
 //! state, next capture and last capture at all times.
 
 use rusqlite::{Connection, OptionalExtension, params};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -39,11 +39,145 @@ pub struct Frame {
     pub rgb: Vec<u8>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Config {
     pub interval_ms: i64,
     pub quality: f32,
     pub max_dimension: u32,
+    /// Privacy masks from the server policy, blacked out before encoding.
+    pub masks: Vec<Mask>,
+    /// Whole-image blur from the server policy. `None` = the setting received was unreadable:
+    /// capture pauses rather than risk an unblurred screenshot.
+    pub blur: Option<bool>,
+}
+
+/// Mask coordinates are fractions of the frame in units of 1/`MASK_SCALE` (server: `SCREENSHOT_MASK_SCALE`).
+pub const MASK_SCALE: u32 = 10_000;
+pub const MASK_MAX: usize = 20;
+const MASKS_INVALID: &str = "Screenshots paused: the privacy mask settings received from the server are invalid.";
+const BLUR_INVALID: &str = "Screenshots paused: the blur setting received from the server is invalid.";
+
+/// A rectangle filled black on the captured pixels before the image is encoded: the covered
+/// pixels are never written to disk or uploaded. Reported to the server with each screenshot.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Mask {
+    pub x: u16,
+    pub y: u16,
+    pub w: u16,
+    pub h: u16,
+}
+
+/// Same rules as the server's schema; anything else stops capture instead of capturing unmasked.
+pub fn masks_valid(masks: &[Mask]) -> bool {
+    let scale = MASK_SCALE;
+    masks.len() <= MASK_MAX
+        && masks.iter().all(|m| m.w > 0 && m.h > 0 && u32::from(m.x) + u32::from(m.w) <= scale && u32::from(m.y) + u32::from(m.h) <= scale)
+}
+
+/// Fills each mask with black. Edges are rounded outwards, so a mask always covers at least its
+/// share of the frame at any resolution.
+pub fn apply_masks(frame: &mut Frame, masks: &[Mask]) {
+    let (w, h, s) = (u64::from(frame.width), u64::from(frame.height), u64::from(MASK_SCALE));
+    if frame.rgb.len() as u64 != w * h * 3 {
+        return; // rejected by encode(); never written
+    }
+    let stride = frame.width as usize * 3;
+    for m in masks {
+        let x0 = (u64::from(m.x) * w / s).min(w) as usize;
+        let x1 = ((u64::from(m.x) + u64::from(m.w)) * w).div_ceil(s).min(w) as usize;
+        let y0 = (u64::from(m.y) * h / s).min(h) as usize;
+        let y1 = ((u64::from(m.y) + u64::from(m.h)) * h).div_ceil(s).min(h) as usize;
+        if x0 >= x1 {
+            continue;
+        }
+        for row in y0..y1 {
+            frame.rgb[row * stride + x0 * 3..row * stride + x1 * 3].fill(0);
+        }
+    }
+}
+
+/// Blur radius for a frame: 1/120 of the longest edge, at least 8 px (16 px at 1920, 32 px at 3840).
+/// Three box passes of this radius approximate a Gaussian with sigma ~ radius, several times the
+/// height of on-screen text, so text and faces become unreadable smudges. Scaling with the frame
+/// keeps the effect the same whatever `max_dimension` is.
+pub fn blur_radius(width: u32, height: u32) -> usize {
+    (width.max(height) / 120).max(8) as usize
+}
+
+/// Strong whole-image blur, in place: three separable box-blur passes (horizontal then vertical),
+/// each O(pixels) with running sums whatever the radius. Edges average over the pixels inside
+/// the frame. Extra memory: one row plus a ring of `radius + 1` rows (~0.4 MB at 3840 px), never
+/// a second copy of the frame. Called before encoding: unblurred pixels never reach disk.
+pub fn apply_blur(frame: &mut Frame) {
+    let (w, h) = (frame.width as usize, frame.height as usize);
+    if w == 0 || h == 0 || frame.rgb.len() != w * h * 3 {
+        return; // rejected by encode(); never written
+    }
+    let r = blur_radius(frame.width, frame.height);
+    // Fixed-point reciprocal of each window size: out = (sum * inv + half) >> 24, no division per pixel.
+    let inv = |count: usize| ((1u64 << 24) + count as u64 / 2) / count as u64;
+    let window = |i: usize, n: usize| (i + r).min(n - 1) - i.saturating_sub(r) + 1;
+    let px = |sum: u32, inv: u64| ((u64::from(sum) * inv + (1 << 23)) >> 24).min(255) as u8;
+    let inv_x: Vec<u64> = (0..w).map(|x| inv(window(x, w))).collect();
+    let stride = w * 3;
+    let mut line = vec![0u8; stride];
+    let mut sums = vec![0u32; stride];
+    let mut ring = vec![0u8; (r + 1) * stride];
+    for _ in 0..3 {
+        for row in frame.rgb.chunks_exact_mut(stride) {
+            line.copy_from_slice(row);
+            for c in 0..3 {
+                let mut sum: u32 = (0..=r.min(w - 1)).map(|x| u32::from(line[x * 3 + c])).sum();
+                for x in 0..w {
+                    row[x * 3 + c] = px(sum, inv_x[x]);
+                    if x + r + 1 < w {
+                        sum += u32::from(line[(x + r + 1) * 3 + c]);
+                    }
+                    if x >= r {
+                        sum -= u32::from(line[(x - r) * 3 + c]);
+                    }
+                }
+            }
+        }
+        // Vertical: column sums for all columns at once, row by row (cache friendly). Rows above
+        // the current one are already blurred, so their originals are kept in the ring.
+        sums.fill(0);
+        for y in 0..=r.min(h - 1) {
+            for (s, &v) in sums.iter_mut().zip(&frame.rgb[y * stride..(y + 1) * stride]) {
+                *s += u32::from(v);
+            }
+        }
+        for y in 0..h {
+            let slot = (y % (r + 1)) * stride;
+            let k = inv(window(y, h));
+            let row = &mut frame.rgb[y * stride..(y + 1) * stride];
+            // The slot holds the original of row y - r - 1, which leaves the window now.
+            let leaving = y > r;
+            for i in 0..stride {
+                let orig = row[i];
+                if leaving {
+                    sums[i] -= u32::from(ring[slot + i]);
+                }
+                ring[slot + i] = orig;
+                row[i] = px(sums[i], k);
+            }
+            if y + r + 1 < h {
+                for (s, &v) in sums.iter_mut().zip(&frame.rgb[(y + r + 1) * stride..(y + r + 2) * stride]) {
+                    *s += u32::from(v);
+                }
+            }
+        }
+    }
+}
+
+/// Everything done to captured pixels before encoding: masks, then blur, then the masks again so
+/// masked areas stay solid black (the blur would otherwise bleed light into their edges).
+pub fn redact(frame: &mut Frame, cfg: &Config) {
+    apply_masks(frame, &cfg.masks);
+    if cfg.blur == Some(true) {
+        apply_blur(frame);
+        apply_masks(frame, &cfg.masks);
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -68,12 +202,13 @@ pub struct CaptureInfo {
 #[derive(Serialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ShotStatus {
-    /// This build can capture (macOS 14+); the Windows capture is not implemented.
+    /// This build can capture (macOS 14+, Windows).
     pub supported: bool,
     pub mode: String,
     /// Mode is ACTIVE with an employee/device/session scope: captures happen on schedule.
     pub capturing: bool,
     /// Screen Recording permission (CGPreflightScreenCaptureAccess); checked on every status call.
+    /// Always true on Windows, which has no screen-capture permission.
     pub permission: bool,
     /// Why the last due capture did not happen (screen locked, no permission, storage full).
     pub skipped: Option<String>,
@@ -117,7 +252,7 @@ impl Shooter {
             state: Mutex::new(State {
                 mode: "STOPPED".into(),
                 scope: None,
-                cfg: Config { interval_ms: 300_000, quality: 70.0, max_dimension: 1920 },
+                cfg: Config { interval_ms: 300_000, quality: 70.0, max_dimension: 1920, masks: Vec::new(), blur: Some(false) },
                 last_tick: None,
                 last_cleanup_ms: 0,
                 status: ShotStatus {
@@ -181,8 +316,10 @@ impl Shooter {
         }
 
         let t0 = Instant::now();
-        let result = os.capture(cfg.max_dimension).and_then(|frame| {
+        let result = os.capture(cfg.max_dimension).and_then(|mut frame| {
             let t1 = Instant::now();
+            // Before anything is encoded or written: the masked and unblurred pixels exist only in this buffer.
+            redact(&mut frame, &cfg);
             let webp = encode(&frame, cfg.quality)?;
             Ok((frame.width, frame.height, webp, t1 - t0, t1.elapsed()))
         });
@@ -199,7 +336,7 @@ impl Shooter {
             st.status.skipped = Some("Not kept: capture was stopped or the screen locked while it was being taken.".into());
             return; // the frame is dropped; nothing was written
         }
-        let saved = db.lock().map_err(|e| e.to_string()).and_then(|conn| save(&conn, &self.dir, &scope, wall, width, height, &webp).map_err(|e| e.to_string()));
+        let saved = db.lock().map_err(|e| e.to_string()).and_then(|conn| save(&conn, &self.dir, &scope, wall, width, height, &webp, &cfg.masks, cfg.blur == Some(true)).map_err(|e| e.to_string()));
         match saved {
             Ok(_) => {
                 st.status.error = None;
@@ -248,7 +385,7 @@ impl Shooter {
             return None;
         }
         st.status.next_capture_ms = Some(wall + st.cfg.interval_ms);
-        Some((st.cfg, st.scope.clone()?, self.generation.load(Ordering::SeqCst)))
+        Some((st.cfg.clone(), st.scope.clone()?, self.generation.load(Ordering::SeqCst)))
     }
 
     /// Sets the mode decided by the UI. Any change of mode, scope or interval restarts the schedule.
@@ -258,11 +395,17 @@ impl Shooter {
             self.generation.fetch_add(1, Ordering::SeqCst);
             st.status.next_capture_ms = None;
         }
+        let invalid = if !masks_valid(&cfg.masks) { Some(MASKS_INVALID) } else if cfg.blur.is_none() { Some(BLUR_INVALID) } else { None };
         st.mode = mode;
         st.scope = scope;
         st.cfg = cfg;
         st.status.mode = st.mode.clone();
-        st.status.capturing = st.mode == "ACTIVE" && st.scope.is_some() && platform::SUPPORTED;
+        st.status.capturing = st.mode == "ACTIVE" && st.scope.is_some() && platform::SUPPORTED && invalid.is_none();
+        if let Some(reason) = invalid {
+            st.status.error = Some(reason.into());
+        } else if matches!(st.status.error.as_deref(), Some(MASKS_INVALID | BLUR_INVALID)) {
+            st.status.error = None;
+        }
         if !st.status.capturing {
             st.status.skipped = None;
         }
@@ -323,6 +466,48 @@ pub fn fit(width: u32, height: u32, max_dimension: u32) -> (u32, u32) {
     (((f64::from(width) * scale).round() as u32).max(1), ((f64::from(height) * scale).round() as u32).max(1))
 }
 
+/// CPU downscale to `fit(.., max_dimension)` (never up) with a box filter: each output pixel is the
+/// rounded mean of the source pixels its area covers. Used where the OS does not scale for us
+/// (Windows GDI); on macOS ScreenCaptureKit scales during capture. Returns the frame untouched
+/// when it already fits.
+// ponytail: span edges are rounded outwards (a source pixel on a fractional boundary counts for
+// both neighbours, a slight extra softening); exact area weights if image quality ever matters.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn downscale(frame: Frame, max_dimension: u32) -> Result<Frame, String> {
+    let (sw, sh) = (frame.width as usize, frame.height as usize);
+    if sw == 0 || sh == 0 || frame.rgb.len() != sw * sh * 3 {
+        return Err("invalid frame size".into());
+    }
+    let (w, h) = fit(frame.width, frame.height, max_dimension);
+    if (w, h) == (frame.width, frame.height) {
+        return Ok(frame);
+    }
+    let (dw, dh) = (w as usize, h as usize);
+    // Source range [a, b) covered by output index i of d, from s source pixels (s > d here, so b > a).
+    let span = |i: usize, d: usize, s: usize| (i * s / d, ((i + 1) * s).div_ceil(d).min(s));
+    let cols: Vec<(usize, usize)> = (0..dw).map(|x| span(x, dw, sw)).collect();
+    let stride = sw * 3;
+    let mut sums = vec![0u32; stride]; // per source column: sum over the current band of rows
+    let mut rgb = Vec::with_capacity(dw * dh * 3);
+    for y in 0..dh {
+        let (y0, y1) = span(y, dh, sh);
+        sums.fill(0);
+        for row in frame.rgb[y0 * stride..y1 * stride].chunks_exact(stride) {
+            for (s, &v) in sums.iter_mut().zip(row) {
+                *s += u32::from(v);
+            }
+        }
+        for &(x0, x1) in &cols {
+            let n = ((x1 - x0) * (y1 - y0)) as u64;
+            for c in 0..3 {
+                let total: u64 = sums[x0 * 3 + c..x1 * 3].iter().step_by(3).map(|&v| u64::from(v)).sum();
+                rgb.push(((total + n / 2) / n) as u8);
+            }
+        }
+    }
+    Ok(Frame { width: w, height: h, rgb })
+}
+
 // ---- Local queue -------------------------------------------------------------------------
 
 #[derive(Serialize, Debug, Clone, PartialEq)]
@@ -338,9 +523,13 @@ pub struct ShotRow {
     pub status: String,
     pub retries: i64,
     pub last_error: Option<String>,
+    /// Masks applied to this image at capture time (what the server checks).
+    pub masks: Vec<Mask>,
+    /// Whether the whole image was blurred before encoding (the server checks it against its policy).
+    pub blurred: bool,
 }
 
-const ROW_COLUMNS: &str = "id, session_id, captured_ms, width, height, size_bytes, checksum, status, retries, last_error";
+const ROW_COLUMNS: &str = "id, session_id, captured_ms, width, height, size_bytes, checksum, status, retries, last_error, masks, blurred";
 
 fn row(r: &rusqlite::Row) -> rusqlite::Result<ShotRow> {
     Ok(ShotRow {
@@ -354,6 +543,10 @@ fn row(r: &rusqlite::Row) -> rusqlite::Result<ShotRow> {
         status: r.get(7)?,
         retries: r.get(8)?,
         last_error: r.get(9)?,
+        // We write this JSON; were it ever unreadable, [] only passes the server check while no
+        // masks are required, and the image itself is unchanged either way.
+        masks: serde_json::from_str(&r.get::<_, String>(10)?).unwrap_or_default(),
+        blurred: r.get::<_, i64>(11)? != 0,
     })
 }
 
@@ -368,12 +561,14 @@ fn io(e: std::io::Error) -> rusqlite::Error {
 /// Durable save: the row is written first (SAVING), then the file atomically (temp file, fsync,
 /// rename, fsync directory), then the row becomes PENDING. A crash in between is repaired by
 /// `recover`. Files are named by random UUID only and readable by the owner only.
-pub fn save(conn: &Connection, dir: &Path, scope: &Scope, captured_ms: i64, width: u32, height: u32, webp: &[u8]) -> rusqlite::Result<String> {
+#[allow(clippy::too_many_arguments)]
+pub fn save(conn: &Connection, dir: &Path, scope: &Scope, captured_ms: i64, width: u32, height: u32, webp: &[u8], masks: &[Mask], blurred: bool) -> rusqlite::Result<String> {
     let id = uuid::Uuid::new_v4().to_string();
+    let masks = serde_json::to_string(masks).map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
     conn.execute(
-        "INSERT INTO screenshots (id, user_id, device_id, session_id, captured_ms, width, height, size_bytes, checksum, status)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'SAVING')",
-        params![id, scope.user_id, scope.device_id, scope.session_id, captured_ms, width, height, webp.len() as i64, sha256_hex(webp)],
+        "INSERT INTO screenshots (id, user_id, device_id, session_id, captured_ms, width, height, size_bytes, checksum, status, masks, blurred)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'SAVING', ?10, ?11)",
+        params![id, scope.user_id, scope.device_id, scope.session_id, captured_ms, width, height, webp.len() as i64, sha256_hex(webp), masks, blurred],
     )?;
     let tmp = dir.join(format!("{id}.webp.tmp"));
     let written = (|| -> std::io::Result<()> {
@@ -385,11 +580,18 @@ pub fn save(conn: &Connection, dir: &Path, scope: &Scope, captured_ms: i64, widt
         f.write_all(webp)?;
         f.sync_all()?;
         std::fs::rename(&tmp, file(dir, &id))?;
-        std::fs::File::open(dir)?.sync_all()
+        // Directory fsync makes the rename durable on unix. Windows cannot open a directory with
+        // File::open (access denied without FILE_FLAG_BACKUP_SEMANTICS) nor flush it; NTFS journals
+        // the rename itself.
+        #[cfg(unix)]
+        std::fs::File::open(dir)?.sync_all()?;
+        Ok(())
     })();
     if let Err(e) = written {
-        // Never saved: remove the partial file and its row (no screenshot content is kept).
+        // Never saved: remove the partial file (or the renamed one, if only the directory fsync
+        // failed) and its row: no screenshot content is left behind without a row to account for it.
         let _ = std::fs::remove_file(&tmp);
+        let _ = std::fs::remove_file(file(dir, &id));
         conn.execute("DELETE FROM screenshots WHERE id = ?1 AND status = 'SAVING'", params![id])?;
         return Err(io(e));
     }
@@ -483,6 +685,7 @@ pub fn cleanup_stored(conn: &Connection, dir: &Path, now: i64) -> rusqlite::Resu
         .prepare("SELECT id FROM screenshots WHERE status = 'STORED' AND stored_ms < ?1")?
         .query_map(params![now - STORED_GRACE_MS], |r| r.get(0))?
         .collect::<rusqlite::Result<_>>()?;
+    let mut removed = 0;
     for id in &ids {
         // File first, then the row: an interrupted cleanup leaves a row to retry, never an orphan file.
         match std::fs::remove_file(file(dir, id)) {
@@ -490,9 +693,9 @@ pub fn cleanup_stored(conn: &Connection, dir: &Path, now: i64) -> rusqlite::Resu
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(_) => continue,
         }
-        conn.execute("DELETE FROM screenshots WHERE id = ?1 AND status = 'STORED'", params![id])?;
+        removed += conn.execute("DELETE FROM screenshots WHERE id = ?1 AND status = 'STORED'", params![id])?;
     }
-    Ok(ids.len())
+    Ok(removed)
 }
 
 /// The employee dismissed failed/rejected screenshots: their files and rows are removed (user action).
@@ -577,7 +780,6 @@ pub mod platform {
     #[cfg(target_os = "macos")]
     mod imp {
         use super::super::{fit, Frame, Os};
-        use crate::activity;
         use block2::RcBlock;
         use objc2::rc::Retained;
         use objc2::runtime::AnyClass;
@@ -617,6 +819,10 @@ pub mod platform {
         fn pixels(image: &CGImage) -> Result<Frame, String> {
             let (w, h) = (CGImage::width(Some(image)), CGImage::height(Some(image)));
             let stride = CGImage::bytes_per_row(Some(image));
+            // Runs inside the completion handler: a panic here would abort the app (panic = abort).
+            if w == 0 || h == 0 || stride < w * 4 {
+                return Err("unexpected image size".into());
+            }
             if CGImage::bits_per_pixel(Some(image)) != 32 || CGImage::byte_order_info(Some(image)) != CGImageByteOrderInfo::Order32Little {
                 return Err("unexpected pixel format".into());
             }
@@ -641,8 +847,10 @@ pub mod platform {
                 permission()
             }
 
+            /// Screen locked, Mac going to sleep, or another user's session in front (fast user
+            /// switching, logout): session_events state plus the CGSession dictionary.
             fn locked(&self) -> bool {
-                activity::platform::screen_locked()
+                !crate::session_events::observable_now()
             }
 
             fn free_bytes(&self, dir: &Path) -> Option<u64> {
@@ -692,9 +900,58 @@ pub mod platform {
         }
     }
 
-    #[cfg(not(target_os = "macos"))]
+    /// Windows: GDI capture of the primary monitor (`win::capture`), scaled on the CPU, then the
+    /// shared masks → blur → masks → WebP pipeline in `Shooter::tick`.
+    #[cfg(windows)]
     mod imp {
-        // Windows capture is not implemented (see docs/windows.md): nothing is captured here.
+        use super::super::{downscale, Frame, Os};
+        use std::os::windows::ffi::OsStrExt;
+        use std::path::Path;
+
+        pub const SUPPORTED: bool = true;
+
+        /// Windows does not ask for screen-capture permission: always granted. The in-app notice
+        /// and the always-visible capture state are the employee's disclosure.
+        pub fn permission() -> bool {
+            true
+        }
+
+        /// Nothing to request on Windows.
+        pub fn request_permission() -> bool {
+            true
+        }
+
+        pub struct Native;
+
+        impl Os for Native {
+            fn permission(&self) -> bool {
+                permission()
+            }
+
+            /// Locked or secure desktop (UAC, Ctrl+Alt+Del), sleep, or this session not on the
+            /// console: the same session_events rule as macOS.
+            fn locked(&self) -> bool {
+                !crate::session_events::observable_now()
+            }
+
+            fn free_bytes(&self, dir: &Path) -> Option<u64> {
+                use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
+                let wide: Vec<u16> = dir.as_os_str().encode_wide().chain([0]).collect();
+                let mut free = 0u64;
+                // SAFETY: NUL-terminated path; the unused outputs may be null.
+                (unsafe { GetDiskFreeSpaceExW(wide.as_ptr(), &mut free, std::ptr::null_mut(), std::ptr::null_mut()) } != 0).then_some(free)
+            }
+
+            /// The primary display only, without the cursor, scaled to `max_dimension`.
+            fn capture(&self, max_dimension: u32) -> Result<Frame, String> {
+                downscale(crate::win::capture::primary()?, max_dimension)
+            }
+        }
+    }
+
+    #[cfg(not(any(target_os = "macos", windows)))]
+    mod imp {
+        // No capture on this operating system: nothing is captured here.
         use super::super::{Frame, Os};
         use std::path::Path;
         pub const SUPPORTED: bool = false;
@@ -803,7 +1060,7 @@ mod tests {
     fn scope() -> Scope {
         Scope { user_id: "u1".into(), device_id: "d1".into(), session_id: "s1".into() }
     }
-    const CFG: Config = Config { interval_ms: 5 * MIN, quality: 70.0, max_dimension: 1920 };
+    const CFG: Config = Config { interval_ms: 5 * MIN, quality: 70.0, max_dimension: 1920, masks: Vec::new(), blur: Some(false) };
 
     /// Ticks every second from `from` to `to` (ms), wall == monotonic.
     fn run(s: &Shooter, e: &Env, os: &FakeOs, from: i64, to: i64) {
@@ -955,7 +1212,7 @@ mod tests {
         let webp = encode(&screen(64, 40), 70.0).unwrap();
         let (a, b, c) = {
             let conn = e.db.lock().unwrap();
-            (save(&conn, &e.dir, &scope(), 1_000, 64, 40, &webp).unwrap(), save(&conn, &e.dir, &scope(), 2_000, 64, 40, &webp).unwrap(), save(&conn, &e.dir, &scope(), 3_000, 64, 40, &webp).unwrap())
+            (save(&conn, &e.dir, &scope(), 1_000, 64, 40, &webp, &[], false).unwrap(), save(&conn, &e.dir, &scope(), 2_000, 64, 40, &webp, &[], false).unwrap(), save(&conn, &e.dir, &scope(), 3_000, 64, 40, &webp, &[], false).unwrap())
         };
         // Reopen (app restart): still queued, in capture order.
         let conn = crate::queue::open(&e.dir.join("queue.db")).unwrap();
@@ -995,10 +1252,10 @@ mod tests {
         let e = Env::new();
         let webp = encode(&screen(64, 40), 70.0).unwrap();
         let conn = e.db.lock().unwrap();
-        let ok = save(&conn, &e.dir, &scope(), 1_000, 64, 40, &webp).unwrap();
-        let renamed = save(&conn, &e.dir, &scope(), 2_000, 64, 40, &webp).unwrap();
-        let lost = save(&conn, &e.dir, &scope(), 3_000, 64, 40, &webp).unwrap();
-        let damaged = save(&conn, &e.dir, &scope(), 4_000, 64, 40, &webp).unwrap();
+        let ok = save(&conn, &e.dir, &scope(), 1_000, 64, 40, &webp, &[], false).unwrap();
+        let renamed = save(&conn, &e.dir, &scope(), 2_000, 64, 40, &webp, &[], false).unwrap();
+        let lost = save(&conn, &e.dir, &scope(), 3_000, 64, 40, &webp, &[], false).unwrap();
+        let damaged = save(&conn, &e.dir, &scope(), 4_000, 64, 40, &webp, &[], false).unwrap();
         // Crashed after the rename but before PENDING; crashed before the rename; file corrupted on disk.
         conn.execute("UPDATE screenshots SET status = 'SAVING' WHERE id IN (?1, ?2)", params![renamed, lost]).unwrap();
         std::fs::rename(file(&e.dir, &lost), e.dir.join(format!("{lost}.webp.tmp"))).unwrap();
@@ -1054,5 +1311,441 @@ mod tests {
         assert_eq!((decoded.width(), decoded.height()), (1920, 1200));
         eprintln!("[bench] 1920x1200 synthetic screen: q70 {} bytes, q40 {} bytes, encode {} ms ({})", q70.len(), q40.len(), took.as_millis(), if cfg!(debug_assertions) { "debug" } else { "release" });
         assert!(encode(&Frame { width: 10, height: 10, rgb: vec![0; 10] }, 70.0).is_err(), "short buffer refused, not a crash");
+    }
+
+    #[test]
+    fn downscale_averages_boxes_keeps_flat_colour_and_refuses_bad_buffers() {
+        let f = Frame { width: 4, height: 2, rgb: vec![0, 0, 0, 10, 20, 30, 100, 100, 100, 200, 200, 200, 2, 0, 0, 10, 20, 30, 100, 100, 100, 201, 200, 200] };
+        let out = downscale(f, 2).unwrap();
+        assert_eq!((out.width, out.height), (2, 1));
+        assert_eq!(out.rgb, [6, 10, 15, 150, 150, 150], "rounded means of each 2x2 box");
+
+        let out = downscale(solid(2880, 1800, 77), 1920).unwrap();
+        assert_eq!((out.width, out.height), (1920, 1200), "same size as fit()");
+        assert!(out.rgb.iter().all(|&v| v == 77), "fractional ratio: flat colour stays exact");
+        let out = downscale(solid(1001, 7, 9), 333).unwrap();
+        assert_eq!((out.width, out.height, out.rgb.len()), (333, 2, 333 * 2 * 3), "odd sizes");
+
+        let small = screen(1280, 800);
+        let copy = small.rgb.clone();
+        assert_eq!(downscale(small, 1920).unwrap().rgb, copy, "never upscaled or altered when it fits");
+        assert!(downscale(Frame { width: 10, height: 10, rgb: vec![0; 10] }, 5).is_err(), "short buffer refused, not a crash");
+        assert!(downscale(Frame { width: 0, height: 10, rgb: Vec::new() }, 5).is_err());
+    }
+
+    // ---- Privacy masks (F02) ---------------------------------------------------------------
+
+    fn solid(w: u32, h: u32, v: u8) -> Frame {
+        Frame { width: w, height: h, rgb: vec![v; (w * h * 3) as usize] }
+    }
+    fn px(f: &Frame, x: u32, y: u32) -> [u8; 3] {
+        let i = ((y * f.width + x) * 3) as usize;
+        [f.rgb[i], f.rgb[i + 1], f.rgb[i + 2]]
+    }
+    /// Pixels set to 0 as (min_x, min_y, max_x, max_y, count).
+    fn black_box(f: &Frame) -> Option<(u32, u32, u32, u32, usize)> {
+        let mut b: Option<(u32, u32, u32, u32, usize)> = None;
+        for y in 0..f.height {
+            for x in 0..f.width {
+                if px(f, x, y) == [0, 0, 0] {
+                    let e = b.get_or_insert((x, y, x, y, 0));
+                    *e = (e.0.min(x), e.1.min(y), e.2.max(x), e.3.max(y), e.4 + 1);
+                }
+            }
+        }
+        b
+    }
+    const M: fn(u16, u16, u16, u16) -> Mask = |x, y, w, h| Mask { x, y, w, h };
+
+    #[test]
+    fn masks_cover_the_same_share_at_every_resolution_rounded_outwards() {
+        // Left quarter, top tenth: exact at 1920x1080.
+        let mut f = solid(1920, 1080, 200);
+        apply_masks(&mut f, &[M(0, 0, 2500, 1000)]);
+        assert_eq!(black_box(&f), Some((0, 0, 479, 107, 480 * 108)), "x 0..480, y 0..108 exactly");
+
+        // The same mask on a scaled-down 1366x768 frame: 341.5 -> 342 px wide, 76.8 -> 77 px high (outwards).
+        let mut f = solid(1366, 768, 200);
+        apply_masks(&mut f, &[M(0, 0, 2500, 1000)]);
+        assert_eq!(black_box(&f), Some((0, 0, 341, 76, 342 * 77)));
+
+        // Fractional start is rounded down, fractional end up: never a sliver left uncovered.
+        let mut f = solid(1000, 1000, 200);
+        apply_masks(&mut f, &[M(3333, 3333, 3334, 3334)]); // 333.3 .. 666.7
+        assert_eq!(black_box(&f), Some((333, 333, 666, 666, 334 * 334)));
+
+        // Touching the right and bottom edges, and the whole frame.
+        let mut f = solid(1920, 1200, 200);
+        apply_masks(&mut f, &[M(9000, 9500, 1000, 500)]);
+        assert_eq!(black_box(&f), Some((1728, 1140, 1919, 1199, 192 * 60)));
+        let mut f = solid(640, 400, 200);
+        apply_masks(&mut f, &[M(0, 0, 10_000, 10_000)]);
+        assert_eq!(black_box(&f).map(|b| b.4), Some(640 * 400));
+
+        // A tiny mask still covers at least one pixel.
+        let mut f = solid(640, 400, 200);
+        apply_masks(&mut f, &[M(5000, 5000, 1, 1)]);
+        assert_eq!(black_box(&f), Some((320, 200, 320, 200, 1)));
+    }
+
+    #[test]
+    fn several_masks_overlapping_or_not_and_nothing_outside_them_changes() {
+        let mut f = screen(800, 500);
+        let before = f.rgb.clone();
+        let masks = [M(0, 0, 1000, 1000), M(500, 500, 1000, 1000), M(8000, 0, 2000, 2000)];
+        apply_masks(&mut f, &masks);
+        let inside = |x: u32, y: u32| (x < 80 && y < 50) || ((40..120).contains(&x) && (25..75).contains(&y)) || (x >= 640 && y < 100);
+        for y in 0..500 {
+            for x in 0..800 {
+                let i = ((y * 800 + x) * 3) as usize;
+                if inside(x, y) {
+                    assert_eq!(px(&f, x, y), [0, 0, 0], "masked at {x},{y}");
+                } else {
+                    assert_eq!(&f.rgb[i..i + 3], &before[i..i + 3], "untouched at {x},{y}");
+                }
+            }
+        }
+        let mut g = screen(800, 500);
+        apply_masks(&mut g, &[]);
+        assert_eq!(g.rgb, before, "no masks: the frame is unchanged");
+        let mut bad = Frame { width: 10, height: 10, rgb: vec![9; 12] };
+        apply_masks(&mut bad, &masks);
+        assert_eq!(bad.rgb, vec![9; 12], "a malformed frame is left for encode() to reject, never indexed out of bounds");
+    }
+
+    #[test]
+    fn mask_validation_matches_the_server_rules() {
+        assert!(masks_valid(&[]));
+        assert!(masks_valid(&[M(0, 0, 10_000, 10_000), M(9999, 9999, 1, 1)]));
+        for bad in [M(0, 0, 0, 10), M(0, 0, 10, 0), M(1, 0, 10_000, 10), M(0, 9_001, 10, 1000), M(10_000, 0, 1, 1), M(u16::MAX, 0, 1, 1)] {
+            assert!(!masks_valid(&[bad]), "{bad:?}");
+        }
+        assert!(masks_valid(&[M(0, 0, 1, 1); MASK_MAX]));
+        assert!(!masks_valid(&[M(0, 0, 1, 1); MASK_MAX + 1]));
+    }
+
+    #[test]
+    fn captures_are_masked_before_encoding_and_record_their_masks() {
+        let e = Env::new();
+        let os = FakeOs::new();
+        let s = Shooter::new(e.dir.clone(), LOCAL_CAP_BYTES);
+        let masks = vec![M(0, 0, 5000, 2000), M(7500, 7500, 2500, 2500)];
+        s.configure("ACTIVE".into(), Some(scope()), Config { masks: masks.clone(), ..CFG });
+        run(&s, &e, &os, 0, 5 * MIN);
+        let rows = e.rows();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].masks, masks, "the masks applied travel with the screenshot to the server");
+
+        // Real WebP round trip of the file on disk (what is uploaded): masked areas are black,
+        // the rest still shows the synthetic screen.
+        let bytes = read(&e.db.lock().unwrap(), &e.dir, &rows[0].id).unwrap();
+        let img = webp::Decoder::new(&bytes).decode().unwrap();
+        let (w, h) = (img.width(), img.height());
+        assert_eq!((w, h), (1920, 1200));
+        let rgba = img.is_alpha();
+        let ch = if rgba { 4 } else { 3 };
+        let at = |x: u32, y: u32| -> [u8; 3] {
+            let i = ((y * w + x) as usize) * ch;
+            [img[i], img[i + 1], img[i + 2]]
+        };
+        let max_in = |x0: u32, y0: u32, x1: u32, y1: u32| (y0..y1).flat_map(|y| (x0..x1).map(move |x| (x, y))).map(|(x, y)| *at(x, y).iter().max().unwrap()).max().unwrap();
+        // Inside, away from block edges where lossy coding may bleed a little.
+        assert!(max_in(8, 8, 952, 232) <= 12, "top-left mask is black in the stored file");
+        assert!(max_in(1448, 908, 1912, 1192) <= 12, "bottom-right mask is black in the stored file");
+        let reference = screen(1920, 1200);
+        let bright = (1000..1400).flat_map(|x| (400..700).map(move |y| (x, y))).filter(|&(x, y)| at(x, y)[2] > 200 && px(&reference, x, y)[2] > 200).count();
+        assert!(bright > 50_000, "the unmasked part still shows the screen ({bright} bright pixels)");
+
+        // A later capture under different masks starts a new schedule; old rows keep what they had.
+        s.configure("ACTIVE".into(), Some(scope()), CFG);
+        run(&s, &e, &os, 5 * MIN + 1000, 10 * MIN + 1000);
+        let rows = e.rows();
+        assert_eq!(rows.iter().map(|r| r.masks.len()).collect::<Vec<_>>(), [2, 0]);
+    }
+
+    #[test]
+    fn invalid_masks_pause_capture_instead_of_capturing_unmasked() {
+        let e = Env::new();
+        let os = FakeOs::new();
+        let s = Shooter::new(e.dir.clone(), LOCAL_CAP_BYTES);
+        let st = s.configure("ACTIVE".into(), Some(scope()), Config { masks: vec![M(9000, 0, 2000, 10)], ..CFG });
+        assert!(!st.capturing);
+        assert_eq!(st.error.as_deref(), Some(MASKS_INVALID));
+        run(&s, &e, &os, 0, 15 * MIN);
+        assert_eq!(os.captures.load(Ordering::SeqCst), 0, "nothing captured");
+        let st = s.configure("ACTIVE".into(), Some(scope()), Config { masks: vec![M(0, 0, 10, 10)], ..CFG });
+        assert!(st.capturing && st.error.is_none(), "valid masks resume capture and clear the message");
+    }
+
+    // ---- Whole-image blur -------------------------------------------------------------------
+
+    /// Sum of absolute horizontal and vertical neighbour differences: high for sharp text.
+    fn edge_energy(f: &Frame) -> u64 {
+        let (w, h) = (f.width as usize, f.height as usize);
+        let mut e = 0u64;
+        for y in 0..h - 1 {
+            for x in 0..w - 1 {
+                for c in 0..3 {
+                    let v = i64::from(f.rgb[(y * w + x) * 3 + c]);
+                    e += (v - i64::from(f.rgb[(y * w + x + 1) * 3 + c])).unsigned_abs() + (v - i64::from(f.rgb[((y + 1) * w + x) * 3 + c])).unsigned_abs();
+                }
+            }
+        }
+        e
+    }
+    const BLUR: Config = Config { interval_ms: 5 * MIN, quality: 70.0, max_dimension: 1920, masks: Vec::new(), blur: Some(true) };
+
+    #[test]
+    fn blur_destroys_text_like_detail_everywhere() {
+        assert_eq!((blur_radius(640, 400), blur_radius(1920, 1080), blur_radius(3840, 2160), blur_radius(1080, 1920)), (8, 16, 32, 16));
+        let mut f = screen(1920, 1200);
+        let before = f.rgb.clone();
+        let sharp = edge_energy(&f);
+        apply_blur(&mut f);
+        let soft = edge_energy(&f);
+        assert!(soft * 25 < sharp, "edge energy {soft} must fall below 4% of the original {sharp}");
+        // Every 16x16 neighbourhood changed: no block of the original survives verbatim.
+        for by in (0..1200).step_by(16) {
+            for bx in (0..1920).step_by(16) {
+                let changed = (by..by + 16).any(|y| (bx..bx + 16).any(|x| {
+                    let i = (y * 1920 + x) * 3;
+                    f.rgb[i..i + 3] != before[i..i + 3]
+                }));
+                assert!(changed, "block at {bx},{by} unchanged");
+            }
+        }
+        // Locally, the text strokes are gone: within a 40x40 window the luminance spread is small (what remains is page layout, not strokes).
+        let lum = |x: usize, y: usize| i32::from(f.rgb[(y * 1920 + x) * 3]);
+        for (x0, y0) in [(100, 100), (900, 600), (1500, 1000)] {
+            let vals: Vec<i32> = (y0..y0 + 40).flat_map(|y| (x0..x0 + 40).map(move |x| (x, y))).map(|(x, y)| lum(x, y)).collect();
+            let spread = vals.iter().max().unwrap() - vals.iter().min().unwrap();
+            assert!(spread < 60, "window at {x0},{y0}: spread {spread} (sharp text is ~200)");
+        }
+        // Uniform frame: unchanged (averaging only), and malformed frames are left alone.
+        let mut flat = solid(300, 200, 123);
+        apply_blur(&mut flat);
+        assert!(flat.rgb.iter().all(|&v| v == 123));
+        let mut bad = Frame { width: 10, height: 10, rgb: vec![9; 12] };
+        apply_blur(&mut bad);
+        assert_eq!(bad.rgb, vec![9; 12]);
+        let mut tiny = solid(1, 1, 50);
+        apply_blur(&mut tiny);
+        assert_eq!(tiny.rgb, vec![50; 3], "frames smaller than the radius are fine");
+    }
+
+    #[test]
+    fn masks_are_applied_before_the_blur_and_stay_black() {
+        let masks = vec![M(0, 0, 5000, 2000), M(7500, 7500, 2500, 2500)];
+        let mut f = screen(1920, 1200);
+        redact(&mut f, &Config { masks: masks.clone(), ..BLUR });
+        let mut only_masks = solid(1920, 1200, 200);
+        apply_masks(&mut only_masks, &masks);
+        let mut masked = 0;
+        for y in 0..1200 {
+            for x in 0..1920 {
+                if px(&only_masks, x, y) == [0, 0, 0] {
+                    masked += 1;
+                    assert_eq!(px(&f, x, y), [0, 0, 0], "masked pixel {x},{y} is solid black after the blur");
+                }
+            }
+        }
+        assert_eq!(masked, 960 * 240 + 480 * 300);
+        // The rest is blurred, and darkened next to the masks (the black was blurred, not the hidden content).
+        assert!(edge_energy(&f) * 20 < edge_energy(&screen(1920, 1200)));
+    }
+
+    #[test]
+    fn blurred_frames_encode_and_decode_and_blur_off_changes_nothing() {
+        let mut f = screen(1920, 1200);
+        redact(&mut f, &BLUR);
+        let webp = encode(&f, 70.0).unwrap();
+        let img = webp::Decoder::new(&webp).decode().unwrap();
+        assert_eq!((img.width(), img.height()), (1920, 1200));
+        let sharp = encode(&screen(1920, 1200), 70.0).unwrap();
+        assert!(webp.len() < sharp.len(), "blurred {} bytes < sharp {} bytes", webp.len(), sharp.len());
+
+        // Off: exactly the masks-only pipeline, same encoded bytes as before blur existed.
+        let masks = vec![M(0, 0, 2500, 1000)];
+        let mut off = screen(1920, 1200);
+        redact(&mut off, &Config { masks: masks.clone(), ..CFG });
+        let mut legacy = screen(1920, 1200);
+        apply_masks(&mut legacy, &masks);
+        assert_eq!(off.rgb, legacy.rgb);
+        assert_eq!(encode(&off, 70.0).unwrap(), encode(&legacy, 70.0).unwrap());
+        let mut invalid = screen(64, 40);
+        redact(&mut invalid, &Config { blur: None, ..CFG });
+        assert_eq!(invalid.rgb, screen(64, 40).rgb, "never reached: configure pauses capture first");
+    }
+
+    #[test]
+    fn blurred_captures_are_saved_blurred_and_recorded_and_invalid_blur_pauses() {
+        let e = Env::new();
+        let os = FakeOs::new();
+        let s = Shooter::new(e.dir.clone(), LOCAL_CAP_BYTES);
+        s.configure("ACTIVE".into(), Some(scope()), BLUR);
+        run(&s, &e, &os, 0, 5 * MIN);
+        let rows = e.rows();
+        assert_eq!(rows.iter().map(|r| r.blurred).collect::<Vec<_>>(), [true]);
+        // The file on disk (what is uploaded) is the blurred image.
+        let bytes = read(&e.db.lock().unwrap(), &e.dir, &rows[0].id).unwrap();
+        let img = webp::Decoder::new(&bytes).decode().unwrap();
+        let rgb: Vec<u8> = if img.is_alpha() { img.as_chunks::<4>().0.iter().flat_map(|p| [p[0], p[1], p[2]]).collect() } else { img.to_vec() };
+        let stored = Frame { width: img.width(), height: img.height(), rgb };
+        assert!(edge_energy(&stored) * 20 < edge_energy(&screen(1920, 1200)), "no sharp version is written");
+        assert!(!std::fs::read_dir(&e.dir).unwrap().any(|f| f.unwrap().file_name().to_string_lossy().ends_with(".tmp")));
+
+        // Unreadable setting: paused with a reason, nothing captured; a valid one resumes.
+        let st = s.configure("ACTIVE".into(), Some(scope()), Config { blur: None, ..BLUR });
+        assert!(!st.capturing);
+        assert_eq!(st.error.as_deref(), Some(BLUR_INVALID));
+        run(&s, &e, &os, 5 * MIN + 1000, 20 * MIN);
+        assert_eq!(os.captures.load(Ordering::SeqCst), 1, "nothing captured while the blur setting is unreadable");
+        let st = s.configure("ACTIVE".into(), Some(scope()), CFG);
+        assert!(st.capturing && st.error.is_none());
+        run(&s, &e, &os, 20 * MIN + 1000, 25 * MIN + 1000);
+        assert_eq!(e.rows().iter().map(|r| r.blurred).collect::<Vec<_>>(), [true, false]);
+    }
+
+    #[test]
+    fn a_blur_change_during_a_capture_discards_it() {
+        let e = Env::new();
+        let os = Arc::new(FakeOs::new());
+        let s = Arc::new(Shooter::new(e.dir.clone(), LOCAL_CAP_BYTES));
+        s.configure("ACTIVE".into(), Some(scope()), CFG);
+        let shooter = s.clone();
+        *os.on_capture.lock().unwrap() = Some(Box::new(move || {
+            shooter.configure("ACTIVE".into(), Some(scope()), BLUR); // blur turned on mid-capture
+        }));
+        run(&s, &e, &os, 0, 5 * MIN);
+        assert_eq!(os.captures.load(Ordering::SeqCst), 1);
+        assert!(e.rows().is_empty(), "captured under the old (unblurred) setting: dropped, nothing written");
+        assert!(s.status().skipped.unwrap().contains("Not kept"));
+    }
+
+    #[test]
+    fn a_failed_write_keeps_nothing_partial_and_leaves_the_queue_intact() {
+        let e = Env::new();
+        let webp = encode(&screen(64, 40), 70.0).unwrap();
+        let conn = e.db.lock().unwrap();
+        let kept = save(&conn, &e.dir, &scope(), 1_000, 64, 40, &webp, &[], false).unwrap();
+        // The folder is gone (or the disk refuses the write): the save fails cleanly.
+        let gone = e.dir.join("missing");
+        assert!(save(&conn, &gone, &scope(), 2_000, 64, 40, &webp, &[], true).is_err());
+        drop(conn);
+        assert_eq!(e.rows().iter().map(|r| (r.id.as_str(), r.status.as_str())).collect::<Vec<_>>(), [(kept.as_str(), "PENDING")], "no SAVING row left, earlier screenshot untouched");
+        // Through the worker: an error is shown, capture is not marked done, and it retries next interval.
+        let os = FakeOs::new();
+        let s = Shooter::new(gone, LOCAL_CAP_BYTES);
+        s.configure("ACTIVE".into(), Some(scope()), CFG);
+        run(&s, &e, &os, 0, 10 * MIN);
+        assert_eq!(os.captures.load(Ordering::SeqCst), 2, "tried again at the next interval");
+        assert!(s.status().error.unwrap().starts_with("Could not save the screenshot on this computer"));
+        assert!(s.status().last_capture.is_none());
+        assert_eq!(e.rows().len(), 1);
+    }
+
+    #[test]
+    fn retry_after_a_terminal_state_never_resurrects_a_row_and_cleanup_counts_real_removals() {
+        let e = Env::new();
+        let webp = encode(&screen(64, 40), 70.0).unwrap();
+        let conn = e.db.lock().unwrap();
+        let a = save(&conn, &e.dir, &scope(), 1_000, 64, 40, &webp, &[], false).unwrap();
+        mark(&conn, &a, "STORED", None, 0).unwrap();
+        mark(&conn, &a, "RETRY", Some("late failure report"), 0).unwrap();
+        mark(&conn, &a, "REJECTED", Some("late"), 0).unwrap();
+        mark(&conn, &a, "REGISTERED", None, 0).unwrap();
+        assert!(next_upload(&conn, "u1", "d1", i64::MAX).unwrap().is_none(), "a stored screenshot is never uploaded twice");
+        assert!(mark(&conn, &a, "BOGUS", None, 0).is_err());
+        // A STORED row whose file was already removed (interrupted cleanup) is still cleaned up.
+        std::fs::remove_file(file(&e.dir, &a)).unwrap();
+        assert_eq!(cleanup_stored(&conn, &e.dir, 2 * STORED_GRACE_MS).unwrap(), 1);
+        assert_eq!(cleanup_stored(&conn, &e.dir, 2 * STORED_GRACE_MS).unwrap(), 0, "idempotent");
+    }
+
+    /// Blur + WebP encode cost on synthetic frames (no screen capture). Numbers are printed; run
+    /// `cargo test --release blur_benchmark -- --nocapture` for release timings.
+    #[test]
+    fn blur_benchmark() {
+        for (w, h) in [(1920u32, 1080u32), (3840, 2160)] {
+            let mut f = screen(w, h);
+            let t = Instant::now();
+            apply_blur(&mut f);
+            let blur = t.elapsed();
+            let t = Instant::now();
+            let webp = encode(&f, 70.0).unwrap();
+            let enc = t.elapsed();
+            let frame_mb = f.rgb.len() as f64 / 1_048_576.0;
+            let extra_kb = ((blur_radius(w, h) + 2) * w as usize * 3 + w as usize * 8) / 1024;
+            eprintln!(
+                "[bench] {w}x{h} blur r={} {} ms, encode q70 (incl. validation decode) {} ms, {} KB; frame {frame_mb:.1} MB, blur scratch {extra_kb} KB ({})",
+                blur_radius(w, h),
+                blur.as_millis(),
+                enc.as_millis(),
+                webp.len() / 1024,
+                if cfg!(debug_assertions) { "debug" } else { "release" }
+            );
+        }
+    }
+
+    #[test]
+    fn queues_from_before_blur_keep_their_rows_and_report_unblurred() {
+        let dir = std::env::temp_dir().join(format!("wf-shots-old-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("queue.db");
+        {
+            let c = Connection::open(&path).unwrap();
+            c.execute_batch(
+                "CREATE TABLE screenshots (seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, user_id TEXT NOT NULL, device_id TEXT NOT NULL,
+                   session_id TEXT NOT NULL, captured_ms INTEGER NOT NULL, width INTEGER NOT NULL, height INTEGER NOT NULL,
+                   size_bytes INTEGER NOT NULL CHECK (size_bytes > 0), checksum TEXT NOT NULL,
+                   status TEXT NOT NULL CHECK (status IN ('SAVING', 'PENDING', 'REGISTERED', 'STORED', 'FAILED', 'REJECTED')),
+                   retries INTEGER NOT NULL DEFAULT 0, next_attempt_ms INTEGER NOT NULL DEFAULT 0, last_error TEXT, stored_ms INTEGER,
+                   masks TEXT NOT NULL DEFAULT '[]') STRICT;
+                 INSERT INTO screenshots (id, user_id, device_id, session_id, captured_ms, width, height, size_bytes, checksum, status, retries, masks)
+                   VALUES ('p', 'u1', 'd1', 's1', 1000, 64, 40, 10, 'x', 'PENDING', 2, '[{\"x\":0,\"y\":0,\"w\":10,\"h\":10}]'),
+                          ('r', 'u1', 'd1', 's1', 2000, 64, 40, 10, 'y', 'REGISTERED', 0, '[]'),
+                          ('s', 'u1', 'd1', 's1', 3000, 64, 40, 10, 'z', 'STORED', 0, '[]');",
+            )
+            .unwrap();
+        }
+        let c = crate::queue::open(&path).unwrap();
+        drop(crate::queue::open(&path).unwrap()); // reopening does not add it twice
+        let rows: Vec<ShotRow> = c.prepare(&format!("SELECT {ROW_COLUMNS} FROM screenshots ORDER BY seq")).unwrap().query_map([], row).unwrap().map(|r| r.unwrap()).collect();
+        assert_eq!(
+            rows.iter().map(|r| (r.id.as_str(), r.status.as_str(), r.retries, r.masks.len(), r.blurred)).collect::<Vec<_>>(),
+            [("p", "PENDING", 2, 1, false), ("r", "REGISTERED", 0, 0, false), ("s", "STORED", 0, 0, false)],
+            "every queued row survives the upgrade, unblurred"
+        );
+        assert!(c.execute("UPDATE screenshots SET blurred = 2 WHERE id = 'p'", []).is_err(), "only 0 or 1");
+        drop(c);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn queues_from_before_masks_gain_the_column_and_report_none() {
+        let dir = std::env::temp_dir().join(format!("wf-shots-old-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("queue.db");
+        {
+            let c = Connection::open(&path).unwrap();
+            c.execute_batch(
+                "CREATE TABLE screenshots (seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, user_id TEXT NOT NULL, device_id TEXT NOT NULL,
+                   session_id TEXT NOT NULL, captured_ms INTEGER NOT NULL, width INTEGER NOT NULL, height INTEGER NOT NULL,
+                   size_bytes INTEGER NOT NULL CHECK (size_bytes > 0), checksum TEXT NOT NULL,
+                   status TEXT NOT NULL CHECK (status IN ('SAVING', 'PENDING', 'REGISTERED', 'STORED', 'FAILED', 'REJECTED')),
+                   retries INTEGER NOT NULL DEFAULT 0, next_attempt_ms INTEGER NOT NULL DEFAULT 0, last_error TEXT, stored_ms INTEGER) STRICT;
+                 INSERT INTO screenshots (id, user_id, device_id, session_id, captured_ms, width, height, size_bytes, checksum, status)
+                   VALUES ('old', 'u1', 'd1', 's1', 1000, 64, 40, 10, 'x', 'PENDING');",
+            )
+            .unwrap();
+        }
+        let c = crate::queue::open(&path).unwrap();
+        let c2 = crate::queue::open(&path).unwrap(); // reopening does not add it twice
+        drop(c2);
+        let r = next_upload(&c, "u1", "d1", 2000).unwrap().unwrap();
+        assert_eq!((r.id.as_str(), r.masks.len()), ("old", 0), "captured before masks existed: none applied");
+        assert!(!r.blurred, "captured before blur existed: not blurred");
+        drop(c);
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

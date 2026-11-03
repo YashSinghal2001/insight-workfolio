@@ -3,18 +3,28 @@ import type { DatabaseClient } from "@workfolio/database";
 import {
   addDays,
   buildTimesheet,
+  localDate,
+  TIMESHEET_CSV_COLUMNS,
+  timesheetRows,
+  toCsv,
   zonedToUtc,
   type AttendancePolicy,
+  type Cell,
+  type ExportFormat,
   type EmployeeRef,
   type ListEmployeesQuery,
   type Paginated,
+  type ShiftActivity,
   type TimesheetResponse,
   type TimesheetSummaryRow,
 } from "@workfolio/shared";
+import type { AuthContext } from "../auth/auth.service.js";
 import { POLICY } from "../common/policy.js";
+import { scopeSql } from "../common/scope.js";
 import { DATABASE } from "../database/database.module.js";
 import { EmployeesService } from "../employees/employees.service.js";
-import { SESSION_COLUMNS, withBreaks } from "./sessions.js";
+import { ACTIVE_EMPLOYEE, SESSION_COLUMNS, withBreaks } from "./sessions.js";
+import { orgTimesheetXlsx, timesheetXlsx } from "./timesheet-xlsx.js";
 
 /** Read-only timesheets computed on request from sessions (corrections included once approved). */
 @Injectable()
@@ -41,9 +51,101 @@ export class TimesheetService {
     return { ...sheet, employee, pendingCorrections: Number(pending!.rows[0]!.n) };
   }
 
-  /** Admin listing: totals per employee for the range (each in the employee's own time zone). */
-  async summary(query: ListEmployeesQuery & { from: string; to: string }): Promise<Paginated<TimesheetSummaryRow>> {
-    const page = await this.employees.list(query);
+  /**
+   * Draft export (TIMESHEET_CSV_FORMAT): one row per shift that started on a local date in [from, to],
+   * with the recorded activity linked to it. CSV and XLSX share these rows. Built in memory per
+   * request; nothing is stored.
+   */
+  async exportRows(employee: EmployeeRef, from: string, to: string): Promise<Cell[][]> {
+    const range = [employee.id, zonedToUtc(`${from}T00:00`, employee.timezone), zonedToUtc(`${addDays(to, 1)}T00:00`, employee.timezone)];
+    const [sessions, sums] = await this.db.batch(
+      [
+        { sql: `SELECT ${SESSION_COLUMNS} FROM attendance_sessions s WHERE s.employee_id = ? AND s.clock_in_at >= ? AND s.clock_in_at < ? ORDER BY s.clock_in_at`, args: range },
+        // A sub-query rather than one parameter per shift, so a long range never hits a parameter limit.
+        {
+          sql: `SELECT attendance_session_id AS id,
+                  coalesce(sum(CASE WHEN kind = 'ACTIVE' THEN active_seconds END), 0) AS active,
+                  coalesce(sum(CASE WHEN kind = 'IDLE' THEN idle_seconds END), 0) AS idle
+                FROM activity_intervals WHERE employee_id = ?1 AND attendance_session_id IN
+                  (SELECT id FROM attendance_sessions WHERE employee_id = ?1 AND clock_in_at >= ?2 AND clock_in_at < ?3)
+                GROUP BY attendance_session_id`,
+          args: range,
+        },
+      ],
+      "read",
+    );
+    const activity = new Map<string, ShiftActivity>(sums!.rows.map((r) => [String(r.id), { activeMs: Number(r.active) * 1000, idleMs: Number(r.idle) * 1000 }]));
+    return timesheetRows(employee, await withBreaks(this.db, sessions!.rows), activity);
+  }
+
+  /** The file in the requested format, and how many shift rows it has. */
+  async export(employee: EmployeeRef, from: string, to: string, format: ExportFormat): Promise<{ body: string | Buffer; rows: number }> {
+    const rows = await this.exportRows(employee, from, to);
+    const body = format === "xlsx" ? await timesheetXlsx(employee, rows, { from, to }) : toCsv([TIMESHEET_CSV_COLUMNS.map((c) => c.header), ...rows]);
+    return { body, rows: rows.length };
+  }
+
+  /**
+   * Organisation-wide draft export: the per-employee rows (same columns, same values) for every
+   * matching employee, ordered by employee code then clock-in. Active employees only unless
+   * `includeInactive`. Three queries plus the breaks, whatever the head count.
+   */
+  async exportAll(
+    from: string,
+    to: string,
+    format: ExportFormat,
+    opts: { q?: string; includeInactive: boolean; caller?: AuthContext },
+  ): Promise<{ body: string | Buffer; rows: number }> {
+    // Team heads: only their teams' members (W41). The scope's one `?` is bound as ?3.
+    const scope = opts.caller ? scopeSql(opts.caller, "attendance:read-all", "p.id") : { sql: "", args: [] };
+    const like = opts.q ? `%${opts.q.replace(/[\\%_]/g, (c) => `\\${c}`)}%` : null;
+    // A day of slack on each side covers every UTC offset; rows are then kept by each employee's local date.
+    const window = [`${addDays(from, -1)}T00:00:00.000Z`, `${addDays(to, 2)}T00:00:00.000Z`];
+    const [emps, sessions, sums] = await this.db.batch(
+      [
+        {
+          sql: `SELECT p.id, p.full_name, p.employee_code, p.timezone FROM employee_profiles p JOIN users u ON u.id = p.user_id
+                WHERE (?1 = 1 OR (${ACTIVE_EMPLOYEE}))
+                  AND (?2 IS NULL OR p.full_name LIKE ?2 ESCAPE '\\' OR u.email LIKE ?2 ESCAPE '\\' OR p.employee_code LIKE ?2 ESCAPE '\\')${scope.sql.replace("?", "?3")}
+                ORDER BY p.employee_code, p.id`,
+          args: [opts.includeInactive ? 1 : 0, like, ...scope.args],
+        },
+        { sql: `SELECT ${SESSION_COLUMNS} FROM attendance_sessions s WHERE s.clock_in_at >= ? AND s.clock_in_at < ?`, args: window },
+        {
+          sql: `SELECT attendance_session_id AS id,
+                  coalesce(sum(CASE WHEN kind = 'ACTIVE' THEN active_seconds END), 0) AS active,
+                  coalesce(sum(CASE WHEN kind = 'IDLE' THEN idle_seconds END), 0) AS idle
+                FROM activity_intervals WHERE attendance_session_id IN
+                  (SELECT id FROM attendance_sessions WHERE clock_in_at >= ? AND clock_in_at < ?)
+                GROUP BY attendance_session_id`,
+          args: window,
+        },
+      ],
+      "read",
+    );
+    const employees: EmployeeRef[] = emps!.rows.map((r) => ({ id: String(r.id), fullName: String(r.full_name), employeeCode: String(r.employee_code), timezone: String(r.timezone) }));
+    const wanted = new Set(employees.map((e) => e.id));
+    const kept = sessions!.rows.filter((r) => wanted.has(String(r.employee_id)));
+    // ponytail: withBreaks binds one parameter per shift; fine to ~30k shifts (SQLite's limit), batch it beyond that.
+    const all = await withBreaks(this.db, kept);
+    const ownerOf = new Map(kept.map((r) => [String(r.id), String(r.employee_id)]));
+    const activity = new Map<string, ShiftActivity>(sums!.rows.map((r) => [String(r.id), { activeMs: Number(r.active) * 1000, idleMs: Number(r.idle) * 1000 }]));
+    const perEmployee = employees.map((employee) => {
+      const mine = all.filter((x) => {
+        if (ownerOf.get(x.id) !== employee.id) return false;
+        const d = localDate(x.clockInAt, employee.timezone);
+        return d >= from && d <= to;
+      });
+      return { employee, rows: timesheetRows(employee, mine, activity) };
+    });
+    const rows = perEmployee.flatMap((e) => e.rows);
+    const body = format === "xlsx" ? await orgTimesheetXlsx(perEmployee, { from, to }) : toCsv([TIMESHEET_CSV_COLUMNS.map((c) => c.header), ...rows]);
+    return { body, rows: rows.length };
+  }
+
+  /** Admin listing: totals per employee for the range (each in the employee's own time zone). Team heads: their teams. */
+  async summary(query: ListEmployeesQuery & { from: string; to: string }, caller?: AuthContext): Promise<Paginated<TimesheetSummaryRow>> {
+    const page = await this.employees.list(query, caller, "attendance:read-all");
     const ids = page.items.map((e) => e.id);
     if (!ids.length) return { ...page, items: [] };
     const marks = ids.map(() => "?").join(", ");

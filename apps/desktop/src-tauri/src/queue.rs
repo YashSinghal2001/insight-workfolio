@@ -1,5 +1,6 @@
-//! Durable offline queue for attendance events (SQLite in the app data directory).
-//! Holds attendance events and non-secret cached state only; tokens never go here.
+//! Durable offline store (SQLite in the app data directory): queued attendance events, activity
+//! intervals awaiting upload, screenshot queue metadata (the image files live beside it) and
+//! non-secret cached state (kv). Tokens never go here.
 
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
@@ -28,6 +29,18 @@ fn pending() -> String {
 
 pub fn open(path: &Path) -> rusqlite::Result<Connection> {
     let conn = Connection::open(path)?;
+    // Owner-only, like its folder; SQLite creates the -wal/-shm files with the database file's mode.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        for suffix in ["", "-wal", "-shm"] {
+            let file = format!("{}{suffix}", path.display());
+            match std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(rusqlite::Error::InvalidPath(file.into())),
+                _ => {}
+            }
+        }
+    }
     // Fails fast on a damaged file ("file is not a database", corrupt pages).
     let check: String = conn.query_row("PRAGMA quick_check", [], |r| r.get(0))?;
     if check != "ok" {
@@ -84,10 +97,20 @@ pub fn open(path: &Path) -> rusqlite::Result<Connection> {
            retries         INTEGER NOT NULL DEFAULT 0,
            next_attempt_ms INTEGER NOT NULL DEFAULT 0,
            last_error      TEXT,
-           stored_ms       INTEGER
+           stored_ms       INTEGER,
+           masks           TEXT NOT NULL DEFAULT '[]', -- privacy masks applied at capture (JSON)
+           blurred         INTEGER NOT NULL DEFAULT 0 CHECK (blurred IN (0, 1)) -- whole image blurred at capture
          ) STRICT;
          CREATE INDEX IF NOT EXISTS screenshots_scope ON screenshots(user_id, device_id, status, captured_ms);",
     )?;
+    // Queues created before privacy masks: their screenshots were captured without any.
+    if !conn.prepare("SELECT 1 FROM pragma_table_info('screenshots') WHERE name = 'masks'")?.exists([])? {
+        conn.execute_batch("ALTER TABLE screenshots ADD COLUMN masks TEXT NOT NULL DEFAULT '[]'")?;
+    }
+    // Queues created before blur: their screenshots were not blurred. Existing rows are kept.
+    if !conn.prepare("SELECT 1 FROM pragma_table_info('screenshots') WHERE name = 'blurred'")?.exists([])? {
+        conn.execute_batch("ALTER TABLE screenshots ADD COLUMN blurred INTEGER NOT NULL DEFAULT 0 CHECK (blurred IN (0, 1))")?;
+    }
     Ok(conn)
 }
 
@@ -331,6 +354,23 @@ pub mod tests {
             status: pending(),
             reason: None,
         }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn queue_files_are_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let path = temp_db();
+        std::fs::write(&path, b"").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap(); // as created before this check
+        let conn = open(&path).unwrap();
+        kv_set(&conn, "k", Some("v")).unwrap(); // writes the WAL
+        for suffix in ["", "-wal", "-shm"] {
+            let mode = std::fs::metadata(format!("{}{suffix}", path.display())).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "attendance-queue.db{suffix}");
+        }
+        drop(conn);
+        remove_db(&path);
     }
 
     #[test]

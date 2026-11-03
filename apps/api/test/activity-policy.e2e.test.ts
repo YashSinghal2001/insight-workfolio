@@ -112,6 +112,9 @@ before(async () => {
   app = await NestFactory.create(AppModule, { logger: false });
   configureApp(app);
   await app.listen(0);
+  // Seeding 12,000 rows directly in the DB can idle fetch's keep-alive socket past Node's 5 s server
+  // timeout; under load the server closes it just as the next request reuses it (ECONNRESET).
+  app.getHttpServer().keepAliveTimeout = 120_000;
   base = (await app.getUrl()).replace("[::1]", "localhost");
   db = app.get(DATABASE);
   await db.execute({ sql: "INSERT INTO users (id, email, role, password_hash) VALUES (?, 'admin@example.com', 'ADMIN', ?)", args: [randomUUID(), await hashPassword(PASSWORD)] });
@@ -147,7 +150,7 @@ describe("monitoring settings", () => {
     assert.equal(changed.body.effective.changedBy.email, "admin@example.com");
     assert.ok(changed.body.history.length >= 3, "every change is kept");
     const me = await api("/activity/me", { bearer: e.bearer });
-    assert.deepEqual(me.body.policy, { enabled: true, sampleSeconds: 30, idleThresholdSeconds: 600 });
+    assert.deepEqual(me.body.policy, { enabled: true, sampleSeconds: 30, idleThresholdSeconds: 600, idleExcludedApps: [] });
     await settings({});
   });
 
@@ -272,6 +275,11 @@ describe("reporting", () => {
     assert.deepEqual(ws.body.warnings.map((x: { code: string }) => x.code).sort(), ["NO_CONSENT", "UNSUPPORTED_PLATFORM"]);
     assert.equal(ws.body.freshness, "NO_DATA");
     assert.equal(ws.body.consent.acknowledgedAt, null);
+
+    // Once the Windows device has uploaded activity (current desktop builds), the warning goes away.
+    await seed(w, Date.now() - 2 * H, 4);
+    const ws2 = await api(`/activity/summary?employeeId=${w.id}&from=${today}&to=${today}`, { cookie: admin });
+    assert.ok(!ws2.body.warnings.some((x: { code: string }) => x.code === "UNSUPPORTED_PLATFORM"), ws2.text);
   });
 
   test("large dataset: 12,000 intervals; SQL totals match the reference aggregation; pagination walks every row once", async () => {

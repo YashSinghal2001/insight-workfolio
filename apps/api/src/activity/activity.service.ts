@@ -8,11 +8,14 @@ import {
   zonedToUtc,
   type ActivityAppTotal,
   type ActivityKind,
+  type ActivityOverviewRow,
+  type ApplicationCategory,
+  type CategorizedActivityDay,
+  type CategorizedTimelineItem,
   type ActivityPeriodTotals,
-  type ActivityReportDay,
   type ActivityReportWeek,
   type ActivityStatusResponse,
-  type ActivitySummaryResponse,
+  type CategorizedActivitySummary,
   type ActivitySyncRequest,
   type ActivitySyncResponse,
   type ActivitySyncResult,
@@ -29,6 +32,7 @@ import { POLICY } from "../common/policy.js";
 import { DATABASE } from "../database/database.module.js";
 import type { DeviceContext } from "../devices/devices.service.js";
 import { MonitoringSettingsService, type PolicyPeriod } from "../settings/monitoring-settings.service.js";
+import { ActivityCategoriesService } from "./categories.service.js";
 
 /** Edges this far outside a clocked-in segment (or into a neighbouring interval) are trimmed; more is rejected. */
 const EDGE_TOLERANCE_MS = 60_000;
@@ -51,6 +55,11 @@ const toItem = (r: Record<string, unknown>): ActivityTimelineItem => ({
 /** Milliseconds of an interval inside [?, ?) (end bound first). ISO strings compare chronologically. */
 const CLIPPED_MS = "round((julianday(min(ended_at, ?)) - julianday(max(started_at, ?))) * 86400000)";
 const minutes = (ms: number) => `${Math.round(ms / 60_000)} min`;
+/** Same grouping key as the per-application totals (identifier, else the name). */
+const APP_KEY = "coalesce(a.application_identifier, 'name:' || a.application_name)";
+const appKey = (a: { applicationIdentifier: string | null; applicationName: string | null }) => a.applicationIdentifier ?? `name:${a.applicationName}`;
+type Split = Record<ApplicationCategory, number>;
+const emptySplit = (): Split => ({ PRODUCTIVE: 0, NEUTRAL: 0, UNPRODUCTIVE: 0, UNCLASSIFIED: 0 });
 
 /**
  * Activity intervals uploaded by the desktop agent. Accepted only from the employee's active
@@ -67,12 +76,13 @@ export class ActivityService {
     @Inject(POLICY) private readonly attendancePolicy: AttendancePolicy,
     private readonly settings: MonitoringSettingsService,
     private readonly locks: EmployeeLocks,
+    private readonly categories: ActivityCategoriesService,
   ) {}
 
   async status(employee: EmployeeRef): Promise<ActivityStatusResponse> {
     const settings = await this.settings.current();
     const today = todayIn(employee.timezone);
-    const [notice, [consent, session, last], totals] = await Promise.all([
+    const [notice, [consent, session, last], totals, policy] = await Promise.all([
       this.settings.notice(settings.noticeVersion),
       this.db.batch(
         [
@@ -94,10 +104,11 @@ export class ActivityService {
         "read",
       ),
       this.aggregate(employee, today, today),
+      this.settings.policyFor(employee.id, settings), // effective for this employee (W21/W22)
     ]);
     const s = session!.rows[0];
     return {
-      policy: { enabled: settings.enabled, sampleSeconds: settings.sampleSeconds, idleThresholdSeconds: settings.idleThresholdSeconds },
+      policy,
       notice,
       consent: { noticeVersion: settings.noticeVersion, acknowledgedAt: str(consent!.rows[0]?.acknowledged_at) },
       today: { date: today, activeMs: totals.activeMs, idleMs: totals.idleMs },
@@ -183,29 +194,49 @@ export class ActivityService {
     return { results };
   }
 
-  async summary(employee: EmployeeRef, from: string, to: string): Promise<ActivitySummaryResponse> {
+  async summary(employee: EmployeeRef, from: string, to: string): Promise<CategorizedActivitySummary> {
     const now = Date.now();
     const [start, end] = this.bounds(employee, from, to).map(Date.parse) as [number, number];
-    const [agg, segments, settings, [last, device]] = await Promise.all([
-      this.aggregate(employee, from, to),
+    const [agg, segments, settings, [last, device], labels] = await Promise.all([
+      this.aggregate(employee, from, to, true),
       clockedInSegments(this.db, employee.id, start, Math.min(end, now), now),
       this.settings.current(),
       this.db.batch(
         [
           { sql: "SELECT max(received_at) AS at FROM activity_intervals WHERE employee_id = ?", args: [employee.id] },
-          { sql: "SELECT platform, last_seen_at FROM devices WHERE employee_id = ? AND revoked_at IS NULL ORDER BY registered_at DESC LIMIT 1", args: [employee.id] },
+          {
+            // device_activity_at: whether this device has ever uploaded activity (Windows support arrived in a later app version).
+            sql: `SELECT d.platform, d.last_seen_at, (SELECT max(a.received_at) FROM activity_intervals a WHERE a.device_id = d.id) AS device_activity_at
+                  FROM devices d WHERE d.employee_id = ? AND d.revoked_at IS NULL ORDER BY d.registered_at DESC LIMIT 1`,
+            args: [employee.id],
+          },
         ],
         "read",
       ),
+      this.categories.labelsFor([employee.id]),
     ]);
     const consent = await this.db.execute({
       sql: "SELECT acknowledged_at FROM monitoring_consents WHERE employee_id = ? AND notice_version = ?",
       args: [employee.id, settings.noticeVersion],
     });
 
-    const days: ActivityReportDay[] = agg.days.map((d) => {
+    // Labels apply at read time (retroactive), with the employee's team labels (F05). Only ACTIVE time is labelled; idle is never productive.
+    const applications = agg.applications.map((a) => ({ ...a, category: labels.category(employee.id, a) }));
+    const categoryOf = new Map(applications.map((a) => [appKey(a), a.category]));
+    const splitByDay = new Map<string, Split>();
+    for (const r of agg.dayApps) {
+      const split = splitByDay.get(r.date) ?? emptySplit();
+      split[categoryOf.get(r.key) ?? "UNCLASSIFIED"] += r.ms;
+      splitByDay.set(r.date, split);
+    }
+    const days: CategorizedActivityDay[] = agg.days.map((d) => {
       const clockedInMs = segments.reduce((n, s) => n + Math.max(0, Math.min(s.end, d.end) - Math.max(s.start, d.start)), 0);
-      return { date: d.date, activeMs: d.activeMs, idleMs: d.idleMs, clockedInMs, unobservedMs: Math.max(0, clockedInMs - d.activeMs - d.idleMs) };
+      const split = splitByDay.get(d.date) ?? emptySplit();
+      return {
+        date: d.date, activeMs: d.activeMs, idleMs: d.idleMs, clockedInMs, unobservedMs: Math.max(0, clockedInMs - d.activeMs - d.idleMs),
+        productiveMs: split.PRODUCTIVE, neutralMs: split.NEUTRAL, unproductiveMs: split.UNPRODUCTIVE, unclassifiedMs: split.UNCLASSIFIED,
+        productiveShare: clockedInMs > 0 ? split.PRODUCTIVE / clockedInMs : null,
+      };
     });
     const sum = (list: ActivityPeriodTotals[]): ActivityPeriodTotals => ({
       activeMs: list.reduce((n, d) => n + d.activeMs, 0),
@@ -213,7 +244,7 @@ export class ActivityService {
       clockedInMs: list.reduce((n, d) => n + d.clockedInMs, 0),
       unobservedMs: list.reduce((n, d) => n + d.unobservedMs, 0),
     });
-    const byWeek = new Map<string, ActivityReportDay[]>();
+    const byWeek = new Map<string, CategorizedActivityDay[]>();
     for (const d of days) {
       const w = weekStart(d.date, this.attendancePolicy.weekStartsOn);
       byWeek.set(w, [...(byWeek.get(w) ?? []), d]);
@@ -230,7 +261,10 @@ export class ActivityService {
     if (!settings.enabled) warnings.push({ code: "MONITORING_DISABLED", message: "Activity monitoring is turned off in the settings; nothing is being recorded." });
     if (!acknowledgedAt) warnings.push({ code: "NO_CONSENT", message: `The employee has not acknowledged the current monitoring notice (${settings.noticeVersion}); nothing is recorded until they do.` });
     if (!dev) warnings.push({ code: "NO_ACTIVE_DEVICE", message: "No active device is registered; activity cannot be recorded." });
-    else if (dev.platform === "windows") warnings.push({ code: "UNSUPPORTED_PLATFORM", message: "The employee's device runs Windows, where activity collection is not available yet. Only attendance is recorded." });
+    else if (dev.platform === "windows" && !dev.device_activity_at) {
+      // Older desktop builds recorded attendance only on Windows; current builds collect activity there too.
+      warnings.push({ code: "UNSUPPORTED_PLATFORM", message: "The employee's Windows device has not sent any activity yet. Older versions of the desktop app record attendance only on Windows; ask the employee to update the app." });
+    }
     if (stale) {
       warnings.push({
         code: "STALE_SYNC",
@@ -247,10 +281,14 @@ export class ActivityService {
       }
     }
 
+    const byCategory = (c: string) => applications.reduce((n, a) => n + (a.category === c ? a.activeMs : 0), 0);
+    const totals = sum(days);
+    const productiveMs = byCategory("PRODUCTIVE");
+
     return {
       employee, from, to,
-      ...sum(days),
-      applications: agg.applications,
+      ...totals,
+      applications,
       days,
       weeks,
       lastReceivedAt,
@@ -258,13 +296,19 @@ export class ActivityService {
       freshness: stale ? "STALE" : !lastReceivedAt && !segments.length ? "NO_DATA" : "CURRENT",
       consent: { noticeVersion: settings.noticeVersion, acknowledgedAt },
       warnings,
+      productiveMs,
+      neutralMs: byCategory("NEUTRAL"),
+      unproductiveMs: byCategory("UNPRODUCTIVE"),
+      unclassifiedMs: byCategory("UNCLASSIFIED"),
+      productiveShare: totals.clockedInMs > 0 ? productiveMs / totals.clockedInMs : null,
+      categoriesConfigured: labels.configured,
     };
   }
 
-  async timeline(employee: EmployeeRef, q: { from: string; to: string; page: number; pageSize: number }): Promise<Paginated<ActivityTimelineItem>> {
+  async timeline(employee: EmployeeRef, q: { from: string; to: string; page: number; pageSize: number }): Promise<Paginated<CategorizedTimelineItem>> {
     const [start, end] = this.bounds(employee, q.from, q.to);
     const where = "employee_id = ? AND started_at < ? AND ended_at > ?";
-    const [rows, count] = await this.db.batch(
+    const [labels, [rows, count]] = await Promise.all([this.categories.labelsFor([employee.id]), this.db.batch(
       [
         {
           sql: `SELECT ${TIMELINE_COLUMNS} FROM activity_intervals WHERE ${where} ORDER BY started_at, id LIMIT ? OFFSET ?`,
@@ -273,8 +317,84 @@ export class ActivityService {
         { sql: `SELECT count(*) AS n FROM activity_intervals WHERE ${where}`, args: [employee.id, end, start] },
       ],
       "read",
+    )]);
+    const items = rows!.rows.map((r): CategorizedTimelineItem => {
+      const item = toItem(r);
+      return { ...item, category: item.kind === "IDLE" ? null : labels.category(employee.id, item) };
+    });
+    return { items, total: Number(count!.rows[0]!.n), page: q.page, pageSize: q.pageSize };
+  }
+
+  /**
+   * Admin overview: range totals for one page of employees, each range in the employee's own time zone.
+   * Five reads for the whole page (no per-employee queries). Clocked-in time is computed in SQL with the
+   * same rule as clockedInSegments (sessions minus breaks, open ones running to now).
+   */
+  async overview(employees: EmployeeRef[], from: string, to: string): Promise<{ items: ActivityOverviewRow[]; categoriesConfigured: boolean }> {
+    const labels = await this.categories.labelsFor(employees.map((e) => e.id));
+    const configured = labels.configured;
+    if (!employees.length) return { items: [], categoriesConfigured: configured };
+    const now = iso(Date.now());
+    const bounds = employees.map((e) => {
+      const [s, end] = this.bounds(e, from, to);
+      return [e.id, s, end < now ? end : now];
+    });
+    const b = { sql: `WITH b(emp, s, e) AS (VALUES ${bounds.map(() => "(?, ?, ?)").join(", ")})`, args: bounds.flat() };
+    const clip = (endExpr: string, startExpr: string) => `sum(max(0, round((julianday(${endExpr}) - julianday(${startExpr})) * 86400000)))`;
+    const sessionJoin = "JOIN attendance_sessions s ON s.employee_id = b.emp AND s.clock_in_at < b.e AND coalesce(s.clock_out_at, b.e) > b.s";
+    const [activity, worked, breaks, last] = await this.db.batch(
+      [
+        {
+          // Bare application columns come from the latest interval (max), as in the per-employee summary.
+          sql: `${b.sql} SELECT b.emp, a.kind, a.application_identifier, a.application_name, max(a.started_at) AS latest, ${clip("min(a.ended_at, b.e)", "max(a.started_at, b.s)")} AS ms
+                FROM b JOIN activity_intervals a ON a.employee_id = b.emp AND a.started_at < b.e AND a.ended_at > b.s
+                GROUP BY b.emp, a.kind, ${APP_KEY}`,
+          args: b.args,
+        },
+        { sql: `${b.sql} SELECT b.emp, ${clip("min(coalesce(s.clock_out_at, b.e), b.e)", "max(s.clock_in_at, b.s)")} AS ms FROM b ${sessionJoin} GROUP BY b.emp`, args: b.args },
+        {
+          sql: `${b.sql} SELECT b.emp, ${clip("min(coalesce(br.ended_at, b.e), coalesce(s.clock_out_at, b.e), b.e)", "max(br.started_at, s.clock_in_at, b.s)")} AS ms
+                FROM b ${sessionJoin} JOIN break_sessions br ON br.attendance_session_id = s.id AND br.started_at < b.e AND coalesce(br.ended_at, b.e) > b.s
+                GROUP BY b.emp`,
+          args: b.args,
+        },
+        {
+          sql: `SELECT employee_id, max(received_at) AS at FROM activity_intervals WHERE employee_id IN (${employees.map(() => "?").join(", ")}) GROUP BY employee_id`,
+          args: employees.map((e) => e.id),
+        },
+      ],
+      "read",
     );
-    return { items: rows!.rows.map(toItem), total: Number(count!.rows[0]!.n), page: q.page, pageSize: q.pageSize };
+    const byEmp = (rows: Record<string, unknown>[]) => new Map(rows.map((r) => [String(r.emp), Number(r.ms)]));
+    const workedMs = byEmp(worked!.rows);
+    const breakMs = byEmp(breaks!.rows);
+    const lastAt = new Map(last!.rows.map((r) => [String(r.employee_id), str(r.at)]));
+    const items = employees.map((employee): ActivityOverviewRow => {
+      let activeMs = 0;
+      let idleMs = 0;
+      let productive = 0;
+      for (const r of activity!.rows) {
+        if (r.emp !== employee.id) continue;
+        if (r.kind === "IDLE") idleMs += Number(r.ms);
+        else {
+          activeMs += Number(r.ms);
+          const app = { applicationIdentifier: str(r.application_identifier), applicationName: str(r.application_name) };
+          if (labels.category(employee.id, app) === "PRODUCTIVE") productive += Number(r.ms);
+        }
+      }
+      const clockedInMs = Math.max(0, (workedMs.get(employee.id) ?? 0) - (breakMs.get(employee.id) ?? 0));
+      return {
+        employee,
+        clockedInMs,
+        activeMs,
+        idleMs,
+        unobservedMs: Math.max(0, clockedInMs - activeMs - idleMs),
+        productiveMs: configured ? productive : null,
+        productiveShare: configured && clockedInMs > 0 ? productive / clockedInMs : null,
+        lastReceivedAt: lastAt.get(employee.id) ?? null,
+      };
+    });
+    return { items, categoriesConfigured: configured };
   }
 
   // ---- internals ------------------------------------------------------------------
@@ -284,21 +404,23 @@ export class ActivityService {
   }
 
   /** Per-day and per-application totals computed by the database (no interval rows transferred). */
-  private async aggregate(employee: EmployeeRef, from: string, to: string) {
+  private async aggregate(employee: EmployeeRef, from: string, to: string, byDayApp = false) {
     const days: { date: string; start: number; end: number; activeMs: number; idleMs: number }[] = [];
     for (let d = from; d <= to; d = addDays(d, 1)) {
       const [s, e] = this.bounds(employee, d, d);
       days.push({ date: d, start: Date.parse(s), end: Date.parse(e), activeMs: 0, idleMs: 0 });
     }
     const [start, end] = this.bounds(employee, from, to);
-    const [perDay, perApp] = await this.db.batch(
+    const dayValues = `WITH b(d, s, e) AS (VALUES ${days.map(() => "(?, ?, ?)").join(", ")})`;
+    const dayArgs = days.flatMap((d) => [d.date, iso(d.start), iso(d.end)]);
+    const [perDay, perApp, perDayApp] = await this.db.batch(
       [
         {
-          sql: `WITH b(d, s, e) AS (VALUES ${days.map(() => "(?, ?, ?)").join(", ")})
+          sql: `${dayValues}
                 SELECT b.d, a.kind, sum(round((julianday(min(a.ended_at, b.e)) - julianday(max(a.started_at, b.s))) * 86400000)) AS ms
                 FROM b JOIN activity_intervals a ON a.employee_id = ? AND a.started_at < b.e AND a.ended_at > b.s
                 GROUP BY b.d, a.kind`,
-          args: [...days.flatMap((d) => [d.date, iso(d.start), iso(d.end)]), employee.id],
+          args: [...dayArgs, employee.id],
         },
         {
           // The bare application_name comes from the latest interval (max), so a renamed app shows its current name.
@@ -307,6 +429,16 @@ export class ActivityService {
                 GROUP BY coalesce(application_identifier, 'name:' || application_name) ORDER BY ms DESC, application_name`,
           args: [end, start, employee.id, end, start],
         },
+        // Per day and application (ACTIVE only), for the per-day label split of the summary.
+        ...(byDayApp
+          ? [{
+              sql: `${dayValues}
+                    SELECT b.d, ${APP_KEY} AS k, sum(round((julianday(min(a.ended_at, b.e)) - julianday(max(a.started_at, b.s))) * 86400000)) AS ms
+                    FROM b JOIN activity_intervals a ON a.employee_id = ? AND a.kind = 'ACTIVE' AND a.started_at < b.e AND a.ended_at > b.s
+                    GROUP BY b.d, k`,
+              args: [...dayArgs, employee.id],
+            }]
+          : []),
       ],
       "read",
     );
@@ -321,8 +453,10 @@ export class ActivityService {
       applicationName: String(r.application_name),
       activeMs: Number(r.ms),
     }));
+    const dayApps = (perDayApp?.rows ?? []).map((r) => ({ date: String(r.d), key: String(r.k), ms: Number(r.ms) }));
     return {
       days,
+      dayApps,
       applications,
       activeMs: days.reduce((n, d) => n + d.activeMs, 0),
       idleMs: days.reduce((n, d) => n + d.idleMs, 0),

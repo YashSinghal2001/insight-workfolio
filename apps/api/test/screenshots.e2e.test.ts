@@ -139,7 +139,7 @@ describe("screenshot policy and consent", () => {
     assert.equal((await api("/settings/screenshots", { method: "PUT", bearer: e.bearer, body: { ...DEFAULT_SCREENSHOT_SETTINGS, reason: "x" } })).status, 403);
     for (const [patch, field] of [
       [{ intervalSeconds: 5 }, "intervalSeconds"], [{ webpQuality: 99 }, "webpQuality"], [{ captureScope: "ALL_DISPLAYS" }, "captureScope"],
-      [{ retentionDays: 3 }, "retentionDays"], [{ noticeVersion: "missing" }, "noticeVersion"], [{ blur: true }, "body"],
+      [{ retentionDays: 3 }, "retentionDays"], [{ noticeVersion: "missing" }, "noticeVersion"], [{ blurRadius: 8 }, "body"],
     ] as const) {
       const r = await settings(patch);
       assert.equal(r.status, 400, JSON.stringify(patch));
@@ -260,10 +260,39 @@ describe("screenshot upload", () => {
     assert.equal(r.upload_status, "STORED");
     const file = join(STORAGE_DIR, String(r.storage_key));
     assert.equal(sha(readFileSync(file)), s.meta.checksum, "the stored file is byte-identical");
-    assert.match(String(r.storage_key), new RegExp(`^${e.id}/\\d{4}-\\d{2}/[0-9a-f-]{36}\\.webp$`), "server-generated key, no names");
+    assert.match(String(r.storage_key), new RegExp(`^screenshots/unassigned/${e.id}/\\d{4}-\\d{2}/[0-9a-f-]{36}\\.webp$`), "server-generated key, no names; no team = unassigned folder");
     assert.equal((await upload(e, s)).body.status, "STORED", "re-upload is a no-op");
     assert.equal((await register(e, s)).body.status, "STORED", "re-register reports STORED");
     assert.equal((await api("/screenshots/me", { bearer: e.bearer })).body.lastStoredAt, stored.body.storedAt);
+  });
+
+  test("team folders: files of each team are kept apart (earliest membership), team members stay in scope rules of the API", async () => {
+    await settings({ enabled: true, intervalSeconds: 60 });
+    const adminId = String((await db.execute("SELECT id FROM users WHERE email = 'admin@example.com'")).rows[0]!.id);
+    const team = async (name: string) => {
+      const id = randomUUID();
+      await db.execute({ sql: "INSERT INTO teams (id, name, created_by) VALUES (?, ?, ?)", args: [id, name, adminId] });
+      return id;
+    };
+    const addMember = (teamId: string, employeeId: string, at: string) =>
+      db.execute({ sql: "INSERT INTO team_members (team_id, employee_id, added_by, added_at) VALUES (?, ?, ?, ?)", args: [teamId, employeeId, adminId, at] });
+    const [t1, t2, t3] = [await team(`Folder A ${randomUUID()}`), await team(`Folder B ${randomUUID()}`), await team(`Folder C ${randomUUID()}`)];
+    const [a, b] = [await ready(), await ready()];
+    await addMember(t1, a.id, "2026-01-01T00:00:00.000Z");
+    await addMember(t3, b.id, "2026-01-02T00:00:00.000Z");
+    await addMember(t2, b.id, "2026-01-01T00:00:00.000Z"); // b's earliest team is t2
+    const keyOf = async (e: Emp) => {
+      const s = shot(Date.now() - 30 * M);
+      assert.equal((await register(e, s)).body.status, "REGISTERED");
+      assert.equal((await upload(e, s)).body.status, "STORED");
+      return String((await db.execute({ sql: "SELECT storage_key FROM screenshots WHERE idempotency_key = ?", args: [s.id] })).rows[0]!.storage_key);
+    };
+    const [ka, kb] = [await keyOf(a), await keyOf(b)];
+    assert.ok(ka.startsWith(`screenshots/teams/${t1}/${a.id}/`), ka);
+    assert.ok(kb.startsWith(`screenshots/teams/${t2}/${b.id}/`), kb);
+    assert.ok(existsSync(join(STORAGE_DIR, ka)) && existsSync(join(STORAGE_DIR, kb)), "files are in their team folders");
+    const teams = await db.execute({ sql: "SELECT count(*) AS n FROM team_members WHERE employee_id IN (?, ?)", args: [a.id, b.id] });
+    assert.equal(Number(teams.rows[0]!.n), 3, "memberships untouched");
   });
 
   test("device ownership, other employees' registrations and rate limits", async () => {
@@ -283,7 +312,7 @@ describe("screenshot upload", () => {
 
     const { rows } = await db.execute({ sql: "SELECT id FROM devices WHERE employee_id = ?", args: [a.id] });
     await api(`/devices/${rows[0]!.id}/revoke`, { method: "POST", cookie: admin });
-    assert.equal((await register(a, shot(Date.now() - 5 * M))).status, 403, "revoked device");
+    assert.equal((await register(a, shot(Date.now() - 5 * M))).status, 401, "revoked device: its session is revoked with it (API-08)");
   });
 });
 
@@ -309,7 +338,7 @@ describe("screenshot access and retention", () => {
 
     const list = await api(`/screenshots?employeeId=${a.id}`, { cookie: admin });
     assert.equal(list.body.total, 1);
-    assert.deepEqual(Object.keys(list.body.items[0]).sort(), ["capturedAt", "employeeId", "fileSizeBytes", "height", "id", "storageProvider", "storedAt", "uploadStatus", "width"], "metadata only: no links, keys or checksums");
+    assert.deepEqual(Object.keys(list.body.items[0]).sort(), ["blurred", "capturedAt", "employeeId", "fileSizeBytes", "height", "id", "maskCount", "storageProvider", "storedAt", "uploadStatus", "width"], "metadata only: no links, keys or checksums");
     assert.equal((await api(`/screenshots?employeeId=${a.id}`, { bearer: b.bearer })).status, 404);
     assert.equal((await api("/screenshots", { bearer: a.bearer })).body.total, 1, "own list");
     const columns = (await db.execute("SELECT name, type FROM pragma_table_info('screenshots')")).rows;

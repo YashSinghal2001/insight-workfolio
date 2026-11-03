@@ -12,7 +12,9 @@ import {
   type ScreenshotStoredResponse,
 } from "@workfolio/shared";
 import { decideScreenshots, type ScreenshotDecision, type ScreenshotMode } from "./monitoring.ts";
-import { uploadScreenshots, type ShotRow } from "./screenshot-sync.ts";
+import { uploadsFailing, type Notify } from "./notify.ts";
+import { words } from "./platform.ts";
+import { policyBlur, privacyText, storageLabel, uploadScreenshots, type ShotRow } from "./screenshot-sync.ts";
 import { HttpError, type ApiClient, type CachedProfile } from "./session.ts";
 import { project, type QueuedEvent, type SyncPhase } from "./sync.ts";
 
@@ -47,6 +49,8 @@ export interface ScreenshotContext {
   kvGet: <T>(key: string) => Promise<T | null>;
   kvSet: (key: string, value: unknown) => Promise<void>;
   formatTime: (iso: string) => string;
+  /** Edge-triggered OS notification (notify.ts). */
+  notify: Notify;
   state: () => {
     profile: CachedProfile | null;
     installationId: string;
@@ -129,7 +133,10 @@ export function initScreenshots(ctx: ScreenshotContext) {
     const session = project(ctx.state().current, ctx.state().queued)?.session ?? null;
     const active = decision.mode === "ACTIVE" && sc && session;
     const p = policy();
-    const key = `${decision.mode}|${active ? `${sc.userId}|${sc.deviceId}|${session.id}` : ""}|${p.intervalSeconds}|${p.webpQuality}|${p.maxDimension}`;
+    // Rectangles only (labels are for people); a server without masks means none.
+    const masks = (p.maskRegions ?? []).map(({ x, y, w, h }) => ({ x, y, w, h }));
+    const blur = policyBlur(p);
+    const key = `${decision.mode}|${active ? `${sc.userId}|${sc.deviceId}|${session.id}` : ""}|${p.intervalSeconds}|${p.webpQuality}|${p.maxDimension}|${JSON.stringify(masks)}|${blur}`;
     if (key === applied) return;
     applied = key;
     native = await call<ShotStatus>(
@@ -142,6 +149,8 @@ export function initScreenshots(ctx: ScreenshotContext) {
         intervalSeconds: p.intervalSeconds,
         quality: p.webpQuality,
         maxDimension: p.maxDimension,
+        masks,
+        blur,
       },
       OFF,
     );
@@ -163,6 +172,7 @@ export function initScreenshots(ctx: ScreenshotContext) {
         now: () => Date.now(),
       });
       uploadError = r.failed;
+      ctx.notify("screenshot-uploads", uploadsFailing(r.failed, pendingAttendance()), "Screenshot uploads are failing", "Screenshots stay on this computer and are retried automatically. Open Insight Workfolio for details.");
       if (r.stored) void loadStatus();
     } finally {
       uploading = false;
@@ -185,7 +195,7 @@ export function initScreenshots(ctx: ScreenshotContext) {
     $("#screenshots").hidden = !show;
     $("#screenshot-consent").hidden = !needsConsent;
     if (status) renderNotice(status);
-    $("#tracking-screenshots").textContent = decision.mode === "ACTIVE" ? `On now: main screen every ${minutes(p.intervalSeconds)}` : LABEL[decision.mode][0];
+    $("#tracking-screenshots").textContent = decision.mode === "ACTIVE" ? `On now: main screen every ${minutes(p.intervalSeconds)}${policyBlur(p) ? ", blurred" : ""}` : LABEL[decision.mode][0];
     if (!show) return;
 
     const [label, tone] = LABEL[decision.mode];
@@ -196,9 +206,10 @@ export function initScreenshots(ctx: ScreenshotContext) {
     $("#shot-taken").hidden = !taken;
     $("#shot-taken").textContent = taken ? `Screenshot taken at ${clock(taken.atMs)} (saved on this computer; upload pending).` : "";
 
-    $("#shot-permission").textContent = !native.supported ? "Not available" : native.permission ? "Allowed" : "Not allowed";
-    $("#shot-permission-request").hidden = !native.supported || native.permission || !status?.policy.enabled;
-    $("#shot-permission-help").hidden = !native.supported || native.permission || !status?.policy.enabled;
+    $("#shot-permission").textContent = !native.supported ? "Not available" : !native.permission ? "Not allowed" : words().permissionRequestable ? "Allowed" : "Not required";
+    const askable = native.supported && !native.permission && !!status?.policy.enabled;
+    $("#shot-permission-request").hidden = !askable || !words().permissionRequestable;
+    $("#shot-permission-help").hidden = !askable;
     $("#shot-next").textContent = decision.mode === "ACTIVE" && native.nextCaptureMs ? clock(native.nextCaptureMs) : "—";
     $("#shot-last-local").textContent = native.lastCapture ? `${clock(native.lastCapture.atMs)} (${Math.round(native.lastCapture.bytes / 1024)} KB)` : "—";
     const cloud = [summary.lastStoredMs ? new Date(summary.lastStoredMs).toISOString() : null, status?.lastStoredAt].filter((v): v is string => !!v).sort().at(-1);
@@ -225,7 +236,7 @@ export function initScreenshots(ctx: ScreenshotContext) {
     $("#shot-problems").hidden = !problems;
     $("#shot-problems-text").textContent = `${problems} screenshot(s) were not uploaded: ${summary.problems.join("; ")}.`;
     $("#shot-policy").textContent = status
-      ? `Screenshots are ${p.enabled ? "on" : "off"} for your organization: main screen only, every ${minutes(p.intervalSeconds)}, WebP at quality ${p.webpQuality}, at most ${p.maxDimension} px wide or high, kept ${status.retentionDays} days in your organization's storage (${status.storageProvider === "LOCAL_DEV" ? "development storage on the API server; not Microsoft 365" : "Microsoft 365"}). Nothing is blurred: anything on your main screen can appear.`
+      ? `Screenshots are ${p.enabled ? "on" : "off"} for your organization: main screen only, every ${minutes(p.intervalSeconds)}, WebP at quality ${p.webpQuality}, at most ${p.maxDimension} px wide or high, kept ${status.retentionDays} days in your organization's storage (${storageLabel(status.storageProvider)}). ${privacyText(p.maskRegions ?? [], policyBlur(p))}`
       : "Screenshot policy not loaded yet.";
   }
 
@@ -291,7 +302,7 @@ export function initScreenshots(ctx: ScreenshotContext) {
       status = null;
       decision = { mode: "STOPPED", reason: "Signed out. No screenshots are taken." };
       const p = DEFAULT_SCREENSHOT_SETTINGS;
-      native = await call<ShotStatus>("screenshot_configure", { mode: "STOPPED", userId: null, deviceId: null, sessionId: null, intervalSeconds: p.intervalSeconds, quality: p.webpQuality, maxDimension: p.maxDimension }, OFF);
+      native = await call<ShotStatus>("screenshot_configure", { mode: "STOPPED", userId: null, deviceId: null, sessionId: null, intervalSeconds: p.intervalSeconds, quality: p.webpQuality, maxDimension: p.maxDimension, masks: [], blur: false }, OFF);
       applied = "";
       renderedNotice = "";
       render();

@@ -6,11 +6,16 @@ export const buttonClass =
   "inline-flex items-center justify-center rounded-md bg-brand px-4 py-2 text-sm font-medium text-white hover:opacity-90 focus-visible:ring-2 focus-visible:ring-brand focus-visible:ring-offset-2 focus-visible:outline-none disabled:opacity-50";
 export const secondaryButtonClass =
   "inline-flex items-center justify-center rounded-md border border-border px-4 py-2 text-sm font-medium hover:bg-background focus-visible:ring-2 focus-visible:ring-brand focus-visible:outline-none disabled:opacity-50";
+export const dangerButtonClass =
+  "inline-flex items-center justify-center rounded-md bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700 focus-visible:ring-2 focus-visible:ring-red-600 focus-visible:ring-offset-2 focus-visible:outline-none disabled:opacity-50";
+export const ghostButtonClass =
+  "inline-flex items-center justify-center rounded-md px-3 py-2 text-sm font-medium text-muted hover:bg-background hover:text-foreground focus-visible:ring-2 focus-visible:ring-brand focus-visible:outline-none disabled:opacity-50";
 
 const TONES = {
   error: "border-red-300 bg-red-50 text-red-900 dark:border-red-900 dark:bg-red-950 dark:text-red-200",
   warning: "border-amber-300 bg-amber-50 text-amber-900 dark:border-amber-800 dark:bg-amber-950 dark:text-amber-200",
   success: "border-emerald-300 bg-emerald-50 text-emerald-900 dark:border-emerald-800 dark:bg-emerald-950 dark:text-emerald-200",
+  info: "border-sky-300 bg-sky-50 text-sky-900 dark:border-sky-800 dark:bg-sky-950 dark:text-sky-200",
 };
 
 export function Notice({ tone, children }: { tone: keyof typeof TONES; children: ReactNode }) {
@@ -33,7 +38,7 @@ export function Field({ label, hint, children }: { label: string; hint?: string;
 
 export function Card({ title, children, actions }: { title?: string; children: ReactNode; actions?: ReactNode }) {
   return (
-    <section className="rounded-lg border border-border bg-surface">
+    <section className="rounded-lg border border-border bg-surface shadow-xs">
       {title && (
         <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border px-5 py-3">
           <h3 className="font-medium">{title}</h3>

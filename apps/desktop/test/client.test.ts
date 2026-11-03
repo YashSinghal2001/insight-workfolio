@@ -204,3 +204,27 @@ test("session restoration offline: keeps the token and uses the cached profile",
   assert.equal(tokens.value, "old");
   assert.deepEqual(await restoreSession(client, memoryTokens(null), PROFILE), { kind: "signed-out", offline: false });
 });
+
+test("session ended: a refused refresh (expired, revoked, account disabled) notifies the app once; offline does not", async () => {
+  let ended = 0;
+  const tokens = memoryTokens("old");
+  const refused = new ApiClient("http://api", tokens, fakeApi(() => json({ message: "Unauthorized" }, 401)));
+  refused.onSessionEnded = () => void ended++;
+  await assert.rejects(refused.request("GET", "/activity/me"), (e: unknown) => e instanceof HttpError && e.status === 401);
+  assert.equal(ended, 1);
+  assert.equal(tokens.value, null, "the dead token is forgotten");
+
+  const kept = memoryTokens("old");
+  const unreachable = new ApiClient("http://api", kept, () => Promise.reject(new TypeError("fetch failed")));
+  unreachable.onSessionEnded = () => void ended++;
+  await assert.rejects(unreachable.refresh());
+  assert.equal(ended, 1);
+  assert.equal(kept.value, "old", "network loss keeps the session");
+
+  // Re-authentication after the session ended works with the same client.
+  const back = memoryTokens(null);
+  const relogin = new ApiClient("http://api", back, fakeApi((path) =>
+    path === "/auth/login" ? json({ accessToken: "a", refreshToken: "r2", expiresIn: 900, user: ME.user }) : json(ME)));
+  await relogin.login("e@x.co", "pw");
+  assert.equal(back.value, "r2");
+});

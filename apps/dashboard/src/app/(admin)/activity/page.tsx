@@ -1,19 +1,38 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { Suspense, useCallback, useEffect, useState } from "react";
+import Link from "next/link";
+import { useSearchParams } from "next/navigation";
 import {
   formatDurationShort as formatDuration,
   type ActivityPeriodTotals,
-  type ActivitySummaryResponse,
-  type ActivityTimelineItem,
-  type Employee,
+  type ApplicationCategory,
+  type CategorizedActivitySummary,
+  type CategorizedTimelineItem,
   type Paginated,
 } from "@workfolio/shared";
+import { BreaksOverlay } from "@/components/breaks-overlay";
+import { EmptyState, ErrorState, PageHeader, Pagination, SkeletonRows, StatCard, StatGrid, StatusBadge, Tabs, type Tone } from "@/components/kit";
 import { RangePicker, weekRange, type Range } from "@/components/range-picker";
-import { Badge, Card, formatInZone, inputClass, Notice, secondaryButtonClass } from "@/components/ui";
+import { Badge, Card, formatInZone, Notice } from "@/components/ui";
 import { api, errorMessage } from "@/lib/api";
+import { ActivityOverview } from "../_components/activity-overview";
+import { EmployeePicker } from "../_components/employee-picker";
+import { ProductivityTrend } from "../_components/productivity-trend";
+
+const CATEGORY: Record<ApplicationCategory, { label: string; tone: Tone }> = {
+  PRODUCTIVE: { label: "Productive", tone: "success" },
+  NEUTRAL: { label: "Neutral", tone: "info" },
+  UNPRODUCTIVE: { label: "Unproductive", tone: "warning" },
+  UNCLASSIFIED: { label: "Unclassified", tone: "neutral" },
+};
 
 const PAGE_SIZE = 50;
+const VIEWS = [
+  { id: "all", label: "All employees" },
+  { id: "employee", label: "One employee" },
+] as const;
+type View = (typeof VIEWS)[number]["id"];
 const time = (iso: string, tz: string) => new Intl.DateTimeFormat("en-GB", { dateStyle: "short", timeStyle: "medium", timeZone: tz }).format(new Date(iso));
 const FRESHNESS = {
   CURRENT: ["Up to date", true],
@@ -48,31 +67,32 @@ const day = (date: string) =>
   new Intl.DateTimeFormat("en-GB", { weekday: "short", day: "numeric", month: "short", timeZone: "UTC" }).format(new Date(`${date}T00:00:00Z`));
 
 export default function ActivityPage() {
-  const [employees, setEmployees] = useState<Employee[] | null>(null);
-  const [employeeId, setEmployeeId] = useState("");
+  // useSearchParams suspends for request-time params under cacheComponents.
+  return (
+    <Suspense fallback={<SkeletonRows label="activity" />}>
+      <Activity />
+    </Suspense>
+  );
+}
+
+function Activity() {
+  const preset = useSearchParams().get("employeeId");
+  const [employeeId, setEmployeeId] = useState(() => (preset && /^[0-9a-f-]{36}$/i.test(preset) ? preset : ""));
+  const [view, setView] = useState<View>(() => (employeeId ? "employee" : "all"));
   const [range, setRange] = useState<Range>(() => weekRange());
   const [page, setPage] = useState(1);
-  const [summary, setSummary] = useState<ActivitySummaryResponse | null>(null);
-  const [timeline, setTimeline] = useState<Paginated<ActivityTimelineItem> | null>(null);
+  const [summary, setSummary] = useState<CategorizedActivitySummary | null>(null);
+  const [timeline, setTimeline] = useState<Paginated<CategorizedTimelineItem> | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [retry, setRetry] = useState(0);
 
   useEffect(() => {
-    api<Paginated<Employee>>("/employees?pageSize=100").then(
-      (r) => {
-        setEmployees(r.items);
-        if (r.items[0]) setEmployeeId((id) => id || r.items[0]!.id);
-      },
-      (e) => setError(errorMessage(e)),
-    );
-  }, []);
-
-  useEffect(() => {
-    if (!employeeId) return;
+    if (!employeeId || view !== "employee") return;
     let active = true;
     const q = `employeeId=${employeeId}&from=${range.from}&to=${range.to}`;
     Promise.all([
-      api<ActivitySummaryResponse>(`/activity/summary?${q}`),
-      api<Paginated<ActivityTimelineItem>>(`/activity/timeline?${q}&page=${page}&pageSize=${PAGE_SIZE}`),
+      api<CategorizedActivitySummary>(`/activity/summary?${q}`),
+      api<Paginated<CategorizedTimelineItem>>(`/activity/timeline?${q}&page=${page}&pageSize=${PAGE_SIZE}`),
     ]).then(
       ([s, t]) => active && (setSummary(s), setTimeline(t), setError(null)),
       (e) => active && setError(errorMessage(e)),
@@ -80,37 +100,40 @@ export default function ActivityPage() {
     return () => {
       active = false;
     };
-  }, [employeeId, range, page]);
+  }, [employeeId, view, range, page, retry]);
 
   const reset = () => (setSummary(null), setTimeline(null), setPage(1));
+  const pick = useCallback((id: string) => (setSummary(null), setTimeline(null), setPage(1), setEmployeeId(id)), []);
   const tz = summary?.employee.timezone ?? "UTC";
   const pages = timeline ? Math.max(1, Math.ceil(timeline.total / timeline.pageSize)) : 1;
 
   return (
     <div className="mx-auto flex max-w-6xl flex-col gap-6">
-      <div>
-        <h1 className="text-2xl font-semibold">Activity</h1>
-        <p className="mt-1 text-sm text-muted">
-          Recorded by the desktop app only while the employee is clocked in and not on a break: the foreground application&apos;s
-          name and idle time (no input for the configured threshold, or screen locked). No window titles, websites or keystrokes
-          (screenshots are separate; see Settings). Times are in the employee&apos;s time zone. No productivity scores are calculated: these are records of
-          what was observed, not a measure of performance.
-        </p>
-      </div>
+      <PageHeader
+        title="Activity"
+        description={
+          <>
+            Recorded by the desktop app only while the employee is clocked in and not on a break: the foreground application&apos;s
+            name and idle time (no input for the configured threshold, or screen locked). No window titles or keystrokes. Website
+            domains are recorded separately and only when website tracking is enabled and approved (see <Link href="/websites" className="underline">Websites</Link>);
+            screenshots are separate too (see Settings). Times are in the employee&apos;s time zone. Application labels are your own rules,
+            not a measure of performance.
+          </>
+        }
+      />
 
-      <div className="flex flex-wrap items-end gap-3">
-        <label className="flex flex-col gap-1 text-sm">
-          <span className="text-xs text-muted">Employee</span>
-          <select value={employeeId} onChange={(e) => (reset(), setEmployeeId(e.target.value))} className={inputClass} disabled={!employees}>
-            {employees?.map((e) => <option key={e.id} value={e.id}>{e.fullName} ({e.employeeCode})</option>)}
-          </select>
-        </label>
-        <RangePicker value={range} onChange={(r) => (reset(), setRange(r))} />
-      </div>
+      <RangePicker value={range} maxDays={31} onChange={(r) => (reset(), setRange(r))} />
 
-      {error && <Notice tone="error">{error}</Notice>}
-      {employees?.length === 0 && <p className="text-sm text-muted">No employees enrolled yet.</p>}
-      {employeeId && !summary && !error && <p role="status" className="text-sm text-muted">Loading…</p>}
+      <Tabs label="Activity views" tabs={VIEWS} value={view} idPrefix="activity-view" onChange={setView}>
+      {view === "all" ? (
+        <ActivityOverview range={range} onOpen={(id) => (pick(id), setView("employee"))} />
+      ) : (
+      <div className="flex flex-col gap-6">
+      <EmployeePicker value={employeeId} onChange={pick} autoSelect />
+
+      {error && <ErrorState message={error} onRetry={() => setRetry((n) => n + 1)} />}
+      {!employeeId && !error && <EmptyState title="Choose an employee" hint="Search by name or employee code. If the list stays empty, no employees are enrolled yet." />}
+      {employeeId && !summary && !error && <SkeletonRows label="activity" />}
 
       {summary && (
         <>
@@ -127,13 +150,10 @@ export default function ActivityPage() {
             </Notice>
           )}
 
-          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-            <Card title="Active time"><p className="text-2xl font-semibold tabular-nums">{formatDuration(summary.activeMs)}</p></Card>
-            <Card title="Idle time"><p className="text-2xl font-semibold tabular-nums">{formatDuration(summary.idleMs)}</p></Card>
-            <Card title="Clocked in">
-              <p className="text-2xl font-semibold tabular-nums">{formatDuration(summary.clockedInMs)}</p>
-              <p className="mt-1 text-xs text-muted">Unobserved: {formatDuration(summary.unobservedMs)} (asleep, app closed, paused or not uploaded yet; never estimated)</p>
-            </Card>
+          <StatGrid>
+            <StatCard label="Active time" value={formatDuration(summary.activeMs)} />
+            <StatCard label="Idle time" value={formatDuration(summary.idleMs)} />
+            <StatCard label="Clocked in" value={formatDuration(summary.clockedInMs)} hint={`Unobserved: ${formatDuration(summary.unobservedMs)} (asleep, app closed, paused or not uploaded yet; never estimated)`} />
             <Card title="Data freshness">
               <p className="text-sm"><Badge ok={FRESHNESS[summary.freshness][1]}>{FRESHNESS[summary.freshness][0]}</Badge></p>
               <p className="mt-2 text-xs text-muted">Last upload: {summary.lastReceivedAt ? formatInZone(summary.lastReceivedAt, tz) : "Never"}</p>
@@ -142,16 +162,47 @@ export default function ActivityPage() {
                 Notice {summary.consent.noticeVersion}: {summary.consent.acknowledgedAt ? `acknowledged ${formatInZone(summary.consent.acknowledgedAt, tz)}` : "not acknowledged"}
               </p>
             </Card>
-          </div>
+          </StatGrid>
+
+          <section aria-labelledby="act-labels" className="flex flex-col gap-3">
+            <h2 id="act-labels" className="text-lg font-semibold">Application labels</h2>
+            {summary.categoriesConfigured ? (
+              <>
+                <StatGrid>
+                  <StatCard label="Productive" value={formatDuration(summary.productiveMs)} />
+                  <StatCard label="Neutral" value={formatDuration(summary.neutralMs)} />
+                  <StatCard label="Unproductive" value={formatDuration(summary.unproductiveMs)} />
+                  <StatCard label="Unclassified" value={formatDuration(summary.unclassifiedMs)} hint="Active time in applications without a label" />
+                </StatGrid>
+                <StatCard
+                  label="Productive share of clocked-in time"
+                  value={summary.productiveShare === null ? null : `${Math.round(summary.productiveShare * 100)}%`}
+                  reason="Nothing was clocked in during this range"
+                  hint="Productive active time ÷ clocked-in time (idle and unobserved time included in the clocked-in total)"
+                />
+                <p className="text-xs text-muted">
+                  Labels come from your <Link href="/settings/labels" className="underline">application label rules</Link> and are applied when this
+                  page is read, so changing a rule also relabels past activity. Idle time is never productive.
+                </p>
+                <ProductivityTrend days={summary.days} />
+              </>
+            ) : (
+              <EmptyState
+                title="No application labels configured"
+                hint={<>Productive, neutral and unproductive totals appear once you label applications. <Link href="/settings/labels" className="text-brand underline">Set up application labels</Link>.</>}
+              />
+            )}
+          </section>
 
           {summary.activeMs + summary.idleMs === 0 && summary.clockedInMs === 0 ? (
-            <p className="text-sm text-muted">No activity recorded for this employee in this range.</p>
+            <EmptyState title="No activity recorded for this employee in this range." />
           ) : (
             <>
               <Card title="Applications">
-                <table className="w-full text-left text-sm tabular-nums">
+                <div className="overflow-x-auto">
+                <table className="w-full min-w-[520px] text-left text-sm tabular-nums" aria-label="Applications">
                   <thead className="text-xs text-muted uppercase">
-                    <tr><th className="py-2 font-medium">Application</th><th className="font-medium">Active time</th><th className="w-1/3 font-medium">Share of active time</th></tr>
+                    <tr><th className="py-2 font-medium">Application</th><th className="font-medium">Label</th><th className="font-medium">Active time</th><th className="w-1/3 font-medium">Share of active time</th></tr>
                   </thead>
                   <tbody>
                     {summary.applications.map((a) => {
@@ -162,6 +213,7 @@ export default function ActivityPage() {
                             {a.applicationName}
                             {a.applicationIdentifier && <div className="font-mono text-xs text-muted">{a.applicationIdentifier}</div>}
                           </td>
+                          <td><StatusBadge tone={CATEGORY[a.category].tone}>{CATEGORY[a.category].label}</StatusBadge></td>
                           <td>{formatDuration(a.activeMs)}</td>
                           <td>
                             <div className="flex items-center gap-2">
@@ -176,6 +228,7 @@ export default function ActivityPage() {
                     })}
                   </tbody>
                 </table>
+                </div>
               </Card>
 
               <Card title="Weekly totals">
@@ -205,10 +258,11 @@ export default function ActivityPage() {
               </Card>
 
               <Card title={`Application switching timeline (${timeline?.total ?? 0} intervals)`}>
+                <BreaksOverlay employeeId={employeeId} from={range.from} to={range.to} tz={tz} />
                 <div className="overflow-x-auto">
-                  <table className="w-full min-w-[560px] text-left text-sm tabular-nums">
+                  <table className="w-full min-w-[560px] text-left text-sm tabular-nums" aria-label="Activity timeline">
                     <thead className="text-xs text-muted uppercase">
-                      <tr><th className="py-2 font-medium">From</th><th className="font-medium">To</th><th className="font-medium">Duration</th><th className="font-medium">Activity</th></tr>
+                      <tr><th className="py-2 font-medium">From</th><th className="font-medium">To</th><th className="font-medium">Duration</th><th className="font-medium">Activity</th>{summary.categoriesConfigured && <th className="font-medium">Label</th>}</tr>
                     </thead>
                     <tbody>
                       {timeline?.items.map((i) => (
@@ -217,23 +271,21 @@ export default function ActivityPage() {
                           <td>{time(i.endedAt, tz)}</td>
                           <td>{formatDuration(Date.parse(i.endedAt) - Date.parse(i.startedAt))}</td>
                           <td>{i.kind === "IDLE" ? <span className="text-muted">Idle</span> : i.applicationName}</td>
+                          {summary.categoriesConfigured && <td>{i.category ? <StatusBadge tone={CATEGORY[i.category].tone}>{CATEGORY[i.category].label}</StatusBadge> : <span className="text-muted">—</span>}</td>}
                         </tr>
                       ))}
                     </tbody>
                   </table>
                 </div>
-                {pages > 1 && (
-                  <nav aria-label="Timeline pages" className="mt-3 flex items-center justify-between text-sm">
-                    <button type="button" disabled={page <= 1} onClick={() => setPage((p) => p - 1)} className={secondaryButtonClass}>Previous</button>
-                    <span className="text-muted">Page {page} of {pages}</span>
-                    <button type="button" disabled={page >= pages} onClick={() => setPage((p) => p + 1)} className={secondaryButtonClass}>Next</button>
-                  </nav>
-                )}
+                {pages > 1 && <div className="mt-3"><Pagination label="Timeline pages" page={page} pageCount={pages} onPage={setPage} /></div>}
               </Card>
             </>
           )}
         </>
       )}
+      </div>
+      )}
+      </Tabs>
     </div>
   );
 }

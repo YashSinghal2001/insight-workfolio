@@ -2,6 +2,7 @@
 // Order per screenshot: register metadata -> upload bytes -> the server answers STORED only after
 // cloud storage confirmed the file. Nothing is deleted here; failures back off and retry.
 import type { ScreenshotRegisterResponse, ScreenshotStoredResponse } from "@workfolio/shared";
+import { maskText } from "./monitoring.ts";
 import { HttpError, isNetworkError } from "./session.ts";
 
 export interface ShotRow {
@@ -16,6 +17,26 @@ export interface ShotRow {
   status: "PENDING" | "REGISTERED";
   retries: number;
   lastError: string | null;
+  /** Privacy masks blacked out before this image was encoded; the server checks them against its policy. */
+  masks: { x: number; y: number; w: number; h: number }[];
+  /** The whole image was blurred before encoding; the server checks it against its policy. */
+  blurred: boolean;
+}
+
+/**
+ * The policy's blur setting for the native worker: absent (a server from before blur) = off;
+ * anything but a boolean = unreadable (null), which pauses capture instead of capturing unblurred.
+ */
+export function policyBlur(policy: object): boolean | null {
+  const blur = (policy as { blur?: unknown }).blur;
+  return blur === undefined ? false : typeof blur === "boolean" ? blur : null;
+}
+
+/** What the employee is told about blur and masks. */
+export function privacyText(masks: readonly { label: string }[], blur: boolean | null): string {
+  if (!blur) return maskText(masks);
+  const line = "Screenshots are blurred: the whole image is blurred on this computer before it is saved, so text and details are not readable. The sharp image is never stored or uploaded.";
+  return masks.length ? `${line} ${maskText(masks)}` : `${line} No areas are blacked out.`;
 }
 
 export type Outcome = "REGISTERED" | "STORED" | "REJECTED" | "RETRY";
@@ -48,6 +69,8 @@ export async function uploadScreenshots(deps: ShotDeps, max = 20): Promise<{ sto
           sizeBytes: row.sizeBytes,
           checksum: row.checksum,
           mimeType: "image/webp",
+          masks: row.masks ?? [],
+          blurred: row.blurred === true,
         });
         if (r.status === "REJECTED") {
           await deps.mark(row.id, "REJECTED", r.reason ?? "Not accepted by the server", deps.now());
@@ -77,4 +100,19 @@ export async function uploadScreenshots(deps: ShotDeps, max = 20): Promise<{ sto
     }
   }
   return out;
+}
+
+
+/** Employee-facing name of the server's screenshot storage. Unknown providers get neutral wording. */
+export function storageLabel(provider: string): string {
+  switch (provider) {
+    case "LOCAL_DEV":
+      return "development storage on the API server; not cloud storage";
+    case "MICROSOFT_GRAPH":
+      return "Microsoft 365";
+    case "GOOGLE_DRIVE":
+      return "Google Drive";
+    default:
+      return "your organization's cloud storage";
+  }
 }

@@ -5,7 +5,8 @@
 // Starts a throwaway API (temporary database, LOCAL_DEV screenshot storage in a temporary
 // directory), turns screenshots on (60 s interval, the policy minimum), drives the real debug
 // app: clock in, wait for a capture and its confirmed upload, a break (no capture), a capture
-// after the break, optional lock and sleep steps for a person at the Mac, clock out (no capture).
+// after the break, whole-image blur turned on by the admin (the next capture must be stored blurred),
+// optional lock and sleep steps for a person at the Mac, clock out (no capture).
 // The server's records and stored files are then checked. Images are never displayed or
 // printed: only sizes, dimensions and times. Unless --keep, every test screenshot (server
 // storage and the app's local copies from this run) is deleted at the end.
@@ -14,7 +15,7 @@
 // Needs ports 4000 and 1420; replaces the app's saved dev sign-in in the Keychain.
 import { execFileSync, spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { appendFileSync, existsSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -76,6 +77,28 @@ function webpSize(b) {
   return null;
 }
 
+/**
+ * Mean absolute difference between neighbouring pixels (all channels): sharp text and edges score
+ * high, a blurred image scores near 0. Decoded with macOS `sips` (WebP to BMP) into this run's temp dir;
+ * nothing is displayed.
+ */
+function edgeEnergy(webp, name) {
+  const src = join(tmp, `${name}.webp`);
+  const bmp = join(tmp, `${name}.bmp`);
+  writeFileSync(src, webp);
+  execFileSync("sips", ["-s", "format", "bmp", src, "--out", bmp], { stdio: "ignore" });
+  const b = readFileSync(bmp);
+  rmSync(src);
+  rmSync(bmp);
+  const offset = b.readUInt32LE(10), w = b.readInt32LE(18), h = Math.abs(b.readInt32LE(22)), bpp = b.readUInt16LE(28) / 8;
+  if (bpp !== 3 && bpp !== 4) throw new Error(`unexpected BMP format (${bpp * 8} bits)`);
+  const stride = Math.ceil((w * bpp) / 4) * 4;
+  const at = (x, y, c) => b[offset + y * stride + x * bpp + c];
+  let sum = 0;
+  for (let y = 0; y < h - 1; y++) for (let x = 0; x < w - 1; x++) for (let c = 0; c < 3; c++) sum += Math.abs(at(x, y, c) - at(x + 1, y, c)) + Math.abs(at(x, y, c) - at(x, y + 1, c));
+  return sum / ((w - 1) * (h - 1) * 3);
+}
+
 // ---- 1. Throwaway API, admin, employee, screenshots on ---------------------------------------
 if (await up(`${API}/health`)) throw new Error("Port 4000 is in use; stop the running API first.");
 children.push(spawn("node", [join(ROOT, "apps/api/dist/main.js")], { env, stdio: "inherit" }));
@@ -91,10 +114,9 @@ const password = randomBytes(12).toString("hex");
 await call("/auth/setup-password", { method: "POST", body: { token: created.body.setup.token, password } });
 const employeeId = created.body.employee.id;
 const policy = (await call("/settings/screenshots", { cookie })).body.effective;
-await call("/settings/screenshots", {
-  method: "PUT", cookie,
-  body: { ...Object.fromEntries(Object.entries(policy).filter(([k]) => !["effectiveAt", "changedBy", "reason"].includes(k))), enabled: true, intervalSeconds: INTERVAL, reason: "native verification" },
-});
+const policyBody = { ...Object.fromEntries(Object.entries(policy).filter(([k]) => !["effectiveAt", "changedBy", "reason"].includes(k))), enabled: true, intervalSeconds: INTERVAL, blur: false, reason: "native verification" };
+await call("/settings/screenshots", { method: "PUT", cookie, body: policyBody });
+let blurOnAt = null;
 
 // ---- 2. Desktop app --------------------------------------------------------------------------
 if (!(await up("http://localhost:1420"))) {
@@ -115,6 +137,14 @@ app.stderr.setEncoding("utf8").on("data", (chunk) => {
     // Full app log (diagnostics only: lifecycle, sync and screenshot timings; never image data).
     appendFileSync(join(tmp, "app.log"), `${new Date().toISOString()} ${line}\n`);
     if (line.startsWith("[e2e] RESULT ")) result = JSON.parse(line.slice("[e2e] RESULT ".length));
+    else if (line === "[e2e] TRIGGER blur-on") {
+      // The admin turns whole-image blur on (the app is on a break, so no capture can race the change).
+      blurOnAt = Date.now();
+      call("/settings/screenshots", { method: "PUT", cookie, body: { ...policyBody, blur: true, reason: "native verification: blur" } }).then(
+        () => console.log("[harness] blur turned on"),
+        (err) => console.log(`[harness] blur change failed: ${err.message}`),
+      );
+    }
     else if (line.startsWith("[e2e] ") || line.startsWith("[screenshot]")) console.log(line);
   }
 });
@@ -162,6 +192,22 @@ check("No capture during break", s.break, (b) => {
 check("Capture resumes after break", s.second, (f) => {
   must(items.some((i) => Math.abs(i.at - f.atMs) < 5_000), Number.isNaN(f.atMs) ? "no capture after the break" : `no stored screenshot near ${t(f.atMs)}`);
   return `${t(f.atMs)}`;
+});
+check("Blur on: next capture stored blurred", s.blur, (b) => {
+  must(blurOnAt, "the harness never turned blur on");
+  const before = items.filter((i) => i.at < blurOnAt);
+  const after = items.filter((i) => i.at > blurOnAt);
+  must(before.length && before.every((i) => i.blurred === false), `before blur: ${before.map((i) => i.blurred).join(",") || "no captures"}`);
+  const shot = after.find((i) => Math.abs(i.at - b.atMs) < 5_000);
+  must(shot, Number.isNaN(b.atMs) ? `no capture after blur was turned on; app showed: ${b.appState}` : `no stored screenshot near ${t(b.atMs)}`);
+  // Registration with blurred: true was accepted (a mismatch is rejected and never stored) and every later capture is blurred too.
+  must(after.every((i) => i.blurred === true && i.uploadStatus === "STORED"), `after blur: ${after.map((i) => `${i.blurred}/${i.uploadStatus}`).join(", ")}`);
+  const sharp = before.map((i) => edgeEnergy(downloaded.get(i.id).bytes, `sharp-${i.id}`)).sort((x, y) => x - y);
+  const soft = edgeEnergy(downloaded.get(shot.id).bytes, `blurred-${shot.id}`);
+  const median = sharp[Math.floor(sharp.length / 2)];
+  // Real screens differ between captures, so: far below the sharp captures of this run, or flat in absolute terms.
+  must(soft < 0.25 * median || soft < 0.5, `edge energy ${soft.toFixed(2)} vs sharp ${median.toFixed(2)}: does not look blurred`);
+  return `${t(shot.at)}: registered blurred, STORED; edge energy ${soft.toFixed(2)} vs ${median.toFixed(2)} for the sharp captures (${after.length} blurred capture(s) after the change)`;
 });
 check("No capture while locked", s.lock, (l) => {
   const during = within(l.lockedAt + 2_000, l.unlockedAt - 2_000);
@@ -260,20 +306,20 @@ function driver(cfg) {
       await wait(1500);
     }
     current = "permission";
-    say("1/7", "Checking the Screen Recording permission. If it is not allowed, click \"Allow screen recording…\" below and follow macOS.");
+    say("1/8", "Checking the Screen Recording permission. If it is not allowed, click \"Allow screen recording…\" below and follow macOS.");
     const perm = await until((s) => s.permission && { granted: true }, 120_000);
     steps.permission = perm ? { done: true, ...perm } : { done: false, note: `not granted; app showed "${txt("#shot-state")}: ${txt("#shot-reason")}" and took no screenshots` };
     if (!perm) return finish();
 
     act("CLOCK_IN").click();
     steps.clockIn = { at: Date.now() };
-    say("2/7", `Clocked in. Waiting for the first screenshot (one interval, ${cfg.intervalMs / 1000} s) and its confirmed upload.`);
+    say("2/8", `Clocked in. Waiting for the first screenshot (one interval, ${cfg.intervalMs / 1000} s) and its confirmed upload.`);
     const first = await newCapture(steps.clockIn.at);
     const cloud = first && (await until(() => txt("#shot-pending") === "0" && txt("#shot-last-cloud") !== "Never" && txt("#shot-last-cloud"), 150_000));
     // Permission is granted here, so a missing capture is a failure (checked on the server side), not a skip.
     steps.first = { done: true, ...(first ?? { atMs: NaN, appState: `${txt("#shot-state")} ${txt("#shot-warning")} ${txt("#shot-error")}` }), cloudConfirmed: cloud };
 
-    say("3/7", "Break for 75 seconds (automatic): no screenshot may be taken.");
+    say("3/8", "Break for 75 seconds (automatic): no screenshot may be taken.");
     act("BREAK_START").click();
     const b0 = Date.now();
     await wait(1000);
@@ -281,25 +327,38 @@ function driver(cfg) {
     await wait(cfg.intervalMs + 14_000);
     act("BREAK_END").click();
     steps.break = { done: true, start: b0, end: Date.now(), stateOnBreak };
-    say("4/7", "Break ended. Waiting for the next screenshot.");
+    say("4/8", "Break ended. Waiting for the next screenshot.");
     const second = await newCapture(steps.break.end);
     steps.second = { done: true, ...(second ?? { atMs: NaN }) };
 
+    // Blur: turned on by the admin while on a break, so no capture can be taken under the old setting.
+    say("5/8", "Turning on whole-image blur (automatic, short break while the app picks it up). The next screenshot must be blurred.");
+    act("BREAK_START").click();
+    await wait(1000);
+    log("TRIGGER blur-on");
+    const blurred = await until(() => txt("#shot-policy").includes("the whole image is blurred"), 120_000);
+    act("BREAK_END").click();
+    const blurEnd = Date.now();
+    const blurShot = blurred && (await newCapture(blurEnd));
+    steps.blur = blurred
+      ? { done: true, ...(blurShot ?? { atMs: NaN, appState: `${txt("#shot-state")} ${txt("#shot-warning")} ${txt("#shot-error")}` }) }
+      : { done: false, note: "the app did not pick up the blur policy within 2 minutes" };
+
     current = "lock";
-    say("5/7", "Lock the screen now (Control-Command-Q) and stay locked for about 80 seconds, then unlock.");
+    say("6/8", "Lock the screen now (Control-Command-Q) and stay locked for about 80 seconds, then unlock.");
     const locked = await until((_, a) => a.locked && { lockedAt: Date.now() }, 120_000);
     let skipped = null;
     const unlocked = locked && (await until((s, a) => ((skipped = s.skipped ?? skipped), !a.locked && { unlockedAt: Date.now() }), 600_000));
     steps.lock = unlocked ? { done: true, ...locked, ...unlocked, skipped } : { done: false, note: skip ? "skipped" : "screen lock not detected" };
 
     current = "sleep";
-    say("6/7", "Put the Mac to sleep for at least 60 seconds, then wake and unlock it.");
+    say("7/8", "Put the Mac to sleep for at least 60 seconds, then wake and unlock it.");
     const s0 = Date.now();
     const gap = await until((s, a) => s.lastGapMs && s.lastGapMs[1] > s0 && s.lastGapMs[1] - s.lastGapMs[0] >= 30_000 && !a.locked && { gapStart: s.lastGapMs[0], gapEnd: s.lastGapMs[1] }, 600_000);
     steps.sleep = gap ? { done: true, ...gap } : { done: false, note: skip ? "skipped" : "no sleep detected" };
     if (gap) await wait(cfg.intervalMs + 5_000); // the check covers one interval after wake
 
-    say("7/7", "Clocking out (automatic), then waiting one interval to confirm nothing more is captured.");
+    say("8/8", "Clocking out (automatic), then waiting one interval to confirm nothing more is captured.");
     act("CLOCK_OUT").click();
     const c0 = Date.now();
     await wait(cfg.intervalMs + 15_000);

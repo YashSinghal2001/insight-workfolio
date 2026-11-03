@@ -1,21 +1,26 @@
-import { Body, Controller, Get, Headers, HttpCode, Param, ParseUUIDPipe, Post, Put, Query, Req, Res, StreamableFile } from "@nestjs/common";
+import { Body, Controller, Delete, Get, Headers, HttpCode, Param, ParseUUIDPipe, Post, Put, Query, Req, Res, StreamableFile } from "@nestjs/common";
 import {
   consentSchema,
   DEVICE_HEADER,
   retentionRunSchema,
+  screenshotBlurOverrideQuerySchema,
+  screenshotBlurOverrideSchema,
   screenshotContentQuerySchema,
+  screenshotDeleteSchema,
   screenshotGallerySchema,
   screenshotQuerySchema,
   screenshotRegisterSchema,
   screenshotSettingsSchema,
   SCREENSHOT_MIME,
+  type ScreenshotBlurOverrideInput,
+  type ScreenshotDeleteRequest,
   type ScreenshotGalleryQuery,
   type ScreenshotQuery,
   type ScreenshotRegisterRequest,
   type ScreenshotSettingsInput,
 } from "@workfolio/shared";
 import type { Request, Response } from "express";
-import { CurrentUser, RequirePermission } from "../auth/auth.guard.js";
+import { CurrentUser, RequirePermission, TeamScoped } from "../auth/auth.guard.js";
 import type { AuthContext } from "../auth/auth.service.js";
 import { ZodPipe } from "../common/zod.pipe.js";
 import { DevicesService } from "../devices/devices.service.js";
@@ -83,15 +88,17 @@ export class ScreenshotsController {
   /** Admin gallery: all employees or one, date range in the viewer's time zone, paginated. */
   @Get("gallery")
   @RequirePermission("screenshots:read")
-  gallery(@Query(new ZodPipe(screenshotGallerySchema)) q: ScreenshotGalleryQuery) {
-    return this.screenshots.gallery(q);
+  @TeamScoped()
+  gallery(@CurrentUser() user: AuthContext, @Query(new ZodPipe(screenshotGallerySchema)) q: ScreenshotGalleryQuery) {
+    return this.screenshots.gallery(q, user);
   }
 
   /** Server-side counts for the same filters, plus retention status. */
   @Get("overview")
   @RequirePermission("screenshots:read")
-  overview(@Query(new ZodPipe(screenshotGallerySchema)) q: ScreenshotGalleryQuery) {
-    return this.screenshots.overview(q);
+  @TeamScoped()
+  overview(@CurrentUser() user: AuthContext, @Query(new ZodPipe(screenshotGallerySchema)) q: ScreenshotGalleryQuery) {
+    return this.screenshots.overview(q, user);
   }
 
   /** Dry run: what the screenshot retention purge would delete now. */
@@ -113,6 +120,13 @@ export class ScreenshotsController {
   @RequirePermission("activity:read-own")
   detail(@CurrentUser() user: AuthContext, @Param("id", ParseUUIDPipe) id: string) {
     return this.screenshots.detail(user, id);
+  }
+
+  /** Admin: deletes one screenshot (file, then the row is marked DELETED; the row is kept). Idempotent. */
+  @Delete(":id")
+  @RequirePermission("settings:manage")
+  remove(@CurrentUser() user: AuthContext, @Param("id", ParseUUIDPipe) id: string, @Body(new ZodPipe(screenshotDeleteSchema)) body: ScreenshotDeleteRequest) {
+    return this.screenshots.remove(user, id, body.reason);
   }
 
   /**
@@ -153,5 +167,23 @@ export class ScreenshotSettingsController {
   @RequirePermission("settings:manage")
   update(@CurrentUser() user: AuthContext, @Body(new ZodPipe(screenshotSettingsSchema)) body: ScreenshotSettingsInput) {
     return this.settings.update(user, body);
+  }
+
+  /** One employee's whole-image blur override: current state and history (newest first). */
+  @Get("blur-overrides")
+  @RequirePermission("settings:manage")
+  blurOverrides(@Query(new ZodPipe(screenshotBlurOverrideQuerySchema)) q: { employeeId: string }) {
+    return this.settings.blurOverview(q.employeeId);
+  }
+
+  /** Always / never blur this employee's new captures, or `blur: null` to follow the organisation setting again. */
+  @Put("blur-overrides/:employeeId")
+  @RequirePermission("settings:manage")
+  setBlurOverride(
+    @CurrentUser() user: AuthContext,
+    @Param("employeeId", ParseUUIDPipe) employeeId: string,
+    @Body(new ZodPipe(screenshotBlurOverrideSchema)) body: ScreenshotBlurOverrideInput,
+  ) {
+    return this.settings.setBlurOverride(user, employeeId, body);
   }
 }

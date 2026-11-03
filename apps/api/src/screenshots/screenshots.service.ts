@@ -28,6 +28,7 @@ import {
   type EmployeeRef,
   type Paginated,
   SCREENSHOT_LIMITS,
+  type ScreenshotDeleteResponse,
   type ScreenshotDeletionMode,
   type ScreenshotDetail,
   type ScreenshotGalleryItem,
@@ -42,18 +43,21 @@ import {
   type ScreenshotStorageProvider,
   type ScreenshotStoredResponse,
   type ScreenshotUploadStatus,
+  sameMasks,
 } from "@workfolio/shared";
 import { clockedInSegments, iso, str } from "../attendance/sessions.js";
 import { RateLimiter } from "../auth/crypto.js";
 import type { AuthContext } from "../auth/auth.service.js";
 import { EmployeeLocks } from "../common/employee-locks.js";
 import { POLICY } from "../common/policy.js";
+import { canReadEmployee, scopeSql } from "../common/scope.js";
 import type { Env } from "../config/env.js";
 import { DATABASE } from "../database/database.module.js";
 import type { DeviceContext } from "../devices/devices.service.js";
 import { MonitoringSettingsService } from "../settings/monitoring-settings.service.js";
 import { ScreenshotSettingsService } from "./screenshot-settings.service.js";
-import { quickXorHash, SCREENSHOT_STORAGE, StorageError, type ScreenshotStorage } from "./storage.js";
+import { quickXorHash, SCREENSHOT_STORAGE, screenshotKey, StorageError, type ScreenshotStorage } from "./storage.js";
+import { TimelapseService } from "./timelapse.service.js";
 
 const DAY_MS = 86_400_000;
 /** A capture this far in the future (after skew correction) is refused. */
@@ -63,9 +67,9 @@ const RETENTION_CHUNK = 100;
 
 /** Registered but not uploaded for longer than this: the desktop is offline or retrying. */
 const STALLED_MS = 3_600_000;
-const GALLERY_COLUMNS = `s.id, s.employee_id, s.captured_at, s.width, s.height, s.file_size_bytes, s.upload_status, s.storage_provider, s.stored_at,
-  p.full_name, p.employee_code`;
-const ITEM_COLUMNS = "id, employee_id, captured_at, width, height, file_size_bytes, upload_status, storage_provider, stored_at";
+const GALLERY_COLUMNS = `s.id, s.employee_id, s.captured_at, s.width, s.height, s.file_size_bytes, s.upload_status, s.storage_provider, s.stored_at, s.mask_count, s.blurred,
+  p.full_name, p.employee_code, p.timezone`;
+const ITEM_COLUMNS = "id, employee_id, captured_at, width, height, file_size_bytes, upload_status, storage_provider, stored_at, mask_count, blurred";
 const toItem = (r: Row): ScreenshotItem => ({
   id: String(r.id),
   employeeId: String(r.employee_id),
@@ -76,11 +80,13 @@ const toItem = (r: Row): ScreenshotItem => ({
   uploadStatus: r.upload_status as ScreenshotUploadStatus,
   storageProvider: r.storage_provider as ScreenshotStorageProvider,
   storedAt: str(r.stored_at),
+  maskCount: Number(r.mask_count),
+  blurred: Boolean(r.blurred),
 });
 
 const toGalleryItem = (r: Row): ScreenshotGalleryItem => ({
   ...toItem(r),
-  employee: { id: String(r.employee_id), fullName: String(r.full_name), employeeCode: String(r.employee_code) },
+  employee: { id: String(r.employee_id), fullName: String(r.full_name), employeeCode: String(r.employee_code), timezone: String(r.timezone) },
 });
 
 /** Width and height from a WebP header (VP8, VP8L or VP8X), or null when it is not a valid WebP. */
@@ -118,6 +124,7 @@ export class ScreenshotsService implements OnModuleInit, OnModuleDestroy {
     private readonly monitoring: MonitoringSettingsService,
     private readonly locks: EmployeeLocks,
     private readonly config: ConfigService<Env, true>,
+    private readonly timelapses: TimelapseService,
   ) {}
 
   onModuleInit() {
@@ -133,7 +140,8 @@ export class ScreenshotsService implements OnModuleInit, OnModuleDestroy {
   // ---- Employee / desktop -------------------------------------------------------------
 
   async status(employee: EmployeeRef): Promise<ScreenshotStatusResponse> {
-    const s = await this.settings.current();
+    const [s, overrides, selfView] = await Promise.all([this.settings.current(), this.settings.blurOverrides(employee.id), this.monitoring.screenshotSelfView(employee.id)]);
+    const blur = overrides.at(-1)?.blur ?? s.blur; // overrides take effect when recorded (never in the future)
     const [notice, [consent, last]] = await Promise.all([
       this.monitoring.notice(s.noticeVersion),
       this.db.batch(
@@ -145,13 +153,13 @@ export class ScreenshotsService implements OnModuleInit, OnModuleDestroy {
       ),
     ]);
     return {
-      policy: { enabled: s.enabled, intervalSeconds: s.intervalSeconds, webpQuality: s.webpQuality, maxDimension: s.maxDimension, captureScope: s.captureScope },
+      policy: { enabled: s.enabled, intervalSeconds: s.intervalSeconds, webpQuality: s.webpQuality, maxDimension: s.maxDimension, captureScope: s.captureScope, maskRegions: s.maskRegions, blur },
       retentionDays: s.retentionDays,
       notice,
       consent: { noticeVersion: s.noticeVersion, acknowledgedAt: str(consent!.rows[0]?.acknowledged_at) },
       lastStoredAt: str(last!.rows[0]?.at),
       storageProvider: this.storage.provider,
-      employeeSelfView: s.employeeSelfView,
+      employeeSelfView: selfView ?? s.employeeSelfView, // F08: the per-person override wins
     };
   }
 
@@ -187,7 +195,7 @@ export class ScreenshotsService implements OnModuleInit, OnModuleDestroy {
       if (captured > receivedAt + FUTURE_TOLERANCE_MS) return reject("Captured in the future");
       if (receivedAt - captured > this.attendancePolicy.maxOfflineAgeDays * DAY_MS) return reject("Captured before the offline limit");
 
-      const [periods, acks, segments, near] = await Promise.all([
+      const [periods, acks, segments, near, blurOverrides] = await Promise.all([
         this.settings.periods(),
         this.db.execute({ sql: "SELECT notice_version, acknowledged_at FROM monitoring_consents WHERE employee_id = ?", args: [device.employeeId] }),
         clockedInSegments(this.db, device.employeeId, captured, captured, receivedAt + FUTURE_TOLERANCE_MS),
@@ -195,6 +203,7 @@ export class ScreenshotsService implements OnModuleInit, OnModuleDestroy {
           sql: "SELECT captured_at FROM screenshots WHERE employee_id = ? AND captured_at > ? AND captured_at < ?",
           args: [device.employeeId, iso(captured - 1_800_000), iso(captured + 1_800_000)],
         }),
+        this.settings.blurOverrides(device.employeeId),
       ]);
       const p = ScreenshotSettingsService.at(periods, captured);
       if (!p.enabled) return reject("Screenshots were turned off by the organization at that time");
@@ -203,6 +212,13 @@ export class ScreenshotsService implements OnModuleInit, OnModuleDestroy {
         return reject(`Captured before the required screenshot notice (${p.noticeVersion}) was acknowledged`);
       }
       if (Math.max(req.width, req.height) > p.maxDimension) return reject(`Larger than the maximum resolution in force (${p.maxDimension} px)`);
+      // The privacy masks in force must have been applied, exactly: an older or modified agent, or a
+      // capture taken just before a mask change reached the device, is not kept.
+      if (!sameMasks(req.masks, p.maskRegions)) {
+        return reject(`Captured without the privacy masks in force at that time (${p.maskRegions.length} required); update the desktop app if this repeats`);
+      }
+      // Same for the whole-image blur (organisation setting or this employee's override at capture time).
+      if (req.blurred !== ScreenshotSettingsService.blurAt(periods, blurOverrides, captured)) return reject("Blur setting does not match the policy in force");
       // Strictly inside clocked-in, non-break time: no tolerance at break or clock-out edges.
       const segment = segments.find((s) => s.start <= captured && captured < s.end);
       if (!segment) return reject("Captured outside clocked-in time (before clock-in, during a break or after clock-out)");
@@ -213,14 +229,17 @@ export class ScreenshotsService implements OnModuleInit, OnModuleDestroy {
       }
 
       const id = randomUUID();
+      const { rows: team } = await this.db.execute({ sql: "SELECT team_id FROM team_members WHERE employee_id = ? ORDER BY added_at, team_id LIMIT 1", args: [device.employeeId] });
       await this.db.execute({
         sql: `INSERT INTO screenshots (id, employee_id, device_id, attendance_session_id, idempotency_key, captured_at, device_captured_at,
-                width, height, mime_type, file_size_bytes, checksum, storage_provider, storage_key, upload_status)
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'REGISTERED')`,
+                width, height, mime_type, file_size_bytes, checksum, storage_provider, storage_key, upload_status, mask_count, blurred)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'REGISTERED', ?, ?)`,
         args: [
-          id, device.employeeId, device.deviceId, segment.sessionId, req.id, iso(captured), req.capturedAt,
+          // The device's clock reading, normalized to UTC (same instant; a "+05:30" offset is not kept as text).
+          id, device.employeeId, device.deviceId, segment.sessionId, req.id, iso(captured), iso(Date.parse(req.capturedAt)),
           req.width, req.height, req.mimeType, req.sizeBytes, req.checksum, this.storage.provider,
-          `${device.employeeId}/${iso(captured).slice(0, 7)}/${id}.webp`,
+          screenshotKey(team[0] ? String(team[0].team_id) : null, device.employeeId, iso(captured), id), req.masks.length,
+          req.blurred ? 1 : 0,
         ],
       });
       return { id: req.id, status: "REGISTERED" };
@@ -274,8 +293,8 @@ export class ScreenshotsService implements OnModuleInit, OnModuleDestroy {
   // ---- Reading --------------------------------------------------------------------------
 
   /** The caller's (or, for admins, any employee's) screenshot metadata. Employees only if self-view is allowed. */
-  async list(caller: AuthContext, employee: EmployeeRef, q: ScreenshotQuery): Promise<Paginated<ScreenshotItem>> {
-    await this.assertSelfView(caller);
+  async list(caller: AuthContext, employee: EmployeeRef & { userId: string }, q: ScreenshotQuery): Promise<Paginated<ScreenshotItem>> {
+    await this.assertSelfView(caller, employee.userId, employee.id);
     const today = todayIn(employee.timezone);
     const from = zonedToUtc(`${q.from ?? addDays(today, -30)}T00:00`, employee.timezone);
     const to = zonedToUtc(`${addDays(q.to ?? today, 1)}T00:00`, employee.timezone);
@@ -291,8 +310,8 @@ export class ScreenshotsService implements OnModuleInit, OnModuleDestroy {
   }
 
   /** Admin gallery: newest first, all employees or one, dates in the viewer's time zone. Metadata only. */
-  async gallery(q: ScreenshotGalleryQuery): Promise<Paginated<ScreenshotGalleryItem>> {
-    const { where, args } = this.galleryFilter(q);
+  async gallery(q: ScreenshotGalleryQuery, caller: AuthContext): Promise<Paginated<ScreenshotGalleryItem>> {
+    const { where, args } = this.galleryFilter(q, caller);
     const [rows, count] = await this.db.batch(
       [
         {
@@ -308,8 +327,8 @@ export class ScreenshotsService implements OnModuleInit, OnModuleDestroy {
   }
 
   /** Real server-side counts for the gallery header (same filters). */
-  async overview(q: ScreenshotGalleryQuery): Promise<ScreenshotOverview> {
-    const { where, args } = this.galleryFilter(q);
+  async overview(q: ScreenshotGalleryQuery, caller: AuthContext): Promise<ScreenshotOverview> {
+    const { where, args } = this.galleryFilter(q, caller);
     const [{ rows }, retention] = await Promise.all([
       this.db.execute({
         sql: `SELECT count(*) AS total,
@@ -333,7 +352,9 @@ export class ScreenshotsService implements OnModuleInit, OnModuleDestroy {
   /** One screenshot's metadata: admins (with its access log) or the owner when self-view is allowed. */
   async detail(caller: AuthContext, id: string): Promise<ScreenshotDetail> {
     const r = await this.readable(caller, id);
-    const item: ScreenshotDetail = toGalleryItem(r);
+    const base = toGalleryItem(r);
+    const inForce = ScreenshotSettingsService.at(await this.settings.periods(), Date.parse(base.capturedAt)).maskRegions;
+    const item: ScreenshotDetail = { ...base, masks: inForce.length === base.maskCount ? inForce : null };
     if (hasPermission(caller.role, "screenshots:read")) {
       const { rows } = await this.db.execute({
         sql: `SELECT l.accessed_at, l.action, u.id AS viewer_id, u.email FROM screenshot_access_log l JOIN users u ON u.id = l.user_id
@@ -352,8 +373,12 @@ export class ScreenshotsService implements OnModuleInit, OnModuleDestroy {
    */
   async content(caller: AuthContext, id: string, variant: "full" | "thumbnail"): Promise<Uint8Array> {
     const r = await this.readable(caller, id);
-    if (r.upload_status === "DELETED") throw new GoneException("This screenshot was deleted under the retention policy");
+    if (r.upload_status === "DELETED") throw new GoneException("This screenshot was deleted (by an administrator or under the retention policy)");
     if (r.upload_status !== "STORED") throw new ConflictException("This screenshot has not been stored yet");
+    // Stored by another provider (dev/staging after switching storage): this server cannot read it.
+    if (r.storage_provider !== this.storage.provider) {
+      throw new ConflictException(`This screenshot is stored with ${String(r.storage_provider)}, not the storage this server uses (${this.storage.provider})`);
+    }
     const action = variant === "thumbnail" ? "THUMBNAIL" : "VIEW";
     await this.db.execute({ sql: "INSERT INTO screenshot_access_log (id, screenshot_id, user_id, action) VALUES (?, ?, ?, ?)", args: [randomUUID(), id, caller.id, action] });
     this.logger.log({ userId: caller.id, screenshotId: id, action }, "Screenshot accessed");
@@ -370,6 +395,59 @@ export class ScreenshotsService implements OnModuleInit, OnModuleDestroy {
       throw new BadGatewayException("The stored screenshot failed validation");
     }
     return bytes;
+  }
+
+  // ---- Admin deletion -------------------------------------------------------------------
+
+  /**
+   * Deletes one screenshot: the file first (idempotent at the provider), then the row is marked
+   * DELETED with who and when (the row itself is kept: screenshots are append-only). A storage
+   * failure leaves the row unchanged (502). A row stored with another provider is refused (409),
+   * never marked DELETED while its file still exists elsewhere. Already deleted: 200, unchanged.
+   * Timelapses that may contain it are expired by the timelapse sweep, run right after.
+   * The reason is required but NOT stored: there is no column for it (only its length is logged,
+   * since free text may contain personal data).
+   */
+  async remove(admin: AuthContext, id: string, reason: string): Promise<ScreenshotDeleteResponse> {
+    const row = async () => {
+      const { rows } = await this.db.execute({
+        sql: `SELECT ${GALLERY_COLUMNS}, s.storage_key, s.deleted_at FROM screenshots s JOIN employee_profiles p ON p.id = s.employee_id WHERE s.id = ?`,
+        args: [id],
+      });
+      return rows[0];
+    };
+    const first = await row();
+    if (!first) throw new NotFoundException("Screenshot not found");
+    // Same lock as upload, so a concurrent upload cannot store a file after it was deleted.
+    const result = await this.locks.run(String(first.employee_id), async () => {
+      const r = (await row())!;
+      if (r.upload_status === "DELETED") return { screenshot: toGalleryItem(r), deletedAt: String(r.deleted_at), alreadyDeleted: true };
+      const sameProvider = r.storage_provider === this.storage.provider;
+      if (r.upload_status === "STORED" && !sameProvider) {
+        throw new ConflictException(`This screenshot is stored with ${String(r.storage_provider)}, not the storage this server uses (${this.storage.provider}); it was not deleted`);
+      }
+      if (sameProvider) {
+        try {
+          await this.storage.delete(String(r.storage_key));
+        } catch (err) {
+          if (!(err instanceof StorageError)) throw err;
+          this.logger.warn({ screenshotId: id, err: err.message }, "Screenshot delete failed");
+          throw new BadGatewayException("Screenshot storage is unavailable; nothing was deleted");
+        }
+      }
+      const at = new Date().toISOString();
+      await this.db.execute({
+        sql: "UPDATE screenshots SET upload_status = 'DELETED', deleted_at = ?, deleted_by = ?, updated_at = ? WHERE id = ? AND upload_status != 'DELETED'",
+        args: [at, admin.id, at, id],
+      });
+      this.logger.log({ adminId: admin.id, screenshotId: id, was: r.upload_status, reasonLength: reason.length }, "Screenshot deleted by an admin");
+      const fresh = (await row())!;
+      return { screenshot: toGalleryItem(fresh), deletedAt: String(fresh.deleted_at), alreadyDeleted: false };
+    });
+    if (!result.alreadyDeleted) {
+      await this.timelapses.sweep().catch((err: Error) => this.logger.error({ err: err.message }, "Timelapse sweep after a screenshot delete failed"));
+    }
+    return result;
   }
 
   // ---- Retention ------------------------------------------------------------------------
@@ -405,47 +483,79 @@ export class ScreenshotsService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * Deletes expired screenshots from storage, then marks their metadata DELETED (who/when kept) and
-   * records the run. Refused until approved. A file the provider fails to delete stays STORED and
-   * is retried next run. With the SharePoint recycle bin (default) deleted files remain recoverable
+   * Deletes expired screenshots from storage, then marks their metadata DELETED (who/when kept).
+   * Per chunk, the DELETED marks and that chunk's run row are one transaction (no silent deletes,
+   * no run row claiming deletes that did not happen). Refused until approved. A file the provider
+   * fails to delete stays STORED and is retried next run. Rows stored with another provider (dev or
+   * staging after switching storage) are skipped, never marked DELETED while their file still
+   * exists elsewhere. With the SharePoint recycle bin (default) deleted files remain recoverable
    * there until the bin is emptied; this is recorded as the run's deletion mode.
    */
   async retentionRun(admin: AuthUser | null, now = Date.now()): Promise<ScreenshotRetentionPreview> {
     const s = await this.settings.current();
     if (!s.retentionApproved) throw new ConflictException("Screenshot retention has not been approved in the settings; nothing was deleted");
     const cutoff = iso(now - s.retentionDays * DAY_MS);
+    const run = [cutoff, s.retentionDays, this.storage.deletionMode, admin?.id ?? null] as const;
     let failed = 0;
     let deleted = 0;
+    let skipped = 0;
+    let recorded = false;
     let after = "";
     for (;;) {
       const { rows } = await this.db.execute({
-        sql: `SELECT id, storage_key FROM screenshots WHERE upload_status != 'DELETED' AND captured_at < ? AND id > ? ORDER BY id LIMIT ${RETENTION_CHUNK}`,
+        sql: `SELECT id, storage_key, storage_provider FROM screenshots WHERE upload_status != 'DELETED' AND captured_at < ? AND id > ? ORDER BY id LIMIT ${RETENTION_CHUNK}`,
         args: [cutoff, after],
       });
+      const gone: string[] = [];
+      let chunkFailed = 0;
       for (const r of rows) {
+        if (r.storage_provider !== this.storage.provider) {
+          skipped++;
+          continue;
+        }
         try {
           await this.storage.delete(String(r.storage_key));
+          gone.push(String(r.id));
         } catch (err) {
           if (!(err instanceof StorageError)) throw err;
           this.logger.warn({ screenshotId: r.id, err: err.message }, "Retention could not delete a screenshot");
-          failed++;
-          continue;
+          chunkFailed++;
         }
+      }
+      if (gone.length || chunkFailed) {
         const at = new Date().toISOString();
-        await this.db.execute({
-          sql: "UPDATE screenshots SET upload_status = 'DELETED', deleted_at = ?, deleted_by = ?, updated_at = ? WHERE id = ?",
-          args: [at, admin?.id ?? null, at, String(r.id)],
-        });
-        deleted++;
+        // Storage first, then the marks and the chunk's run row together: a crash in between leaves
+        // the rows STORED with their file already gone, and the next run's (idempotent) delete marks them.
+        const [marked] = await this.db.batch(
+          [
+            {
+              sql: `UPDATE screenshots SET upload_status = 'DELETED', deleted_at = ?, deleted_by = ?, updated_at = ?
+                    WHERE upload_status != 'DELETED' AND id IN (${gone.map(() => "?").join(", ")})`,
+              args: [at, admin?.id ?? null, at, ...gone],
+            },
+            {
+              sql: `INSERT INTO screenshot_retention_runs (id, cutoff, retention_days, deleted, failed, deletion_mode, triggered_by)
+                    VALUES (?, ?, ?, changes(), ?, ?, ?)`,
+              args: [randomUUID(), run[0], run[1], chunkFailed, run[2], run[3]],
+            },
+          ],
+          "write",
+        );
+        deleted += marked!.rowsAffected;
+        failed += chunkFailed;
+        recorded = true;
       }
       if (rows.length < RETENTION_CHUNK) break;
       after = String(rows.at(-1)!.id);
     }
-    await this.db.execute({
-      sql: "INSERT INTO screenshot_retention_runs (id, cutoff, retention_days, deleted, failed, deletion_mode, triggered_by) VALUES (?, ?, ?, ?, ?, ?, ?)",
-      args: [randomUUID(), cutoff, s.retentionDays, deleted, failed, this.storage.deletionMode, admin?.id ?? null],
-    });
-    this.logger.log({ adminId: admin?.id ?? null, cutoff, deleted, failed, mode: this.storage.deletionMode }, "Screenshot retention purge");
+    if (!recorded) {
+      await this.db.execute({
+        sql: "INSERT INTO screenshot_retention_runs (id, cutoff, retention_days, deleted, failed, deletion_mode, triggered_by) VALUES (?, ?, ?, 0, 0, ?, ?)",
+        args: [randomUUID(), ...run],
+      });
+    }
+    // ponytail: skipped rows are logged only (no column in screenshot_retention_runs / field in the shared type yet).
+    this.logger.log({ adminId: admin?.id ?? null, cutoff, deleted, failed, skipped, mode: this.storage.deletionMode }, "Screenshot retention purge");
     return { ...(await this.retentionPreview(now)), failed };
   }
 
@@ -459,10 +569,16 @@ export class ScreenshotsService implements OnModuleInit, OnModuleDestroy {
 
   // ---- internals ------------------------------------------------------------------------
 
-  /** Employees see their own screenshots only while the policy allows it; admins always. */
-  private async assertSelfView(caller: AuthContext) {
-    if (hasPermission(caller.role, "screenshots:read")) return;
-    if (!(await this.settings.current()).employeeSelfView) throw new ForbiddenException("Your organization does not allow employees to view screenshots");
+  /**
+   * Employees see their own screenshots only while allowed: their per-person override (F08) if set, else
+   * the organisation switch; admins always. Someone else's (`ownerUserId`) only reaches here after the
+   * scope check (team heads, W41), so the self-view switch does not apply.
+   */
+  private async assertSelfView(caller: AuthContext, ownerUserId: string, employeeId: string) {
+    if (hasPermission(caller.role, "screenshots:read") || ownerUserId !== caller.id) return;
+    const [own, org] = await Promise.all([this.monitoring.screenshotSelfView(employeeId), this.settings.current()]);
+    if (own === false) throw new ForbiddenException("Your administrator has turned off viewing your own screenshots");
+    if (own === null && !org.employeeSelfView) throw new ForbiddenException("Your organization does not allow employees to view screenshots");
   }
 
   /** The row if the caller may read it; 404 for anyone else (same as a missing id). */
@@ -472,15 +588,17 @@ export class ScreenshotsService implements OnModuleInit, OnModuleDestroy {
       args: [id],
     });
     const r = rows[0];
-    if (!r || (!hasPermission(caller.role, "screenshots:read") && r.user_id !== caller.id)) throw new NotFoundException("Screenshot not found");
-    await this.assertSelfView(caller);
+    if (!r || (r.user_id !== caller.id && !(await canReadEmployee(this.db, caller, "screenshots:read", String(r.employee_id))))) throw new NotFoundException("Screenshot not found");
+    await this.assertSelfView(caller, String(r.user_id), String(r.employee_id));
     return r;
   }
 
-  private galleryFilter(q: ScreenshotGalleryQuery) {
+  /** Team heads (W41): only their teams' members; another employeeId simply matches nothing. */
+  private galleryFilter(q: ScreenshotGalleryQuery, caller: AuthContext) {
     const args: string[] = [zonedToUtc(`${q.from}T00:00`, q.tz), zonedToUtc(`${addDays(q.to, 1)}T00:00`, q.tz)];
     if (q.employeeId) args.push(q.employeeId);
-    return { where: `s.captured_at >= ? AND s.captured_at < ?${q.employeeId ? " AND s.employee_id = ?" : ""}`, args };
+    const scope = scopeSql(caller, "screenshots:read", "s.employee_id");
+    return { where: `s.captured_at >= ? AND s.captured_at < ?${q.employeeId ? " AND s.employee_id = ?" : ""}${scope.sql}`, args: [...args, ...scope.args] };
   }
 
   private throttle(employeeId: string) {

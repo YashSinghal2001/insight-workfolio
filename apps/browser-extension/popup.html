@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Insight Workfolio website time</title>
+    <style>
+      body { font: 13px/1.4 system-ui, sans-serif; width: 340px; margin: 12px; color: #111; }
+      h1 { font-size: 15px; margin: 0 0 8px; }
+      label { display: block; margin: 6px 0; }
+      input { width: 100%; box-sizing: border-box; padding: 4px; }
+      button { margin-top: 8px; padding: 4px 10px; }
+      .muted { color: #555; }
+      .error { color: #b91c1c; }
+      .on { color: #15803d; font-weight: 600; }
+      ul { padding-left: 18px; margin: 4px 0; }
+    </style>
+  </head>
+  <body>
+    <h1>Insight Workfolio website time</h1>
+    <p id="status" role="status"></p>
+    <form id="connect" hidden>
+      <p class="muted">Get a connection code in the Insight Workfolio desktop app (Websites tab).</p>
+      <label>Server <input name="apiBase" value="http://localhost:4000" required /></label>
+      <label>Connection code <input name="code" maxlength="8" autocomplete="off" required /></label>
+      <label>Name for this browser <input name="label" value="Chrome" maxlength="60" required /></label>
+      <button type="submit">Connect</button>
+    </form>
+    <section id="connected" hidden>
+      <p id="who"></p>
+      <p id="reasons" class="muted"></p>
+      <p><strong>Recorded:</strong> the website's domain name and how long it was in front.</p>
+      <p><strong>Never:</strong> page addresses after the domain, searches, titles, page content, typing, history or private windows.</p>
+      <p id="queue" class="muted"></p>
+      <button type="button" id="send">Send now</button>
+      <button type="button" id="disconnect">Disconnect</button>
+    </section>
+    <p id="error" class="error" role="alert"></p>
+    <script type="module" src="popup.js"></script>
+  </body>
+</html>

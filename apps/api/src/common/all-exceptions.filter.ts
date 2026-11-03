@@ -1,3 +1,4 @@
+import { STATUS_CODES } from "node:http";
 import { type ArgumentsHost, Catch, type ExceptionFilter, HttpException, HttpStatus, Logger } from "@nestjs/common";
 import type { ApiError } from "@workfolio/shared";
 import type { Request, Response } from "express";
@@ -23,18 +24,18 @@ export class AllExceptionsFilter implements ExceptionFilter {
       const body = exception.getResponse();
       if (typeof body === "string") {
         message = body;
-        error = exception.name;
+        error = STATUS_CODES[statusCode] ?? "Error";
       } else {
         const b = body as { message?: string | string[]; error?: string };
         message = b.message ?? exception.message;
         // Router 404s echo the raw URL ("Cannot GET /x?token=..."); strip the query string.
         if (typeof message === "string") message = message.replace(req.originalUrl, path);
-        error = b.error ?? exception.name;
+        error = b.error ?? STATUS_CODES[statusCode] ?? "Error";
       }
     } else if (isExposedClientError(exception)) {
       // body-parser errors (malformed JSON, payload too large) are client errors, not 500s.
       statusCode = exception.status;
-      error = exception.type ?? "Bad Request";
+      error = STATUS_CODES[statusCode] ?? "Bad Request";
       message = exception.message;
     }
 
@@ -55,7 +56,7 @@ export class AllExceptionsFilter implements ExceptionFilter {
 }
 
 /** http-errors style errors marked safe to show (e.g. from body-parser). */
-function isExposedClientError(e: unknown): e is { status: number; message: string; type?: string } {
+function isExposedClientError(e: unknown): e is { status: number; message: string } {
   const err = e as { expose?: unknown; status?: unknown } | null;
   return !!err && err.expose === true && typeof err.status === "number" && err.status >= 400 && err.status < 500;
 }

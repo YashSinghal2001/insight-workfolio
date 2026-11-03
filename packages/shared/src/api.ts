@@ -1,7 +1,8 @@
-import type { Role } from "./roles.js";
+import type { PlatformRole, Role } from "./roles.js";
 import type { ActivityAppTotal, ActivityKind, MonitoringNotice, MonitoringPolicy, MonitoringSettings } from "./activity.js";
 import type { AttendanceEventType, AttendanceState } from "./attendance.js";
 import type { CorrectionStatus, CorrectionType } from "./corrections.js";
+import type { ScreenshotStorageProvider } from "./screenshots.js";
 import type { AccountStatus, EmploymentStatus } from "./schemas.js";
 import type { SessionSource, Timesheet, TimesheetTotals } from "./timesheet.js";
 
@@ -23,9 +24,17 @@ export interface HealthResponse {
 
 export type DependencyStatus = "up" | "down";
 
+export interface ReadinessCheck {
+  status: DependencyStatus;
+  latencyMs?: number;
+  error?: string;
+  /** Storage check only: which provider is configured (never a path, ID or secret). */
+  provider?: ScreenshotStorageProvider;
+}
+
 export interface ReadinessResponse {
   status: "ready" | "not_ready";
-  checks: Record<string, { status: DependencyStatus; latencyMs?: number; error?: string }>;
+  checks: Record<string, ReadinessCheck>;
   timestamp: string;
 }
 
@@ -38,12 +47,16 @@ export interface AuthUser {
   id: string;
   email: string;
   role: Role;
+  /** Identity: Super Admin, Admin or Employee (Super Admin and Admin have the same permissions). */
+  platformRole: PlatformRole;
 }
 
 export interface MeResponse {
   user: AuthUser;
   /** null for admins without an employee profile. */
   employee: Employee | null;
+  /** W41: heads an active team (team-scoped reads and the dashboard's "My team" area). */
+  teamHead?: boolean;
 }
 
 /** Web clients get cookies and this body; desktop clients additionally get tokens. */
@@ -219,7 +232,14 @@ export interface CorrectionRequest {
   reviewedAt: string | null;
   reviewReason: string | null;
   /** Present once approved: exact before/after values written to the audit table. */
-  applied: { correctionId: string; sessionId: string; original: unknown; corrected: unknown } | null;
+  applied: { correctionId: string; sessionId: string; original: CorrectionValues | null; corrected: CorrectionValues } | null;
+}
+
+/** A shift as recorded in the correction audit. `original` is null when the correction added the shift. */
+export interface CorrectionValues {
+  clockInAt: string;
+  clockOutAt: string | null;
+  breaks: { id?: string; startedAt: string; endedAt: string | null }[];
 }
 
 // ---- Activity ------------------------------------------------------------------

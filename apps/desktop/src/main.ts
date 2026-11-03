@@ -1,9 +1,11 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import {
   API_PREFIX,
   attendanceTotals,
   DEVICE_HEADER,
   formatDuration,
+  PLATFORM_ROLE_LABEL,
   transition,
   type AttendanceCurrent,
   type AttendanceEventType,
@@ -15,10 +17,29 @@ import {
 import { initActivity } from "./activity-ui.ts";
 import { initScreenshots } from "./screenshot-ui.ts";
 import { initRecords } from "./records.ts";
+import { initMyScreenshots } from "./my-screenshots.ts";
+import { initLeave } from "./leave.ts";
+import { initTasks } from "./tasks.ts";
+import { initWebsites } from "./websites.ts";
 import { ApiClient, HttpError, profileOf, restoreSession, type CachedProfile, type TokenStore } from "./session.ts";
 import { project, SyncEngine, type QueuedEvent } from "./sync.ts";
+import { resolveApiUrl, type ApiUrlMode } from "./api-url.ts";
+import { trayBridge, trayUpdate, type TrayState } from "./tray-bridge.ts";
+import { edgeNotifier } from "./notify.ts";
+import { applyStaticWording, platformOf, setPlatform, words } from "./platform.ts";
+import { initPrefs } from "./prefs-ui.ts";
 
-const API_URL: string = import.meta.env.VITE_API_URL ?? "http://localhost:4000";
+/** Set by vite.config.ts: "development" for `tauri dev` and debug bundles, "production" for release. */
+declare const __WORKFOLIO_API_MODE__: ApiUrlMode;
+/** null = misconfigured build: the client never starts and the login view shows API_URL_ERROR. */
+let API_URL: string | null = null;
+let API_URL_ERROR: string | null = null;
+try {
+  API_URL = resolveApiUrl(import.meta.env.VITE_API_URL, __WORKFOLIO_API_MODE__);
+} catch (err) {
+  API_URL_ERROR = `This build of the app is misconfigured: ${(err as Error).message}`;
+}
+const DASHBOARD_URL: string = import.meta.env.VITE_DASHBOARD_URL ?? "http://localhost:3000";
 const POLL_MS = 15_000;
 const IN_TAURI = "__TAURI_INTERNALS__" in window;
 
@@ -81,7 +102,11 @@ function queueFor(userId: string, deviceId: string) {
 
 // ---- State --------------------------------------------------------------------
 
-const client = new ApiClient(API_URL, tokens);
+const client = new ApiClient(API_URL ?? "", tokens, API_URL ? undefined : () => Promise.reject(new Error(API_URL_ERROR!)));
+const SESSION_ENDED =
+  "Your session has ended (it expired, you were signed out elsewhere, or your account was disabled). Please sign in again; unsynced events stay on this device.";
+// Any request whose token refresh is refused ends the session at once, not only attendance sync.
+client.onSessionEnded = () => void (app.profile && signOut(false, SESSION_ENDED));
 
 const app = {
   profile: null as CachedProfile | null,
@@ -105,11 +130,37 @@ const app = {
 const cacheKey = (name: string) => `${name}:${app.profile!.userId}`;
 const pendingCount = () => app.queued.filter((e) => (e.status ?? "PENDING") === "PENDING").length;
 
+const myScreenshots = initMyScreenshots({
+  client,
+  timeZone: () => app.profile?.timezone ?? null,
+  online: () => app.online && app.apiUp,
+});
+
+const leave = initLeave({
+  client,
+  timeZone: () => app.profile?.timezone ?? null,
+  online: () => app.online && app.apiUp,
+});
+
+const tasks = initTasks({
+  client,
+  timeZone: () => app.profile?.timezone ?? null,
+  online: () => app.online && app.apiUp,
+});
+
+const websites = initWebsites({
+  client,
+  timeZone: () => app.profile?.timezone ?? null,
+  online: () => app.online && app.apiUp,
+});
+
 const records = initRecords({
   client,
   timeZone: () => app.profile?.timezone ?? null,
   online: () => app.online && app.apiUp,
   pendingCount,
+  employeeCode: () => app.profile?.employeeCode ?? null,
+  tabs: { screenshots: myScreenshots, leave, tasks, websites },
 });
 
 const activity = initActivity({
@@ -131,9 +182,13 @@ const activity = initActivity({
   }),
 });
 
+// OS notifications for state changes only (plugin:notification, capability notification:allow-notify).
+const notify = edgeNotifier((title, body) => (IN_TAURI ? invoke("plugin:notification|notify", { options: { title, body } }) : Promise.resolve()));
+
 const screenshots = initScreenshots({
   client,
   inTauri: IN_TAURI,
+  notify,
   kvGet,
   kvSet,
   formatTime: (iso) => formatTime(iso),
@@ -172,7 +227,7 @@ async function boot() {
   // Keychain reads block while macOS asks the user for permission (e.g. after an unsigned rebuild).
   const slow = setTimeout(() => {
     $("#auth-loading").textContent =
-      "Waiting for access to your saved sign-in in the system keychain. If a permission dialog is open, choose Allow.";
+      "Waiting for access to your saved sign-in in the system credential store (Keychain on macOS, Credential Manager on Windows). If a permission dialog is open, choose Allow.";
   }, 3000);
   try {
     await bootSession();
@@ -246,6 +301,7 @@ async function startSync() {
     {
       onStatus: (s) => {
         render();
+        notify("sync-blocked", s.phase === "blocked", "Attendance sync is blocked", "Open Insight Workfolio: you may need to sign in again, or this device was revoked.");
         if (s.phase === "blocked") void onBlocked();
       },
       onSynced: ({ current }, at) => {
@@ -267,7 +323,7 @@ async function startSync() {
 /** 401 after a failed refresh: the session is gone. 403: device revoked. Never retried blindly. */
 async function onBlocked() {
   if (!(await tokens.load())) {
-    return signOut(false, "Your session has ended. Please sign in again; unsynced events stay on this device.");
+    return signOut(false, SESSION_ENDED);
   }
   await loadDevice().catch(() => undefined);
   render();
@@ -283,23 +339,34 @@ async function onReconnect() {
   if (app.profile && !app.online) {
     const r = await restoreSession(client, tokens, app.profile).catch(() => null);
     if (r?.kind === "online") return enter(r.profile, true);
-    if (r?.kind === "signed-out" && !r.offline) return signOut(false, "Your session has ended. Please sign in again.");
+    if (r?.kind === "signed-out" && !r.offline) return signOut(false, SESSION_ENDED);
   }
   if (app.engine) void app.engine.kick().then(reloadQueue);
 }
 
-async function signOut(revoke: boolean, message: string | null = null) {
+/** One sign-out at a time: an ended session can be noticed by several requests at once. */
+let signingOut: Promise<void> | null = null;
+function signOut(revoke: boolean, message: string | null = null): Promise<void> {
+  signingOut ??= doSignOut(revoke, message).finally(() => (signingOut = null));
+  return signingOut;
+}
+
+async function doSignOut(revoke: boolean, message: string | null) {
   await activity.signOut(); // stop monitoring first
   await screenshots.signOut();
   app.engine?.stop();
   if (revoke) await client.logout();
   else await tokens.clear();
+  // Per-user cached state goes too, so nothing of this account is shown or reused after sign-out.
+  const userId = app.profile?.userId;
+  if (userId) for (const name of ["device", "current", "lastSync", "activity", "screenshots"]) await kvSet(`${name}:${userId}`, null);
   await kvSet("profile", null);
   // Queued events are kept (scoped to employee + device) and upload on the next sign-in here.
   Object.assign(app, { profile: null, online: false, device: null, current: null, queued: [], queue: null, engine: null });
   void records.showTab("today");
   show("login");
   loginError(message);
+  render();
 }
 
 // ---- Rendering ----------------------------------------------------------------
@@ -315,13 +382,58 @@ function formatTime(iso: string) {
 const totalsOf = (s: AttendanceSession) =>
   attendanceTotals({ start: s.clockInAt, end: s.clockOutAt }, s.breaks.map((b) => ({ start: b.startedAt, end: b.endedAt })));
 
+// ---- Menu bar / system tray + Status card ------------------------------------------------------
+
+const sendTray = trayBridge((update) => (IN_TAURI ? invoke("tray_update", { ...update }) : Promise.resolve()));
+const STATUS_PILL: Record<TrayState, [string, string]> = {
+  SIGNED_OUT: ["Signed out", "off"],
+  CLOCKED_OUT: ["Clocked out", "off"],
+  WORKING: ["Working", "good"],
+  ON_BREAK: ["On break", "warn"],
+  OFFLINE: ["Offline", "warn"],
+  ATTENTION: ["Needs attention", "bad"],
+};
+/** A panel's pill label, or null while the panel is hidden. */
+const pill = (panel: string, sel: string) => ($(panel).hidden ? null : $(sel).textContent || null);
+
+function renderStatus() {
+  const signedIn = !!app.profile;
+  const u = trayUpdate({
+    signedIn,
+    online: app.online && app.apiUp,
+    deviceStatus: app.device?.status ?? null,
+    projection: project(app.current, app.queued),
+    syncPhase: app.engine?.status.phase,
+    rejected: app.queued.filter((e) => e.status === "REJECTED").length,
+    activity: signedIn ? pill("#monitoring", "#mon-state") : null,
+    screenshots: signedIn ? pill("#screenshots", "#shot-state") : null,
+  });
+  if (!sendTray(u)) return; // unchanged: no DOM churn, no repeated screen-reader announcements
+  const [text, tone] = STATUS_PILL[u.state];
+  $("#status-state").textContent = text;
+  $("#status-state").dataset.tone = tone;
+  $("#status-label").textContent = u.since ? `${u.label} since ${formatTime(u.since)}` : u.label;
+  $("#status-monitoring").hidden = !u.monitoring;
+  $("#status-monitoring").textContent = u.monitoring ?? "";
+}
+
 function render() {
+  renderStatus();
   if (!app.profile) return;
   $("#identity-name").textContent = app.profile.fullName;
   $("#identity-code").textContent = app.profile.employeeCode;
   $("#identity-email").textContent = app.profile.email;
+  // Display only: the role shown comes from the server's /auth/me and grants nothing in this app.
+  const role = app.profile.platformRole ?? "EMPLOYEE";
+  $("#role-badge").hidden = role === "EMPLOYEE";
+  $("#role-badge").textContent = PLATFORM_ROLE_LABEL[role];
+  $("#admin-panel").hidden = role === "EMPLOYEE";
+  $("#admin-panel-role").textContent = PLATFORM_ROLE_LABEL[role];
+  $("#admin-panel-url").textContent = DASHBOARD_URL;
+  $("#admin-panel-note").hidden = app.profile.hasEmployeeProfile !== false;
   $("#mode-badge").hidden = app.online;
   $("#mode-badge").textContent = "Offline mode";
+  $("#offline-banner").hidden = app.online && app.apiUp;
 
   const status = app.device?.status;
   $("#device-register").hidden = !(app.online && status === "NOT_REGISTERED" && !app.device?.otherActiveDevice);
@@ -508,6 +620,7 @@ $("#queue-recovered-dismiss").addEventListener("click", async () => {
 // ---- Connection status ----------------------------------------------------------
 
 async function checkApi() {
+  if (!API_URL) return;
   const up = await fetch(`${API_URL}${API_PREFIX}/health`, { cache: "no-store" }).then((r) => r.ok, () => false);
   $("#api-dot").className = `dot ${up ? "online" : "offline"}`;
   $("#api-label").textContent = up ? "Online" : "Offline — server unreachable";
@@ -520,6 +633,9 @@ async function showAppInfo() {
     const info = await invoke<{ version: string; trackingEnabled: boolean; platform: string }>("app_info");
     $("#version").textContent = `v${info.version}`;
     if (info.platform === "macos" || info.platform === "windows") app.platform = info.platform;
+    // Wording follows the shell only; the browser keeps the macOS texts (headless suites assert them).
+    setPlatform(platformOf(info.platform));
+    applyStaticWording(words(), (id) => document.getElementById(id));
   } else {
     app.platform = navigator.userAgent.includes("Windows") ? "windows" : "macos";
   }
@@ -527,7 +643,25 @@ async function showAppInfo() {
 }
 
 window.addEventListener("online", () => void checkApi());
+window.addEventListener("offline", () => void checkApi());
+$("#hidden-notice-dismiss").addEventListener("click", () => ($("#hidden-notice").hidden = true));
+if (IN_TAURI) {
+  // First close: the window hides and the app stays in the menu bar / system tray. Explain that once, when it is shown again.
+  void listen("window-hidden", async () => {
+    if (await kvGet<boolean>("window_hidden_notice_seen")) return;
+    $("#hidden-notice").hidden = false;
+    await kvSet("window_hidden_notice_seen", true);
+  });
+  void listen("tray-open", () => void checkApi().then(render));
+}
+initPrefs(IN_TAURI);
 setInterval(checkApi, POLL_MS);
 setInterval(render, 1000); // live durations and retry countdown
 showAppInfo().catch((err) => console.error("app_info failed", err));
-void checkApi().then(boot);
+if (API_URL_ERROR) {
+  show("login");
+  loginError(API_URL_ERROR);
+  $<HTMLButtonElement>("#login-submit").disabled = true;
+} else {
+  void checkApi().then(boot);
+}

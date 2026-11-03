@@ -14,7 +14,10 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+# tray-icon: menu-bar item; image-png: its template icon (icons/tray-template.png).
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
+# OS notifications for state changes only (sync blocked, screenshot uploads failing): src/notify.ts.
+tauri-plugin-notification = "=2.8.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # OS credential store: macOS Keychain, Windows Credential Manager.
@@ -25,6 +28,8 @@ uuid = { version = "1", features = ["v4"] }
 # Screenshots: lossy WebP via libwebp (compiled from source by libwebp-sys), SHA-256 checksums.
 webp = { version = "0.3", default-features = false }
 sha2 = "0.10"
+# Parses the ISO `since` time of the menu-bar timer (already in the dependency tree).
+chrono = { version = "0.4", default-features = false, features = ["std"] }
 
 # libwebp is C code: unoptimized it takes seconds per screenshot even in development builds.
 [profile.dev.package.libwebp-sys]
@@ -43,11 +48,38 @@ strip = true
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+# Windows native adapters (activity, session/power events, screenshots, startup, single instance).
+# Same windows-sys version Tauri already pulls in, so nothing extra is compiled.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_Graphics_Gdi",
+  "Win32_Security",
+  "Win32_Storage_FileSystem",
+  "Win32_System_LibraryLoader",
+  "Win32_System_Power",
+  "Win32_System_ProcessStatus",
+  "Win32_System_Registry",
+  "Win32_System_RemoteDesktop",
+  "Win32_System_StationsAndDesktops",
+  "Win32_System_SystemInformation",
+  "Win32_System_SystemServices",
+  "Win32_System_Threading",
+  "Win32_UI_HiDpi",
+  "Win32_UI_Input_KeyboardAndMouse",
+  "Win32_UI_Shell",
+  "Win32_UI_WindowsAndMessaging",
+] }
+# Second launch → focus the running copy (named mutex + WM_COPYDATA to the first instance).
+tauri-plugin-single-instance = "2"
+
 [target.'cfg(target_os = "macos")'.dependencies]
 block2 = "0.6"
 objc2 = "0.6"
-objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "libc", "NSRunningApplication"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "libc", "NSRunningApplication", "NSAlert", "NSApplication", "NSButton", "NSControl", "NSResponder", "NSView", "NSWorkspace"] }
 objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "CFData"] }
 objc2-core-graphics = { version = "0.3", default-features = false, features = ["std", "CGImage", "CGDataProvider", "CGDirectDisplay", "CGWindow"] }
-objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString", "NSDictionary", "NSValue", "NSArray"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString", "NSDictionary", "NSValue", "NSArray", "NSNotification", "NSDistributedNotificationCenter", "NSProcessInfo"] }
+# Launch at login: SMAppService (macOS 13+), listed in System Settings > General > Login Items.
+objc2-service-management = { version = "0.3", default-features = false, features = ["std", "objc2", "objc2-foundation", "SMAppService"] }
 objc2-screen-capture-kit = { version = "0.3", default-features = false, features = ["std", "block2", "objc2-core-graphics", "SCShareableContent", "SCScreenshotManager", "SCStream", "SCError"] }

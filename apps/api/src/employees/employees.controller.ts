@@ -6,7 +6,7 @@ import {
   updateEmployeeSchema,
 } from "@workfolio/shared";
 import type { z } from "zod";
-import { CurrentUser, RequirePermission } from "../auth/auth.guard.js";
+import { CurrentUser, RequirePermission, TeamScoped } from "../auth/auth.guard.js";
 import type { AuthContext } from "../auth/auth.service.js";
 import { ZodPipe } from "../common/zod.pipe.js";
 import { EmployeesService } from "./employees.service.js";
@@ -18,16 +18,18 @@ const Id = () => Param("id", new ParseUUIDPipe({ version: "4" }));
 export class EmployeesController {
   constructor(private readonly employees: EmployeesService) {}
 
+  /** Admins: everyone. Team heads: the members of their teams. */
   @Get()
   @RequirePermission("employees:read")
-  list(@Query(new ZodPipe(listEmployeesQuerySchema)) query: z.infer<typeof listEmployeesQuerySchema>) {
-    return this.employees.list(query);
+  @TeamScoped()
+  list(@Query(new ZodPipe(listEmployeesQuerySchema)) query: z.infer<typeof listEmployeesQuerySchema>, @CurrentUser() user: AuthContext) {
+    return this.employees.list(query, user);
   }
 
   @Post()
   @RequirePermission("employees:manage")
-  create(@Body(new ZodPipe(createEmployeeSchema)) body: z.infer<typeof createEmployeeSchema>) {
-    return this.employees.create(body);
+  create(@Body(new ZodPipe(createEmployeeSchema)) body: z.infer<typeof createEmployeeSchema>, @CurrentUser() user: AuthContext) {
+    return this.employees.create(body, user);
   }
 
   /** Admins: any employee. Employees: only their own record (404 otherwise). */
@@ -45,8 +47,8 @@ export class EmployeesController {
 
   @Patch(":id")
   @RequirePermission("employees:manage")
-  update(@Id() id: string, @Body(new ZodPipe(updateEmployeeSchema)) body: z.infer<typeof updateEmployeeSchema>) {
-    return this.employees.update(id, body);
+  update(@Id() id: string, @Body(new ZodPipe(updateEmployeeSchema)) body: z.infer<typeof updateEmployeeSchema>, @CurrentUser() user: AuthContext) {
+    return this.employees.update(id, body, user);
   }
 
   @Patch(":id/status")
@@ -61,7 +63,7 @@ export class EmployeesController {
 
   @Post(":id/setup-token")
   @RequirePermission("employees:manage")
-  reissueSetupToken(@Id() id: string) {
-    return this.employees.reissueSetupToken(id);
+  reissueSetupToken(@Id() id: string, @CurrentUser() user: AuthContext) {
+    return this.employees.reissueSetupToken(id, user);
   }
 }

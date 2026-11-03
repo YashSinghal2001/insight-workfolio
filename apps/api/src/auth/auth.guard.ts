@@ -11,6 +11,8 @@ import { ConfigService } from "@nestjs/config";
 import { Reflector } from "@nestjs/core";
 import { hasPermission, type Permission } from "@workfolio/shared";
 import type { Request, Response } from "express";
+import { apiRateLimitPerMinute, SessionRateLimit } from "../common/rate-limit.js";
+import { readScope } from "../common/scope.js";
 import type { Env } from "../config/env.js";
 import { ACCESS_TOKEN_TTL_S, type AuthContext, AuthService, SESSION_TTL_MS, type IssuedSession } from "./auth.service.js";
 
@@ -19,8 +21,21 @@ const PERMISSION = "auth:permission";
 
 /** Opts a route out of authentication. Everything else requires a valid session. */
 export const Public = () => SetMetadata(PUBLIC, true);
+const CSRF_EXEMPT = "csrfExempt";
+/**
+ * Only for public routes that never read cookies and carry their own one-time credential in the body
+ * (browser-extension pairing), so a cross-site request gains nothing. Everything else keeps the check.
+ */
+export const CsrfExempt = () => SetMetadata(CSRF_EXEMPT, true);
 /** Role check via the shared permission map. Resource ownership is checked in services. */
 export const RequirePermission = (permission: Permission) => SetMetadata(PERMISSION, permission);
+const TEAM_SCOPED = "auth:teamScoped";
+/**
+ * W41: the route scopes its rows with common/scope.ts, so the head of an active team may call it with a
+ * team-head permission (TEAM_HEAD_PERMISSIONS) and gets only their teams' members. Unmarked routes stay
+ * role-only.
+ */
+export const TeamScoped = () => SetMetadata(TEAM_SCOPED, true);
 export const CurrentUser = createParamDecorator(
   (_: unknown, ctx: ExecutionContext) => ctx.switchToHttp().getRequest<{ user: AuthContext }>().user,
 );
@@ -62,6 +77,8 @@ const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
 @Injectable()
 export class AuthGuard implements CanActivate {
   private readonly origins: Set<string>;
+  /** Per-session request limit (off outside production unless API_RATE_LIMIT_PER_MINUTE is set). */
+  readonly sessionLimit: SessionRateLimit;
 
   constructor(
     private readonly reflector: Reflector,
@@ -69,6 +86,7 @@ export class AuthGuard implements CanActivate {
     config: ConfigService<Env, true>,
   ) {
     this.origins = new Set(config.get("CORS_ORIGINS", { infer: true }));
+    this.sessionLimit = new SessionRateLimit(apiRateLimitPerMinute(config));
   }
 
   async canActivate(ctx: ExecutionContext): Promise<boolean> {
@@ -77,19 +95,22 @@ export class AuthGuard implements CanActivate {
 
     // CSRF: state-changing requests not carrying a bearer token (i.e. cookie-capable ones)
     // must come from an allow-listed origin. Browsers always send Origin on such requests.
-    if (!bearer && !SAFE_METHODS.has(req.method) && !this.origins.has(req.headers.origin ?? "")) {
+    const targets = [ctx.getHandler(), ctx.getClass()];
+    const exempt = this.reflector.getAllAndOverride<boolean>(PUBLIC, targets) && this.reflector.getAllAndOverride<boolean>(CSRF_EXEMPT, targets);
+    if (!bearer && !exempt && !SAFE_METHODS.has(req.method) && !this.origins.has(req.headers.origin ?? "")) {
       throw new ForbiddenException("Request origin not allowed");
     }
 
-    const targets = [ctx.getHandler(), ctx.getClass()];
     if (this.reflector.getAllAndOverride<boolean>(PUBLIC, targets)) return true;
 
     const token = bearer ?? readCookie(req, ACCESS_COOKIE);
     if (!token) throw new UnauthorizedException();
     req.user = await this.auth.authenticate(token);
+    this.sessionLimit.check(req.user.sessionId, ctx.switchToHttp().getResponse<Response>());
 
     const permission = this.reflector.getAllAndOverride<Permission | undefined>(PERMISSION, targets);
-    if (permission && !hasPermission(req.user.role, permission)) throw new ForbiddenException();
+    const teamRead = permission && this.reflector.getAllAndOverride<boolean>(TEAM_SCOPED, targets) && readScope(req.user, permission) === "team";
+    if (permission && !hasPermission(req.user.role, permission) && !teamRead) throw new ForbiddenException("Your role does not allow this action");
     return true;
   }
 }

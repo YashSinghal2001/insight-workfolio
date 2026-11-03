@@ -1,5 +1,6 @@
-import { Body, Controller, Get, Headers, HttpCode, Post, Query } from "@nestjs/common";
+import { Body, Controller, Get, Headers, HttpCode, Post, Query, Res, StreamableFile } from "@nestjs/common";
 import {
+  attendanceSummaryQuerySchema,
   DEVICE_HEADER,
   IDEMPOTENCY_HEADER,
   dateRangeSchema,
@@ -7,12 +8,17 @@ import {
   historyQuerySchema,
   listEmployeesQuerySchema,
   syncRequestSchema,
+  EXPORT_CONTENT_TYPES,
+  EXPORT_FORMATS,
+  orgTimesheetFilename,
+  timesheetFilename,
   type AttendanceEventType,
   type ListEmployeesQuery,
   type SyncRequest,
 } from "@workfolio/shared";
-import type { z } from "zod";
-import { CurrentUser, RequirePermission } from "../auth/auth.guard.js";
+import type { Response } from "express";
+import { z } from "zod";
+import { CurrentUser, RequirePermission, TeamScoped } from "../auth/auth.guard.js";
 import type { AuthContext } from "../auth/auth.service.js";
 import { ZodPipe } from "../common/zod.pipe.js";
 import { DevicesService } from "../devices/devices.service.js";
@@ -21,7 +27,16 @@ import { AttendanceService } from "./attendance.service.js";
 import { TimesheetService } from "./timesheet.service.js";
 
 const timesheetQuerySchema = dateRangeSchema.and(employeeFilterSchema);
+/** `format` defaults to csv, so existing CSV callers are unchanged. */
+const exportQuerySchema = timesheetQuerySchema.and(z.object({ format: z.enum(EXPORT_FORMATS).default("csv") }));
 const timesheetsQuerySchema = dateRangeSchema.and(listEmployeesQuerySchema);
+const orgExportQuerySchema = dateRangeSchema.and(
+  z.object({
+    format: z.enum(EXPORT_FORMATS).default("csv"),
+    q: z.string().trim().max(100).optional(),
+    includeInactive: z.enum(["true", "false"]).default("false").transform((v) => v === "true"),
+  }),
+);
 
 /**
  * Writes act on the caller's own attendance only (no employee ID accepted). Reads default to the
@@ -96,17 +111,64 @@ export class AttendanceController {
     return this.timesheets.forEmployee(await this.employees.attendanceTarget(user, q.employeeId), q.from, q.to);
   }
 
-  /** Admin: per-employee totals for the range, searchable and paginated. */
+  /** Draft timesheet CSV for local dates [from, to] (≤ 92 days); same target rules as the timesheet. Not stored. */
+  @Get("export")
+  @RequirePermission("timesheet:read-own")
+  async export(
+    @CurrentUser() user: AuthContext,
+    @Query(new ZodPipe(exportQuerySchema)) q: z.infer<typeof exportQuerySchema>,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    const employee = await this.employees.attendanceTarget(user, q.employeeId);
+    const { body, rows } = await this.timesheets.export(employee, q.from, q.to, q.format);
+    res.setHeader("content-type", EXPORT_CONTENT_TYPES[q.format]);
+    res.setHeader("x-export-rows", String(rows)); // shift count, so the app need not parse the file
+    res.setHeader("content-disposition", `attachment; filename="${timesheetFilename(employee.employeeCode, q.from, q.to, q.format)}"`);
+    res.setHeader("cache-control", "no-store, private, max-age=0");
+    return q.format === "xlsx" ? new StreamableFile(body as Buffer) : body;
+  }
+
+  /** Admin: per-employee totals for the range, searchable and paginated. Team heads: their teams. */
   @Get("timesheets")
   @RequirePermission("attendance:read-all")
-  allTimesheets(@Query(new ZodPipe(timesheetsQuerySchema)) q: z.infer<typeof timesheetsQuerySchema>) {
-    return this.timesheets.summary(q);
+  @TeamScoped()
+  allTimesheets(@Query(new ZodPipe(timesheetsQuerySchema)) q: z.infer<typeof timesheetsQuerySchema>, @CurrentUser() user: AuthContext) {
+    return this.timesheets.summary(q, user);
+  }
+
+  /**
+   * Admin: one draft file for all employees (active only unless includeInactive=true; optional search),
+   * same columns and 92-day cap as the per-employee export. Not stored.
+   */
+  @Get("timesheets/export")
+  @RequirePermission("attendance:read-all")
+  @TeamScoped()
+  async exportAll(
+    @Query(new ZodPipe(orgExportQuerySchema)) q: z.infer<typeof orgExportQuerySchema>,
+    @Res({ passthrough: true }) res: Response,
+    @CurrentUser() user: AuthContext,
+  ) {
+    const { body, rows } = await this.timesheets.exportAll(q.from, q.to, q.format, { q: q.q || undefined, includeInactive: q.includeInactive, caller: user });
+    res.setHeader("content-type", EXPORT_CONTENT_TYPES[q.format]);
+    res.setHeader("x-export-rows", String(rows));
+    res.setHeader("content-disposition", `attachment; filename="${orgTimesheetFilename(q.from, q.to, q.format)}"`);
+    res.setHeader("cache-control", "no-store, private, max-age=0");
+    return q.format === "xlsx" ? new StreamableFile(body as Buffer) : body;
+  }
+
+  /** Admin: organisation-wide counts for one local date (default: each employee's today). Team heads: their teams. */
+  @Get("summary")
+  @RequirePermission("attendance:read-all")
+  @TeamScoped()
+  summary(@Query(new ZodPipe(attendanceSummaryQuerySchema)) q: z.infer<typeof attendanceSummaryQuerySchema>, @CurrentUser() user: AuthContext) {
+    return this.attendance.summary(q.date, Date.now(), user);
   }
 
   @Get("overview")
   @RequirePermission("attendance:read-all")
-  overview(@Query(new ZodPipe(listEmployeesQuerySchema)) q: ListEmployeesQuery) {
-    return this.attendance.overview(q);
+  @TeamScoped()
+  overview(@Query(new ZodPipe(listEmployeesQuerySchema)) q: ListEmployeesQuery, @CurrentUser() user: AuthContext) {
+    return this.attendance.overview(q, user);
   }
 
   private async act(user: AuthContext, installationId: string | undefined, key: string | undefined, type: AttendanceEventType) {

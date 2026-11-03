@@ -25,6 +25,10 @@ coverage/
 # Development screenshot storage (LOCAL_DEV adapter): screen contents, never commit.
 **/data/screenshots/
 *.webp
+# Timelapse videos made from screenshots (API-host cache): same content, never commit.
+**/data/timelapses/
+*.mp4
+*.mp4.part
 
 apps/desktop/src-tauri/target/
 apps/desktop/src-tauri/gen/

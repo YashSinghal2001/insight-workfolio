@@ -5,6 +5,7 @@ import type { Device, DeviceStatusResponse, RegisterDeviceInput } from "@workfol
 import type { AuthContext } from "../auth/auth.service.js";
 import { sha256 } from "../auth/crypto.js";
 import { DATABASE } from "../database/database.module.js";
+import { accountAudit } from "../audit/account-audit.js";
 
 const COLUMNS = "id, device_name, platform, registered_at, last_seen_at, revoked_at";
 
@@ -51,20 +52,38 @@ export class DevicesService {
       })
     ).rows[0];
     if (existing?.revoked_at) throw new ForbiddenException("This device was revoked by an administrator");
-    if (existing) return this.touch(employeeId, ident, now) as Promise<Device>;
+    if (existing) return this.touchActive(caller, employeeId, ident, now);
+    const id = randomUUID();
     try {
-      await this.db.execute({
-        sql: `INSERT INTO devices (id, employee_id, device_name, platform, device_identifier, last_seen_at)
-              VALUES (?, ?, ?, ?, ?, ?)`,
-        args: [randomUUID(), employeeId, input.deviceName, input.platform, ident, now],
-      });
+      // The device name is user-chosen free text (may hold a person's name): kept out of the audit.
+      await this.db.batch(
+        [
+          {
+            sql: `INSERT INTO devices (id, employee_id, device_name, platform, device_identifier, last_seen_at)
+                  VALUES (?, ?, ?, ?, ?, ?)`,
+            args: [id, employeeId, input.deviceName, input.platform, ident, now],
+          },
+          accountAudit({
+            actorUserId: caller.id,
+            targetUserId: caller.id,
+            action: "DEVICE_REGISTERED",
+            resourceType: "DEVICE",
+            resourceId: id,
+            metadata: { platform: input.platform },
+          }),
+        ],
+        "write",
+      );
     } catch (err) {
-      if (isUniqueViolation(err, "devices.employee_id")) {
+      if (isUniqueViolation(err, "devices.")) {
+        // A concurrent registration of this same installation won the race: still idempotent.
+        const mine = await this.touch(caller, employeeId, ident, now);
+        if (mine) return mine;
         throw new ConflictException("Another device is already registered. Ask an administrator to revoke it first.");
       }
       throw err;
     }
-    return (await this.touch(employeeId, ident, now))!;
+    return this.touchActive(caller, employeeId, ident, now);
   }
 
   async status(caller: AuthContext, installationId: string | undefined): Promise<DeviceStatusResponse> {
@@ -79,7 +98,7 @@ export class DevicesService {
     const otherActiveDevice = rows.some((r) => !r.mine && r.revoked_at === null);
     if (!mine) return { status: "NOT_REGISTERED", device: null, otherActiveDevice };
     if (mine.revoked_at !== null) return { status: "REVOKED", device: toDevice(mine), otherActiveDevice };
-    return { status: "ACTIVE", device: (await this.touch(employeeId, ident!, new Date().toISOString()))!, otherActiveDevice };
+    return { status: "ACTIVE", device: await this.touchActive(caller, employeeId, ident!, new Date().toISOString()), otherActiveDevice };
   }
 
   /**
@@ -88,28 +107,71 @@ export class DevicesService {
    */
   async require(caller: AuthContext, installationId: string | undefined): Promise<DeviceContext> {
     const employeeId = await this.employeeIdFor(caller);
-    const device = installationId ? await this.touch(employeeId, sha256(installationId), new Date().toISOString()) : null;
+    const device = installationId ? await this.touch(caller, employeeId, sha256(installationId), new Date().toISOString()) : null;
     if (!device) throw new ForbiddenException("This device is not registered or has been revoked");
     return { employeeId, deviceId: device.id };
   }
 
-  /** Admin revocation. Idempotent; the device's attendance history is kept. */
-  async revoke(id: string): Promise<Device> {
-    await this.db.execute({
-      sql: "UPDATE devices SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL",
-      args: [new Date().toISOString(), id],
+  /**
+   * Admin revocation. Idempotent (audited once); the device's attendance history is kept. The sessions
+   * bound to the device (see touch()) are revoked in the same transaction, so its refresh and access
+   * tokens stop working at once; the user's other devices and web sessions are unaffected.
+   */
+  async revoke(actor: AuthContext, id: string): Promise<Device> {
+    const { rows: found } = await this.db.execute({
+      sql: `SELECT p.user_id, (u.role = 'ADMIN' AND u.admin_title = 'SUPER_ADMIN') AS super_admin
+            FROM devices d JOIN employee_profiles p ON p.id = d.employee_id JOIN users u ON u.id = p.user_id WHERE d.id = ?`,
+      args: [id],
     });
+    if (!found[0]) throw new NotFoundException("Device not found");
+    // Same rule as account management (employees.service.ts): only a Super Admin manages a Super Admin's devices.
+    if (Number(found[0].super_admin) && actor.platformRole !== "SUPER_ADMIN") {
+      throw new ForbiddenException("Only a Super Admin can manage a Super Admin account");
+    }
+    const now = new Date().toISOString();
+    await this.db.batch(
+      [
+        { sql: "UPDATE devices SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL", args: [now, id] },
+        accountAudit(
+          { actorUserId: actor.id, targetUserId: String(found[0].user_id), action: "DEVICE_REVOKED", resourceType: "DEVICE", resourceId: id },
+          "changes() > 0",
+        ),
+        { sql: "UPDATE sessions SET revoked_at = ? WHERE device_id = ? AND revoked_at IS NULL", args: [now, id] },
+      ],
+      "write",
+    );
     const { rows } = await this.db.execute({ sql: `SELECT ${COLUMNS} FROM devices WHERE id = ?`, args: [id] });
-    if (!rows[0]) throw new NotFoundException("Device not found");
-    return toDevice(rows[0]);
+    return toDevice(rows[0]!);
   }
 
-  private async touch(employeeId: string, ident: string, now: string): Promise<Device | null> {
-    const { rows } = await this.db.execute({
-      sql: `UPDATE devices SET last_seen_at = ?
-            WHERE employee_id = ? AND device_identifier = ? AND revoked_at IS NULL RETURNING ${COLUMNS}`,
-      args: [now, employeeId, ident],
-    });
-    return rows[0] ? toDevice(rows[0]) : null;
+  /** touch() for a device just seen active: revoked in the meantime gives the same 403 as require(). */
+  private async touchActive(caller: AuthContext, employeeId: string, ident: string, now: string): Promise<Device> {
+    const device = await this.touch(caller, employeeId, ident, now);
+    if (!device) throw new ForbiddenException("This device is not registered or has been revoked");
+    return device;
+  }
+
+  /**
+   * Records last-seen on the caller's active device and binds the caller's session to it (first device
+   * wins; a no-op when already bound or the device is not active), so revoke() can end that session.
+   */
+  private async touch(caller: AuthContext, employeeId: string, ident: string, now: string): Promise<Device | null> {
+    const [touched] = await this.db.batch(
+      [
+        {
+          sql: `UPDATE devices SET last_seen_at = ?
+                WHERE employee_id = ? AND device_identifier = ? AND revoked_at IS NULL RETURNING ${COLUMNS}`,
+          args: [now, employeeId, ident],
+        },
+        {
+          sql: `UPDATE sessions SET device_id = (SELECT id FROM devices WHERE employee_id = ? AND device_identifier = ? AND revoked_at IS NULL)
+                WHERE id = ? AND user_id = ? AND device_id IS NULL`,
+          args: [employeeId, ident, caller.sessionId, caller.id],
+        },
+      ],
+      "write",
+    );
+    const row = touched?.rows[0];
+    return row ? toDevice(row) : null;
   }
 }

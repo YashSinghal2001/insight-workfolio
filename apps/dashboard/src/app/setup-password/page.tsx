@@ -12,9 +12,14 @@ export default function SetupPasswordPage() {
   const [state, setState] = useState<"idle" | "pending" | "done">("idle");
 
   useEffect(() => {
-    // The token travels in the URL fragment, which browsers never send to any server.
+    // The token travels in the URL fragment, which browsers never send to any server. Read it, then
+    // strip it from the address bar/history. Only act when a token is present: effects can run twice
+    // (React StrictMode in dev, remounts), and the second run sees the already-cleared fragment and
+    // must not overwrite the token with null.
+    const fromHash = new URLSearchParams(window.location.hash.slice(1)).get("token");
+    if (!fromHash) return;
     // eslint-disable-next-line react-hooks/set-state-in-effect -- reading browser-only state once
-    setToken(new URLSearchParams(window.location.hash.slice(1)).get("token"));
+    setToken(fromHash);
     history.replaceState(null, "", window.location.pathname);
   }, []);
 
@@ -42,11 +47,11 @@ export default function SetupPasswordPage() {
         <h1 className="mb-6 text-center text-2xl font-semibold">Set your password</h1>
         {state === "done" ? (
           <Notice tone="success">
-            Password set. Sign in to the Insight Workfolio desktop app
-            {" "}(administrators: <Link href="/login" className="underline">dashboard sign-in</Link>).
+            Password set. Use it to sign in to the Insight Workfolio desktop app, and to the{" "}
+            <Link href="/login" className="underline">web panel</Link> to see your own records (administrators also reach the admin dashboard there).
           </Notice>
         ) : (
-          <form onSubmit={onSubmit} className="flex flex-col gap-4 rounded-lg border border-border bg-surface p-6">
+          <form onSubmit={onSubmit} className="flex flex-col gap-4 rounded-xl border border-border bg-surface p-6 shadow-sm">
             {error && <Notice tone="error">{error}</Notice>}
             {token === null && <Notice tone="warning">Open the full setup link you were given; it contains a one-time code.</Notice>}
             <Field label="New password" hint={`${PASSWORD_MIN}–${PASSWORD_MAX} characters. A short sentence works well.`}>

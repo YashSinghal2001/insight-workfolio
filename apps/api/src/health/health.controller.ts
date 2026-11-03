@@ -1,18 +1,24 @@
 import { Controller, Get, HttpStatus, Inject, Logger, Res } from "@nestjs/common";
 import { pingDatabase, type DatabaseClient } from "@workfolio/database";
-import type { HealthResponse, ReadinessResponse } from "@workfolio/shared";
+import type { HealthResponse, ReadinessCheck, ReadinessResponse } from "@workfolio/shared";
 import type { Response } from "express";
 import { Public } from "../auth/auth.guard.js";
 import { DATABASE } from "../database/database.module.js";
+import { FILE_STORAGE, type FileStorage } from "../screenshots/storage.js";
 
 const READY_TIMEOUT_MS = 2000;
+/** Never written; a lookup proves the provider authenticates and answers (Graph: token + item GET; Drive: token + list). */
+const STORAGE_PROBE_KEY = "readiness-probe";
 
 @Public()
 @Controller({ version: "1" })
 export class HealthController {
   private readonly logger = new Logger(HealthController.name);
 
-  constructor(@Inject(DATABASE) private readonly db: DatabaseClient) {}
+  constructor(
+    @Inject(DATABASE) private readonly db: DatabaseClient,
+    @Inject(FILE_STORAGE) private readonly storage: FileStorage,
+  ) {}
 
   /** Liveness: the process is up and serving requests. Never touches dependencies. */
   @Get("health")
@@ -23,20 +29,34 @@ export class HealthController {
   /** Readiness: required dependencies are reachable. 503 when any check fails. */
   @Get("ready")
   async ready(@Res({ passthrough: true }) res: Response): Promise<ReadinessResponse> {
-    let database: ReadinessResponse["checks"][string];
+    const [database, storage] = await Promise.all([
+      this.check("database", () => pingDatabase(this.db)),
+      this.check("storage", async () => {
+        const started = Date.now();
+        await this.storage.stat(STORAGE_PROBE_KEY);
+        return Date.now() - started;
+      }),
+    ]);
+    const ready = database.status === "up" && storage.status === "up";
+    res.status(ready ? HttpStatus.OK : HttpStatus.SERVICE_UNAVAILABLE);
+    return {
+      status: ready ? "ready" : "not_ready",
+      checks: { database, storage: { ...storage, provider: this.storage.provider } },
+      timestamp: new Date().toISOString(),
+    };
+  }
+
+  private async check(name: string, probe: () => Promise<number>): Promise<ReadinessCheck> {
     try {
       const latencyMs = await Promise.race([
-        pingDatabase(this.db),
+        probe(),
         new Promise<never>((_, reject) => setTimeout(() => reject(new Error("timeout")), READY_TIMEOUT_MS).unref()),
       ]);
-      database = { status: "up", latencyMs };
+      return { status: "up", latencyMs };
     } catch (err) {
-      // Full error goes to the log only; the response stays generic.
-      this.logger.warn({ err }, "Readiness check failed: database");
-      database = { status: "down", error: "unreachable" };
+      // Full error goes to the log only; the response stays generic (no paths, tokens or provider bodies).
+      this.logger.warn({ err }, `Readiness check failed: ${name}`);
+      return { status: "down", error: "unreachable" };
     }
-    const ready = database.status === "up";
-    res.status(ready ? HttpStatus.OK : HttpStatus.SERVICE_UNAVAILABLE);
-    return { status: ready ? "ready" : "not_ready", checks: { database }, timestamp: new Date().toISOString() };
   }
 }

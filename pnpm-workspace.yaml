@@ -6,3 +6,13 @@ allowBuilds:
   esbuild: true
   sharp: false
   unrs-resolver: false
+
+# Security overrides for transitive deps (no direct-dependency fix available).
+# Remove once @nestjs/platform-express/express pull these versions themselves.
+# GHSA-27r3-jxmh-p828 (body-parser DoS), GHSA-q7qp-rjg7-q26m (multer DoS),
+# GHSA-6pq8-jhm2-2vcw (qs, via express), GHSA-mrhx-c7xc-m3w5 (zod, via eslint-plugin-react-hooks).
+overrides:
+  body-parser@>=2.0.0 <2.4.0: 2.4.0
+  multer@>=2.0.0 <2.5.0: 2.5.0
+  qs@>=6.7.0 <6.16.1: 6.17.1
+  zod@>=4.0.0 <4.6.6: 4.6.7

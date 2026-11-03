@@ -1,52 +1,44 @@
 "use client";
 
-import { Suspense } from "react";
-import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { ShellNav, type NavProps, type NavSection } from "@/components/app-shell";
 
-const NAV = [
-  { label: "Overview", href: "/" },
-  { label: "Employees", href: "/employees" },
-  { label: "Attendance", href: "/attendance" },
-  { label: "Activity", href: "/activity" },
-  { label: "Timesheets", href: "/timesheets" },
-  { label: "Corrections", href: "/corrections" },
-  { label: "Screenshots", href: "/screenshots" },
-  { label: "Settings", href: "/settings" },
+/** Admin navigation, grouped. Labels and hrefs are asserted by browser suites (`nav a` text). */
+export const ADMIN_NAV: readonly NavSection[] = [
+  { title: "Overview", items: [{ label: "Overview", href: "/" }] },
+  { title: "People", items: [{ label: "Employees", href: "/employees" }, { label: "Teams", href: "/teams" }, { label: "Roles", href: "/roles" }] },
+  {
+    title: "Time",
+    items: [
+      { label: "Attendance", href: "/attendance" },
+      { label: "Timesheets", href: "/timesheets" },
+      { label: "Corrections", href: "/corrections" },
+      { label: "Leave", href: "/leave" },
+      { label: "Holidays", href: "/holidays" },
+    ],
+  },
+  {
+    title: "Monitoring",
+    items: [
+      { label: "Activity", href: "/activity" },
+      { label: "Websites", href: "/websites" },
+      { label: "Screenshots", href: "/screenshots" },
+    ],
+  },
+  { title: "Work", items: [{ label: "Projects", href: "/projects" }] },
+  { title: "Reports", items: [{ label: "Reports", href: "/reports" }, { label: "Alerts", href: "/alerts" }] },
+  {
+    title: "Administration",
+    items: [
+      { label: "Audit", href: "/audit" },
+      { label: "Settings", href: "/settings" },
+      { label: "Work schedule", href: "/settings/schedule" },
+      { label: "App labels", href: "/settings/labels" },
+      { label: "My account", href: "/account" },
+    ],
+  },
 ];
 
-function NavLinks({ pathname }: { pathname: string | null }) {
-  return NAV.map(({ label, href }) => {
-    const active = href === "/" ? pathname === "/" : pathname?.startsWith(href);
-    return (
-      <Link
-        key={label}
-        href={href}
-        aria-current={active ? "page" : undefined}
-        className={`rounded-md px-3 py-2 text-sm whitespace-nowrap ${
-          active ? "bg-brand/10 font-medium text-brand" : "hover:bg-background"
-        }`}
-      >
-        {label}
-      </Link>
-    );
-  });
-}
-
-function ActiveNavLinks() {
-  return <NavLinks pathname={usePathname()} />;
-}
-
-export function Sidebar() {
-  return (
-    <aside className="border-b border-border bg-surface md:w-56 md:shrink-0 md:border-r md:border-b-0">
-      <div className="hidden px-5 py-4 text-sm font-semibold tracking-wide text-muted uppercase md:block">Admin</div>
-      <nav aria-label="Main" className="flex gap-1 overflow-x-auto px-3 py-2 md:flex-col md:py-0">
-        {/* usePathname suspends under dynamic routes (cacheComponents); fall back to unhighlighted links. */}
-        <Suspense fallback={<NavLinks pathname={null} />}>
-          <ActiveNavLinks />
-        </Suspense>
-      </nav>
-    </aside>
-  );
+/** The admin sidebar (`nav#admin-nav[aria-label="Main"]`). Without props it is the desktop sidebar only. */
+export function Sidebar(props: NavProps = {}) {
+  return <ShellNav id="admin-nav" label="Main" title="Admin" sections={ADMIN_NAV} root="/" {...props} />;
 }

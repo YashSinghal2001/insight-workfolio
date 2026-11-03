@@ -55,6 +55,8 @@ export class RateLimiter {
   constructor(
     private readonly limit: number,
     private readonly windowMs: number,
+    /** Hard cap on tracked keys so many distinct IPs/emails can't grow memory without bound. */
+    private readonly maxKeys = 10_000,
   ) {}
 
   /** Records an attempt; returns false once the key is over its limit. */
@@ -62,11 +64,25 @@ export class RateLimiter {
     const now = Date.now();
     let entry = this.hits.get(key);
     if (!entry || entry.resetAt <= now) {
-      if (this.hits.size >= 10_000) for (const [k, e] of this.hits) if (e.resetAt <= now) this.hits.delete(k);
+      this.hits.delete(key); // re-inserted below, so Map order stays oldest-window-first
+      if (this.hits.size >= this.maxKeys) {
+        for (const [k, e] of this.hits) if (e.resetAt <= now) this.hits.delete(k);
+        // Still full of live windows: evict the oldest. ponytail: that key's count restarts early.
+        for (const k of this.hits.keys()) {
+          if (this.hits.size < this.maxKeys) break;
+          this.hits.delete(k);
+        }
+      }
       entry = { count: 0, resetAt: now + this.windowMs };
       this.hits.set(key, entry);
     }
     return ++entry.count <= this.limit;
+  }
+
+  /** Whole seconds until the key's current window ends (for Retry-After); 0 when it has none. */
+  retryAfter(key: string): number {
+    const entry = this.hits.get(key);
+    return entry ? Math.max(1, Math.ceil((entry.resetAt - Date.now()) / 1000)) : 0;
   }
 
   reset(key: string): void {
