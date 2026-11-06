@@ -1,0 +1,12 @@
+# Runs workfolio-backup.service every night at 02:30 UTC (the VPS clock is UTC); a missed run (reboot) catches up.
+[Unit]
+Description=Nightly Insight Workfolio database backup
+
+[Timer]
+OnCalendar=*-*-* 02:30:00 UTC
+RandomizedDelaySec=10m
+Persistent=true
+Unit=workfolio-backup.service
+
+[Install]
+WantedBy=timers.target

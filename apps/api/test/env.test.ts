@@ -63,12 +63,32 @@ test("DATABASE_URL: production accepts libsql:// and https://, refuses wss:// (T
   assert.throws(() => validateEnv({ ...production, DATABASE_URL: "wss://workfolio-example.turso.io" }), /libsql:\/\/ or https:\/\//);
 });
 
-test("DATABASE_URL: production never falls back to local SQLite (unset or file: refused), libsql:// accepted", () => {
+test("DATABASE_URL: production never falls back to the development database (unset, relative file: or :memory: refused), libsql:// accepted", () => {
   assert.equal(validateEnv(production).DATABASE_URL, "libsql://workfolio-example.turso.io");
-  for (const url of [undefined, "file:./data/dev.db", "file:/tmp/x.db", ":memory:"]) {
-    assert.throws(() => validateEnv({ ...production, DATABASE_URL: url }), /DATABASE_URL must be set to Turso/, String(url));
+  for (const url of [undefined, "file:./data/dev.db", "file:data/dev.db", ":memory:"]) {
+    assert.throws(() => validateEnv({ ...production, DATABASE_URL: url }), /DATABASE_URL must be libsql:\/\/ or https:\/\/ \(Turso\) or file:\/absolute\/path/, String(url));
   }
   assert.throws(() => validateEnv({ ...production, DATABASE_URL: "" }), /DATABASE_URL/); // empty: rejected as too short
+});
+
+test("DATABASE_URL: production accepts a persistent local file by absolute path only (no query, no file://host form)", () => {
+  assert.equal(validateEnv({ ...production, DATABASE_URL: "file:/var/lib/workfolio/db/workfolio.db" }).DATABASE_URL, "file:/var/lib/workfolio/db/workfolio.db");
+  for (const url of ["file:/var/lib/workfolio/db/workfolio.db?mode=ro", "file:///var/lib/workfolio/db/workfolio.db", "file://host/x.db", "file:/x.db#frag"]) {
+    refused({ DATABASE_URL: url }, "DATABASE_URL");
+  }
+});
+
+test("TIMELAPSE_MIN_FREE_MB: 1024 by default; 0 disables; negative or huge refused", () => {
+  assert.equal(validateEnv(production).TIMELAPSE_MIN_FREE_MB, 1024);
+  assert.equal(validateEnv({ ...production, TIMELAPSE_MIN_FREE_MB: "0" }).TIMELAPSE_MIN_FREE_MB, 0);
+  for (const v of ["-1", "2000000", "lots"]) refused({ TIMELAPSE_MIN_FREE_MB: v }, "TIMELAPSE_MIN_FREE_MB");
+});
+
+test("HOST: loopback by default; an IP address or localhost; anything else refused", () => {
+  assert.equal(validateEnv({}).HOST, "127.0.0.1");
+  assert.equal(validateEnv(production).HOST, "127.0.0.1");
+  for (const ok of ["0.0.0.0", "::1", "localhost", "10.0.0.5"]) assert.equal(validateEnv({ HOST: ok }).HOST, ok);
+  for (const bad of ["api.example.com", "*", "127.0.0.1:4000", " "]) assert.throws(() => validateEnv({ HOST: bad }), /HOST/, bad);
 });
 
 test("TRUST_PROXY: default loopback; hop count, named ranges or address/CIDR lists; anything else refused", () => {
@@ -124,6 +144,11 @@ test("OneDrive (IT storage account): accepted in production when complete; parti
   bad({ ONEDRIVE_TOKEN_KEY: Buffer.alloc(16).toString("base64") }, "ONEDRIVE_TOKEN_KEY");
   bad({ ONEDRIVE_TOKEN_FILE: "data/onedrive.json" }, "ONEDRIVE_TOKEN_FILE");
   bad({ ONEDRIVE_REDIRECT_URI: "https://api.example.com/api/v1/storage/google-drive/oauth/callback" }, "ONEDRIVE_REDIRECT_URI");
+  // Off-site database backups: a dedicated subfolder, never the screenshot or timelapse folders; retention opt-in.
+  assert.deepEqual([env.ONEDRIVE_BACKUP_FOLDER, env.ONEDRIVE_BACKUP_KEEP_DAYS], ["db-backups", undefined]);
+  assert.equal(validateEnv({ ...od, ONEDRIVE_BACKUP_FOLDER: "Backups 2026", ONEDRIVE_BACKUP_KEEP_DAYS: "90" }).ONEDRIVE_BACKUP_KEEP_DAYS, 90);
+  for (const folder of ["screenshots", "Timelapses", "db/backups", ""]) bad({ ONEDRIVE_BACKUP_FOLDER: folder }, "ONEDRIVE_BACKUP_FOLDER");
+  bad({ ONEDRIVE_BACKUP_KEEP_DAYS: "0" }, "ONEDRIVE_BACKUP_KEEP_DAYS");
   bad({ ONEDRIVE_REDIRECT_URI: "http://api.example.com/api/v1/storage/onedrive/oauth/callback" }, "ONEDRIVE_REDIRECT_URI");
   bad({ ONEDRIVE_ACCOUNT_EMAIL: "not an email" }, "ONEDRIVE_ACCOUNT_EMAIL");
 });

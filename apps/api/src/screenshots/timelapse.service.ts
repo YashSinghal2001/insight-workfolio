@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { createReadStream, mkdtempSync } from "node:fs";
-import { chmod, mkdir, readdir, rm, stat } from "node:fs/promises";
+import { chmod, mkdir, readdir, rm, stat, statfs } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import type { Readable } from "node:stream";
@@ -72,6 +72,7 @@ export class TimelapseService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(TimelapseService.name);
   private readonly dir: string;
   private readonly ttlMs: number;
+  private readonly minFreeBytes: number;
   private encoderReason: string | null = "The video encoder has not been checked yet";
   private running: { id: string; abort: AbortController; finished: Promise<void> } | null = null;
   private pumping: Promise<void> | null = null;
@@ -88,6 +89,23 @@ export class TimelapseService implements OnModuleInit, OnModuleDestroy {
     const test = config.get("NODE_ENV", { infer: true }) === "test";
     this.dir = resolve(config.get("TIMELAPSE_DIR", { infer: true }) ?? (test ? mkdtempSync(join(tmpdir(), "wf-timelapses-")) : "./data/timelapses"));
     this.ttlMs = config.get("TIMELAPSE_TTL_HOURS", { infer: true }) * 3_600_000;
+    this.minFreeBytes = config.get("TIMELAPSE_MIN_FREE_MB", { infer: true }) * 1_048_576;
+  }
+
+  /**
+   * Disk guard: null when the scratch filesystem has at least TIMELAPSE_MIN_FREE_MB free (plus room for one
+   * video), otherwise why a video must not be started now. Protects the database, which shares the disk.
+   */
+  async diskReason(): Promise<string | null> {
+    if (!this.minFreeBytes) return null;
+    const st = await statfs(this.dir).catch(() => null);
+    if (!st) return null; // unknown filesystem: do not block on a probe failure
+    const free = Number(st.bavail) * Number(st.bsize);
+    const need = this.minFreeBytes + TIMELAPSE_LIMITS.maxOutputBytes;
+    if (free >= need) return null;
+    this.logger.warn({ freeBytes: free, requiredBytes: need, dir: this.dir }, "Timelapse refused: low disk space");
+    const mb = (n: number) => Math.floor(n / 1_048_576); // not >>: free space exceeds 32 bits
+    return `the server is low on disk space (${mb(free)} MB free, ${mb(need)} MB needed)`;
   }
 
   async onModuleInit() {
@@ -195,6 +213,8 @@ export class TimelapseService implements OnModuleInit, OnModuleDestroy {
     const session = sessions[0];
     if (!session || !(await inScope(this.db, caller, "screenshots:read", String(session.employee_id)))) throw new NotFoundException("Session not found");
     if (this.encoderReason) throw new ServiceUnavailableException(`Timelapse videos are not available on this server: ${this.encoderReason}`);
+    const disk = await this.diskReason();
+    if (disk) throw new ServiceUnavailableException(`Timelapse videos are not available right now: ${disk}`);
 
     const active = await this.activeFor(req.sessionId);
     if (active) return this.job(active);
@@ -383,6 +403,8 @@ export class TimelapseService implements OnModuleInit, OnModuleDestroy {
     let first: string | null = null;
     let last: string | null = null;
     try {
+      const disk = await this.diskReason();
+      if (disk) throw new JobFailure(`Not encoded: ${disk}. Create it again later.`);
       const frames = await this.frames(job);
       const progress = (lastAt: number) => this.db.execute({ sql: "UPDATE timelapses SET frames_done = ?, frames_skipped = ? WHERE id = ?", args: [done, skipped, id] }).then(() => lastAt);
       const storage = this.storage;

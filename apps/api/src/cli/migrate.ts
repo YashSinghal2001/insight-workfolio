@@ -9,13 +9,14 @@
  * - Prints the target host first (never the token or a local path).
  * - --dry-run lists applied and pending migrations and checks applied checksums (migrationStatus,
  *   SELECTs only); it never writes.
- * - A real run applies pending migrations (each atomically, safe to repeat), then checks that the
- *   connection enforces foreign keys and prints the schema version.
+ * - A real run switches a local file to WAL (persistent), applies pending migrations (each atomically,
+ *   safe to repeat), then checks that the connection enforces foreign keys and prints the schema version.
+ *   This is the only migration path for a production database (the API verifies only at boot).
  * Exit codes: 0 done, 1 failure (unknown/edited migration, failed statement, foreign keys off).
  */
 import { existsSync } from "node:fs";
 import { parseArgs } from "node:util";
-import { createDatabase, foreignKeysEnforced, MIGRATIONS, migrate, migrationStatus, schemaVersion } from "@workfolio/database";
+import { createDatabase, enableWal, foreignKeysEnforced, MIGRATIONS, migrate, migrationStatus, schemaVersion } from "@workfolio/database";
 import { validateEnv } from "../config/env.js";
 
 const out = (line: string) => process.stdout.write(`${line}\n`);
@@ -45,6 +46,8 @@ async function dryRun(url: string, authToken: string | undefined): Promise<numbe
 async function run(url: string, authToken: string | undefined): Promise<number> {
   const db = createDatabase({ url, authToken });
   try {
+    // A local file is switched to WAL here (persistent; the production API only verifies and never writes at boot).
+    if (url.startsWith("file:")) out(`Journal mode ${await enableWal(db)}`);
     const ran = await migrate(db);
     for (const id of ran) out(`APPLIED  ${id}`);
     if (!ran.length) out("No pending migrations.");

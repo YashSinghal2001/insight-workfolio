@@ -186,6 +186,25 @@ after(async () => {
 });
 
 describe("timelapse (fake encoder: job logic, not real video)", () => {
+  test("disk guard: videos are refused with 503 while the scratch filesystem is below TIMELAPSE_MIN_FREE_MB", async () => {
+    const e = await employee();
+    const guarded = service as unknown as { minFreeBytes: number; diskReason: () => Promise<string | null> };
+    const configured = guarded.minFreeBytes;
+    assert.equal(configured, 1024 * 1_048_576, "default 1024 MB");
+    assert.equal(await guarded.diskReason(), null, "a developer disk has more than 1 GB free");
+    try {
+      guarded.minFreeBytes = 2 ** 50; // no disk is that large: the guard trips
+      const r = await create({ sessionId: e.session });
+      assert.equal(r.status, 503);
+      assert.match(r.body.message, /low on disk space \(\d+ MB free, \d+ MB needed\)/);
+      assert.equal(Number((await db.execute("SELECT count(*) AS n FROM timelapses")).rows[0]!.n), 0, "nothing queued");
+      guarded.minFreeBytes = 0; // disabled
+      assert.equal(await guarded.diskReason(), null);
+    } finally {
+      guarded.minFreeBytes = configured;
+    }
+  });
+
   test("admins only; signed out 401; invalid and unknown ids; employee id cannot be supplied", async () => {
     const e = await employee();
     const q = `/timelapses?employeeId=${e.id}&from=${today()}&to=${today()}&tz=UTC`;

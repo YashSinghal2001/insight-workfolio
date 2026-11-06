@@ -1,0 +1,12 @@
+# Runs workfolio-monitor.service every 5 minutes, starting 2 minutes after boot.
+[Unit]
+Description=Insight Workfolio local health monitor (every 5 minutes)
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+AccuracySec=30s
+Unit=workfolio-monitor.service
+
+[Install]
+WantedBy=timers.target

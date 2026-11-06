@@ -1,0 +1,58 @@
+# Insight Workfolio dashboard (Next.js, `next start`). Installed at /etc/systemd/system/workfolio-dashboard.service.
+# Listens on 127.0.0.1:3000; only Caddy on this host reaches it. NEXT_PUBLIC_API_URL is baked in at build
+# time by deploy/scripts/deploy.sh (from /etc/workfolio/dashboard.env), not read here.
+[Unit]
+Description=Insight Workfolio dashboard
+Documentation=file:/opt/workfolio/current/deploy/README.md
+After=network-online.target workfolio-api.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=workfolio
+Group=workfolio
+WorkingDirectory=/opt/workfolio/current/apps/dashboard
+EnvironmentFile=/etc/workfolio/dashboard.env
+Environment=NODE_ENV=production
+ExecStart=/usr/bin/node node_modules/next/dist/bin/next start --hostname 127.0.0.1 --port 3000
+Restart=on-failure
+RestartSec=5s
+StartLimitIntervalSec=300
+StartLimitBurst=5
+TimeoutStopSec=20s
+KillSignal=SIGTERM
+LimitNOFILE=65536
+UMask=0077
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=workfolio-dashboard
+
+MemoryHigh=1024M
+MemoryMax=1536M
+
+# Hardening. ProtectSystem=full (not strict): `next start` writes its fetch/image cache under
+# apps/dashboard/.next/cache inside the release directory, which lives in /opt.
+NoNewPrivileges=yes
+ProtectSystem=full
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+[Install]
+WantedBy=multi-user.target

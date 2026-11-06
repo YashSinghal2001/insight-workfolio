@@ -33,6 +33,21 @@ export async function pingDatabase(db: Client): Promise<number> {
 
 export { MIGRATIONS, migrate, migrationStatus, schemaVersion, type MigrationStatus } from "./migrations.js";
 
+/**
+ * Local file databases only: switches the file to write-ahead logging, so the API's pooled readers are
+ * not blocked by a write (and vice versa). The mode is stored in the file, so it persists across
+ * connections and restarts; repeating the call is a no-op. Returns the resulting journal mode
+ * ("wal"; ":memory:" answers "memory"). Never call it on a hosted (libsql://, https://) database.
+ */
+export async function enableWal(db: Client): Promise<string> {
+  return String((await db.execute("PRAGMA journal_mode = WAL")).rows[0]?.journal_mode ?? "").toLowerCase();
+}
+
+/** The file's current journal mode (read-only). */
+export async function journalMode(db: Client): Promise<string> {
+  return String((await db.execute("PRAGMA journal_mode")).rows[0]?.journal_mode ?? "").toLowerCase();
+}
+
 /** Whether this connection enforces foreign keys (the schema relies on them). */
 export async function foreignKeysEnforced(db: Client): Promise<boolean> {
   return Number((await db.execute("SELECT foreign_keys FROM pragma_foreign_keys")).rows[0]?.foreign_keys) === 1;

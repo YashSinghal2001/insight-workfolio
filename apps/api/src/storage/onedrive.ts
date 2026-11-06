@@ -22,6 +22,8 @@ import { type GraphAuth, StorageError, teamFolder } from "../screenshots/storage
  *   ONEDRIVE_TOKEN_KEY (0600, never in a response, URL or log). Microsoft rotates it on every use; the
  *   new one is written back atomically, so the connection survives restarts.
  * - Files live under one app folder (ONEDRIVE_ROOT_FOLDER) in that OneDrive; nothing else is listed or read.
+ * - The same connection file is used by the off-site backup uploader (cli/backup-upload.ts, a separate short-lived
+ *   process). Both re-read the file before every refresh, so a token rotated by one is picked up by the other.
  */
 
 const LOGIN = "https://login.microsoftonline.com";
@@ -233,6 +235,9 @@ export class OneDriveService implements GraphAuth {
 
   private async refresh(): Promise<string> {
     const cfg = this.config();
+    // Re-read the file first: the backup uploader (cli/backup-upload.ts) shares this connection and writes
+    // the refresh token Microsoft rotated for it; whichever process refreshed last must be the one followed.
+    this.conn = undefined;
     const c = await this.connection();
     const gen = this.generation;
     const t = await tokenRequest(this.fetchFn, cfg.tenantId, {
@@ -380,6 +385,31 @@ export class OneDriveService implements GraphAuth {
     ).body as { id?: unknown } | null;
     if (typeof made?.id !== "string") throw new StorageError("Microsoft Graph create folder failed (invalid response)");
     return made.id;
+  }
+
+  /**
+   * A dedicated subfolder of the app folder (existing one reused, else created), for the off-site database
+   * backups: `<ONEDRIVE_ROOT_FOLDER>/<name>`, beside (never inside) screenshots/ and timelapses/.
+   */
+  async ensureSubfolder(name: string): Promise<{ driveId: string; folderId: string }> {
+    const c = await this.connection();
+    const token = await this.token(false);
+    const base = `${GRAPH}/drives/${encodeURIComponent(c.driveId)}/items/${encodeURIComponent(c.folderId)}`;
+    const found = await graphJson(this.fetchFn, token, "folder lookup", `${base}:/${encodeURIComponent(name)}?$select=id,folder`, {}, [404]);
+    const existing = found.body as { id?: unknown; folder?: unknown } | null;
+    if (found.status !== 404) {
+      if (typeof existing?.id !== "string" || !existing.folder) throw new StorageError(`"${name}" in the app folder is not a folder`);
+      return { driveId: c.driveId, folderId: existing.id };
+    }
+    const made = (
+      await graphJson(this.fetchFn, token, "create folder", `${base}/children`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name, folder: {}, "@microsoft.graph.conflictBehavior": "fail" }),
+      })
+    ).body as { id?: unknown } | null;
+    if (typeof made?.id !== "string") throw new StorageError("Microsoft Graph create folder failed (invalid response)");
+    return { driveId: c.driveId, folderId: made.id };
   }
 
   /** Forgets the connection: the encrypted token file is deleted and cached tokens dropped. */

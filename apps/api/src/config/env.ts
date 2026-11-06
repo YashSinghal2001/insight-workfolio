@@ -23,6 +23,13 @@ const redirectUriOk = (uri: string, production: boolean, path = GOOGLE_OAUTH_CAL
   }
 };
 
+/** `file:` + an absolute path, nothing else (no query such as ?mode=ro, no `file://host/` form). */
+const isProductionFileUrl = (url: string) => {
+  if (!url.startsWith("file:")) return false;
+  const path = url.slice("file:".length);
+  return isAbsolute(path) && !path.startsWith("//") && !/[?#]/.test(path);
+};
+
 const LOCAL_ORIGINS = "http://localhost:3000,http://localhost:1420,tauri://localhost,http://tauri.localhost";
 /** The desktop app's webview origins (macOS, Windows): local to each device, allowed in production. */
 const TAURI_ORIGINS = ["tauri://localhost", "http://tauri.localhost"];
@@ -39,6 +46,11 @@ export const envSchema = z
   .object({
     NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
     PORT: z.coerce.number().int().min(1).max(65535).default(4000),
+    /** Address the API listens on. Loopback by default: a reverse proxy on this host (Caddy) is the only public entry. */
+    HOST: z
+      .string()
+      .default("127.0.0.1")
+      .refine((v) => v === "localhost" || isIP(v) !== 0, "must be an IP address or localhost"),
     LOG_LEVEL: z.enum(["fatal", "error", "warn", "info", "debug", "trace", "silent"]).default("info"),
     /**
      * Which hops may set X-Forwarded-For, i.e. where req.ip (and so every per-IP rate limit) comes from.
@@ -162,6 +174,17 @@ export const envSchema = z
       .refine((v) => !v || z.email().safeParse(v).success, "must be an email address"),
     /** The app folder at the OneDrive root; every file lives under it. */
     ONEDRIVE_ROOT_FOLDER: z.string().regex(/^[\w -]{1,64}$/).default("InsightWorkfolio"),
+    /**
+     * Off-site database backups (deploy/scripts/backup-db.sh → cli/backup-upload.ts): a dedicated subfolder of
+     * ONEDRIVE_ROOT_FOLDER, never the screenshot or timelapse folders. Only gpg-encrypted files are uploaded.
+     */
+    ONEDRIVE_BACKUP_FOLDER: z
+      .string()
+      .regex(/^[\w -]{1,64}$/)
+      .default("db-backups")
+      .refine((v) => !/^(screenshots|timelapses)$/i.test(v), "must not be the screenshot or timelapse folder"),
+    /** Delete off-site backups older than this many days after each upload (recycle bin). Unset: never delete. */
+    ONEDRIVE_BACKUP_KEEP_DAYS: z.coerce.number().int().min(1).max(3650).optional(),
     // Screenshot timelapses (docs/timelapse.md). Encoded by an operator-installed FFmpeg with libx264;
     // without it the feature reports itself unavailable. Videos are a short-lived cache on this host.
     FFMPEG_PATH: z.string().min(1).default("ffmpeg"),
@@ -169,6 +192,8 @@ export const envSchema = z
     TIMELAPSE_DIR: z.string().optional().transform((v) => v || undefined),
     /** A finished video is deleted after this many hours (it can be made again from the screenshots). */
     TIMELAPSE_TTL_HOURS: z.coerce.number().int().min(1).max(168).default(24),
+    /** Videos are refused (not queued, not encoded) while the TIMELAPSE_DIR filesystem has less free space than this. 0 disables. */
+    TIMELAPSE_MIN_FREE_MB: z.coerce.number().int().min(0).max(1_000_000).default(1024),
     // Email reports (docs/email-reports.md). No real provider is integrated yet: "none" generates and
     // records reports without emailing them; "mock" keeps messages in memory (development and tests only).
     REPORT_MAIL_PROVIDER: z.enum(["none", "mock"]).default("none"),
@@ -187,9 +212,11 @@ export const envSchema = z
     /** Used only to print password-setup links (admin bootstrap CLI). */
     DASHBOARD_URL: z.url().default("http://localhost:3000"),
   })
-  // No wss://: Turso staging refuses the WebSocket transport (HRANA_WEBSOCKET_ERROR 400); libsql:// uses HTTPS on Node.
-  .refine((env) => env.NODE_ENV !== "production" || /^(libsql|https):\/\//.test(env.DATABASE_URL), {
-    message: "DATABASE_URL must be set to Turso over libsql:// or https:// in production (unset means local SQLite); wss:// and local SQLite are not allowed",
+  // Production: a hosted database (libsql:// or https://; no wss://, Turso refuses the WebSocket transport) or a
+  // persistent local file by ABSOLUTE path (the VPS: outside the repository, on a disk that survives deploys).
+  // The relative development default, :memory: and a file: URL with a query are refused.
+  .refine((env) => env.NODE_ENV !== "production" || /^(libsql|https):\/\//.test(env.DATABASE_URL) || isProductionFileUrl(env.DATABASE_URL), {
+    message: "DATABASE_URL must be libsql:// or https:// (Turso) or file:/absolute/path (persistent local SQLite) in production; a relative file:, :memory: and wss:// are not allowed",
     path: ["DATABASE_URL"],
   })
   // Every environment: a remote URL carries no credentials or query (libsql accepts ?authToken= and echoes

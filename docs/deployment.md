@@ -1,13 +1,38 @@
-# Deployment requirements (Day 9 audit)
+# Deployment
 
-**Status (2026-11-03): nothing is deployed, and no host or storage has been verified.** The Turso
-staging database exists and passed a read-only audit (at `0016`, 10 migrations pending; not yet used by any API).
-Planned hosting: **Render** (API), **Vercel** (dashboard), **Turso** (database). The configuration is
-in the repository (`render.yaml`, `.node-version`, `.github/workflows/deploy-staging.yml`) but has never
-been run against a real account, so this page describes the plan, not a matched deployment. It is not
-a claim that the app is production- or pilot-ready. Step-by-step staging plan: `STAGING-DEPLOYMENT-PLAN.md`.
+**Selected architecture (2026-11-05): one Hostinger VPS + a local persistent SQLite database + the company
+OneDrive.** Everything the product needs runs on the VPS (`srv2130302`, Ubuntu 26.04, 2 vCPU / 8 GB / 100 GB,
+audited read-only in `status/HOSTINGER-VPS-PHASE1-AUDIT.md`): the NestJS API and the Next.js dashboard as
+systemd services under an unprivileged user, both bound to loopback, behind Caddy with Let's Encrypt; the
+database is one SQLite file on the VPS disk in WAL mode; screenshots and timelapse videos go to the IT storage
+account's OneDrive through Microsoft Graph (delegated) and are never kept on the VPS; nightly database backups
+are encrypted and copied to a dedicated OneDrive folder. No Render, Vercel or Turso account is needed.
 
-## What runs where
+**Status: implemented in the repository and tested on a developer machine; nothing is installed on the VPS
+yet.** Code changes (Phase A), the deploy assets under `deploy/` (Phase B), backups/monitoring (Phase C) and
+these docs (Phase D) are done; the VPS install (Phase F) waits for approval, the domain and the Entra app
+registration (see "Before the VPS install" at the end). The earlier **Render + Vercel + Turso** plan is
+superseded; its configuration stays in the repository for reference, clearly marked, in the section "Previous
+plan" below.
+
+Reference for every file, path, port, script and runbook: [`deploy/README.md`](../deploy/README.md).
+Database procedures: docs/database-operations.md. Storage: docs/onedrive.md. Videos: docs/timelapse.md.
+
+## What runs where (Hostinger VPS)
+
+| Component | Runtime | Notes |
+| --- | --- | --- |
+| API (`apps/api`) | `workfolio-api.service`: `node dist/main.js` as user `workfolio`, **one process**, `127.0.0.1:4000`, systemd sandbox (`ProtectSystem=strict`, `NoNewPrivileges`, memory cap) | Node 24 (`.node-version`): password hashing uses `argon2` from `node:crypto`. Long-lived: in-process timers run retention, report and timelapse jobs. `NODE_ENV=production` ⇒ verify-only schema check at boot, never a migration |
+| Dashboard (`apps/dashboard`) | `workfolio-dashboard.service`: `next start --hostname 127.0.0.1 --port 3000` | `NEXT_PUBLIC_API_URL` (`https://api.<domain>`) is baked in at build time by `deploy.sh` from `/etc/workfolio/dashboard.env`; `next build` fails when it is unset or not `https://` |
+| Reverse proxy / TLS | Caddy (apt), `app.<domain>` → 3000, `api.<domain>` → 4000, Let's Encrypt, HTTP→HTTPS | The two hosts share one registrable domain (`SameSite=Strict` cookies). UFW allows 22, 80, 443 only. `TRUST_PROXY=loopback` |
+| Database | SQLite file `/var/lib/workfolio/db/workfolio.db` (libSQL driver, WAL, 0600, `workfolio`) | `DATABASE_URL=file:/var/lib/workfolio/db/workfolio.db`; no token. Migrations only through `deploy.sh --migrate` (backup first). Nightly encrypted backups, off-site in OneDrive |
+| Screenshot + timelapse storage | OneDrive of the IT storage account (`SCREENSHOT_STORAGE=onedrive`, delegated `Files.ReadWrite`, docs/onedrive.md) | Folder `InsightWorkfolio/` with `screenshots/…` and `timelapses/…`; backups in `InsightWorkfolio/db-backups/`. **Not connected yet** (needs the Entra app registration and the domain for the redirect URI) |
+| Timelapse encoder | Ubuntu's `ffmpeg` package (libx264 + `webp_pipe`), separate process, `TIMELAPSE_DIR=/var/lib/workfolio/tmp/timelapses` scratch only | Videos are uploaded to OneDrive and deleted locally; disk guard `TIMELAPSE_MIN_FREE_MB`; licensing note in `deploy/README.md` "FFmpeg" |
+| Backups | `workfolio-backup.timer` 02:30 UTC → `backup-db.sh` (sqlite3 online backup, integrity check, gzip, gpg) → `dist/cli/backup-upload.js` into OneDrive `db-backups/` | 30 days local; off-site retention opt-in; `verify-backup.sh` rehearsals |
+| Monitoring | `workfolio-monitor.timer` every 5 min → `monitor.sh` (health, readiness, units, disk, backup freshness and result, OneDrive failures in the log, scratch size) → webhook / command alerts on change; plus an external uptime monitor on `https://api.<domain>/api/v1/health` | journald only (1 GB / 30 days) |
+| Desktop app | Signed macOS app; signed Windows NSIS installer (Windows code complete, cross-built only; never run on Windows yet) | Built with `WORKFOLIO_API_URL=https://api.<domain>`; see "Desktop distribution" |
+
+## Previous plan: what would have run where (Render + Vercel + Turso, superseded)
 
 | Component | Runtime | Notes |
 | --- | --- | --- |
@@ -18,21 +43,20 @@ a claim that the app is production- or pilot-ready. Step-by-step staging plan: `
 | Timelapse encoder | **FFmpeg with libx264** on the API host (separate process, not bundled) | Optional: without it timelapse creation is refused with a clear reason. Videos are a short-lived cache in `TIMELAPSE_DIR` (persistent local disk, owner-only; 24 h). Sizing, licensing (GPL libx264, H.264 patents) and limits: docs/timelapse.md. **Not installed anywhere yet** |
 | Desktop app | Signed macOS app; signed Windows NSIS installer (Windows code complete, cross-built only; never run on Windows yet) | See "Desktop distribution" |
 
-Render and Vercel supervise the processes and terminate TLS. The API trusts `X-Forwarded-For`
-according to `TRUST_PROXY` (default `loopback`); behind Render's proxy set `TRUST_PROXY=1` (one hop),
-otherwise every client shares the proxy's address in the per-IP rate limits (not yet verified on Render).
+(Previous plan.) Render and Vercel would supervise the processes and terminate TLS; behind Render's proxy
+`TRUST_PROXY=1`. On the VPS Caddy is on the same host, so the default `TRUST_PROXY=loopback` is right.
 
-## Database startup safeguards (shared data layer, 2026-10-30)
+## Database startup safeguards (shared data layer, 2026-10-30; VPS rule 2026-11-05)
 
-What the API does with migrations at boot depends on `DATABASE_URL` (implemented in this change set;
-details in docs/database-operations.md "Migrations: local vs hosted"):
+What the API does with migrations at boot depends on `DATABASE_URL` and `NODE_ENV` (details in
+docs/database-operations.md "Migrations: local vs hosted vs production file"):
 
-- **Local** (`file:` or `:memory:`): applies pending migrations at boot, as before.
-- **Hosted** (`libsql://` or `https://`, i.e. Turso, which production requires): **never migrates at
-  boot.** It runs a read-only migration-status check and refuses to start when any migration is
-  pending. Migrations on a hosted database run only through
-  `pnpm --filter @workfolio/api db:migrate` (dry-run first), from the approval-gated deploy workflow or
-  a trusted machine with approval. **Deploy order: migrate → deploy.**
+- **Development** (`file:` or `:memory:`, `NODE_ENV` ≠ `production`): applies pending migrations at boot, as before.
+- **Production on the VPS** (absolute `file:`, `NODE_ENV=production`) and **hosted** (`libsql://` or
+  `https://`, Turso, previous plan): **never migrates at boot.** A read-only migration-status check; the API
+  refuses to start when any migration is pending, and warns if a local file is not in WAL mode (it never
+  changes the file). Migrations run only through `db:migrate`, on the VPS via `deploy.sh --migrate`
+  (backup first) or `deploy.sh --migrate-only`. **Deploy order: backup → migrate → deploy.**
 
 In both cases the API refuses to start (non-zero exit, clear log line naming the ids, no secrets) when:
 - a migration is pending (hosted only) or fails (local; each migration is one transaction with its
@@ -43,15 +67,16 @@ In both cases the API refuses to start (non-zero exit, clear log line naming the
   verified ON in the read-only audit of 2026-11-03.
 It logs the schema version it runs on. Two `db:migrate` runs (or two local processes) starting together
 do not fail: the second sees the migration already applied. Local `file:` databases get a 5 s busy timeout on every pooled
-connection. Rollback = redeploy the previous build only if it knows every applied migration (otherwise it
-refuses to start by design); data rollback = Turso point-in-time restore.
+connection. Rollback = redeploy the previous build (`deploy.sh --rollback`) only if it knows every applied
+migration (otherwise it refuses to start by design); data rollback = `restore-db.sh` from a nightly backup
+(previous plan: Turso point-in-time restore).
 
 ## Single instance only
 
-Run **exactly one API process** (API-13). On Render this is `numInstances: 1` with **no autoscaling**
-(`render.yaml` says so in a comment; never add a `scaling` block, and keep it at 1 in the dashboard).
-The persistent disk also limits the service to one instance. These are kept in memory and are not
-shared between processes:
+Run **exactly one API process** (API-13). On the VPS that is one `workfolio-api.service` (systemd never
+starts a second instance; `deploy.sh` restarts it in place, so there is never a moment with two). Previous
+plan: Render `numInstances: 1` with no autoscaling. These are kept in memory and are not shared between
+processes:
 
 - rate limiters (login attempts, screenshot uploads, per-session API limit), so limits would multiply per instance;
 - OAuth `state` of the Google Drive connect flow (testing POC), so a callback that lands on another
@@ -64,18 +89,20 @@ shared between processes:
   and two concurrent runners are handled: the second sees the migration already applied).
 
 Scaling out needs a shared store for locks, limits and OAuth state and a single scheduler. Not
-needed for the pilot size. Render deploys with a disk stop the old instance before starting the new
-one, so each deploy has a short downtime; there is never a moment with two instances.
+needed for the pilot size. A deploy restarts the API once (seconds; the desktop app retries).
 
 ## Production configuration (checked at boot)
 
 The API validates its environment at start and refuses to run in production with (2026-10-19
 tests in `apps/api/test/env.test.ts`):
 
-- local SQLite or `wss://` (`DATABASE_URL` must be `libsql://` or `https://`; Turso staging refuses the
-  WebSocket transport);
+- a `DATABASE_URL` that is not an absolute `file:` path (the VPS) or `libsql://`/`https://` (Turso);
+  relative `file:`, `:memory:` and `wss://` are refused;
 - missing or short `JWT_SECRET` (at least 32 characters);
-- `SCREENSHOT_STORAGE` other than `graph`, missing Graph IDs, or not exactly one Graph credential;
+- `SCREENSHOT_STORAGE` without its provider's full configuration (`onedrive`: all seven `ONEDRIVE_*` values,
+  an `https://` redirect URI ending in the callback path; `graph`: IDs plus exactly one credential);
+  `local` is never accepted in production;
+- `ONEDRIVE_BACKUP_FOLDER` equal to `screenshots` or `timelapses`;
 - **`CORS_ORIGINS` unset (the localhost default) or containing anything other than `https://`
   origins and the desktop app origins `tauri://localhost` / `http://tauri.localhost`;**
 - **`DASHBOARD_URL` that is not `https://`.**
@@ -85,37 +112,105 @@ Website tracking (F04) stays blocked in production unless `WEBSITE_TRACKING_APPR
 only after HR/Legal approved the website notice and the texts that still say websites are never
 recorded were revised (docs/website-usage.md).
 
-Errors name the variable, never its value. Cookies are `Secure` in production. Every API response
-carries `Cache-Control: no-store`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`
-and `X-Frame-Options: DENY`; HSTS on the API domain depends on Render (unverified). The dashboard
+Errors name the variable, never its value. `HOST` defaults to `127.0.0.1` (the API never listens on a
+public address). Cookies are `Secure` in production. Every API response carries `Cache-Control: no-store`,
+`X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer` and `X-Frame-Options: DENY`; HSTS on the
+API domain is Caddy's default behaviour for HTTPS sites (verify after the first certificate). The dashboard
 sends its own security headers including HSTS (`apps/dashboard/next.config.ts`).
 
-Secrets (`JWT_SECRET`, `DATABASE_AUTH_TOKEN`, `GRAPH_CLIENT_SECRET` or the certificate key file)
-live only in the platform's environment settings (Render env vars / Secret Files, GitHub environment
-secrets). Never in the repository (`.gitignore` excludes `.env*`, keys and certificates; `render.yaml`
-lists them with `sync: false` and no value) or on desktops.
+Secrets (`JWT_SECRET`, `ONEDRIVE_CLIENT_SECRET`, `ONEDRIVE_TOKEN_KEY`, the backup passphrase, the alert
+webhook URL) live only in `/etc/workfolio/*.env` (root:workfolio 0640) and `/var/lib/workfolio/secrets/`
+(0700) on the VPS. Never in the repository (`.gitignore` excludes `.env*`, keys and certificates; the
+`deploy/env/*.example` templates carry placeholders) or on desktops.
 
 ## Backup and restore
 
-- **Production data is in Turso.** Backups are Turso's point-in-time restore, whose window depends
-  on the plan. **Not verified:** the staging database `workfolio` exists (audited read-only
-  2026-11-03), but its plan and PITR window are not recorded (DB-13, the Turso CLI is not installed),
-  no restore was rehearsed (DB-14), no Turso dump has been taken yet, and no production database
-  exists (DB-17). Before the pilot: confirm the plan's restore window, and rehearse a restore into a
-  separate database.
-- **Before every migration-bearing deploy**, from a trusted machine: record the UTC time and run
-  `pnpm --filter @workfolio/api db:dump` (`apps/api/scripts/db-dump.mjs`, read-only, writes outside the
-  repo; docs/database-operations.md). Only then approve the deploy workflow's migration step.
+- **Production data is the SQLite file on the VPS.** `backup-db.sh` (nightly 02:30 UTC, and before every
+  migration by `deploy.sh --migrate`) takes a consistent online copy, checks its integrity, gzips and
+  gpg-encrypts it (AES-256, passphrase in `/var/lib/workfolio/secrets/backup-passphrase`, a copy in the
+  company password manager) into `/var/backups/workfolio/` (30 days), then uploads it into the OneDrive folder
+  `InsightWorkfolio/db-backups/` with the API's own connection. Unencrypted backups never leave the VPS: both
+  the script and the uploader refuse. Hostinger's weekly VPS snapshot is the third copy.
+- **Restore:** `restore-db.sh <file>` (stop API, move live file + WAL sidecars aside, install, WAL, integrity,
+  migration dry-run, start): the exact sequence is in `deploy/README.md` "Restore". **Rehearsal:**
+  `verify-backup.sh` monthly on the newest local file and quarterly on a copy fetched back from OneDrive
+  (`deploy/README.md` "Restore rehearsal"). Tested end to end on a developer machine (`selftest.sh`), not yet
+  on the VPS.
 - Retention purges are permanent in the database; restoring a backup would also restore purged
   rows (docs/security.md).
-- Screenshots live in SharePoint: covered by Microsoft 365 retention and the site recycle bin, not
-  by the database backup.
+- Screenshots and videos live in OneDrive: covered by Microsoft 365 retention and the OneDrive recycle bin,
+  not by the database backup. A database restored from before a deletion references files that are gone;
+  the API treats them as missing.
 - The local development database (`apps/api/data/dev.db`) is not backed up and is not production data.
+- Previous plan (reference): Turso point-in-time restore, `db:dump` before each migration (DB-13/14/15/17 in
+  the status reports).
 
-## Hosting: Render + Vercel + Turso (planned, NOT DEPLOYED)
+## Hosting: Hostinger VPS (selected 2026-11-05, NOT INSTALLED YET)
 
-No account exists yet (DEP-01, DEP-04 blocked). Nothing below has been run; every value is checked
-against the code only. The earlier Bluehost VPS option was dropped (no details were ever provided).
+Everything below is in `deploy/` and described file by file in [`deploy/README.md`](../deploy/README.md).
+This section is the walkthrough.
+
+### Topology and DNS
+
+```
+internet ──443──▶ Caddy (0.0.0.0:80/443, Let's Encrypt)
+                   ├─ app.<domain> ──▶ 127.0.0.1:3000  workfolio-dashboard.service (next start)
+                   └─ api.<domain> ──▶ 127.0.0.1:4000  workfolio-api.service (node dist/main.js)
+                                                          ├─ /var/lib/workfolio/db/workfolio.db (SQLite, WAL)
+                                                          ├─ ffmpeg (child process, scratch /var/lib/workfolio/tmp/timelapses)
+                                                          └─ Microsoft Graph ──▶ IT account's OneDrive
+                                                                                  InsightWorkfolio/screenshots, timelapses, db-backups
+workfolio-backup.timer (02:30 UTC) ──▶ backup-db.sh ──▶ /var/backups/workfolio/*.db.gz.gpg ──▶ OneDrive db-backups/
+workfolio-monitor.timer (5 min)    ──▶ monitor.sh   ──▶ webhook / command alerts
+```
+
+- DNS (owner-provided, **blocked**: no domain yet): `A app.<domain>` and `A api.<domain>` → `189.72.144.117`
+  (plus `AAAA` if the VPS gets IPv6). Both under one registrable domain. Caddy issues certificates on first
+  request once the records resolve; `ACME_EMAIL` in `/etc/caddy/workfolio.env`.
+- The OneDrive redirect URI `https://api.<domain>/api/v1/storage/onedrive/oauth/callback` needs the domain
+  first, so the Entra app registration (docs/onedrive.md) comes after DNS.
+
+### Install and first deploy (Phase F, with approval, after a Hostinger snapshot)
+
+1. As root: clone the repository to `/opt/workfolio/repo`, run `deploy/scripts/install-vps.sh` (packages:
+   ffmpeg, sqlite3, gnupg, Node 24, pnpm, Caddy, ufw, fail2ban; user `workfolio`; directories; units; journald
+   limits; sudoers rule; 2 GB swap; firewall 22/80/443). Idempotent, writes no secrets, starts no app.
+2. Fill `/etc/workfolio/api.env`, `dashboard.env`, `backup.env`, `monitor.env` and `/etc/caddy/workfolio.env`
+   from the templates (generate `JWT_SECRET`, `ONEDRIVE_TOKEN_KEY`, the backup passphrase on the VPS; never paste
+   them anywhere else). Re-run `install-vps.sh` so Caddy validates and loads the Caddyfile.
+3. As `workfolio`: `WORKFOLIO_REPO_URL=… deploy/scripts/deploy.sh <ref> --migrate` (clone → build → first
+   migration on the empty file, which sets WAL → activate → restart → health check). `/ready` is 503 until
+   OneDrive is connected; `/health` is 200.
+4. `node dist/cli/create-admin.js` for the first Super Admin (docs/setup.md "First admin").
+5. Dashboard › Settings › Microsoft OneDrive › Connect with the IT storage account (explicit approval; the
+   normal Chrome profile for Microsoft, per the browser rules). Then `backup-upload.js check`, start the timers,
+   `systemctl start workfolio-backup`, `verify-backup.sh` on the first `.gpg` file.
+6. Point the external uptime monitor at `https://api.<domain>/api/v1/health`; set the alert webhook in
+   `monitor.env`; `install-vps.sh --harden-ssh` once an admin key login works.
+
+### Updates and rollback
+
+`deploy.sh [ref]` builds into a new release directory and refuses to activate while migrations are pending;
+`deploy.sh <ref> --migrate` backs up and migrates first; `deploy.sh --rollback` switches `current` back to the
+previous release (schema stays; restore a backup for a data rollback). Three releases are kept.
+
+### What is monitored and how alerts reach people
+
+See `deploy/README.md` "Monitoring and alerts": the external `/health` poller is the outage alarm; the on-VPS
+`monitor.sh` reports readiness (database/OneDrive), unit state, disk, backup freshness and result, OneDrive
+upload failures from the API log and the timelapse scratch size, and alerts once per change of state through a
+webhook (Teams/Slack/ntfy) and/or any command.
+
+## Previous plan: Render + Vercel + Turso (SUPERSEDED 2026-11-05, never deployed)
+
+> Kept for reference only. The configuration files (`render.yaml`, `.github/workflows/deploy-staging.yml`)
+> carry a superseded note and must not be enabled. The Turso staging database `workfolio` is not used by the
+> VPS. Reasons for the change: one server is simpler to operate and cheaper for the pilot size, the data stays
+> on company-controlled infrastructure, no third hosted database, and FFmpeg can be installed (Render's Node
+> runtime had none).
+
+No account existed (DEP-01, DEP-04). Nothing below was ever run; every value was checked
+against the code only.
 
 ### Render: API (`render.yaml`)
 
@@ -182,7 +277,7 @@ with required reviewers, its secrets and the `STAGING_DATABASE_HOST` variable; t
 its deploy hook; the Vercel project and its deploy hook; the Turso CLI for the account owner; the
 recorded PITR window (DB-13) and rehearsal (DB-14).
 
-### Monitoring (planned, DEP-11 / DEP-12)
+### Monitoring (previous plan, DEP-11 / DEP-12; superseded by `monitor.sh` + an external `/health` poller)
 
 - **Uptime and alerting:** an external monitor polls **`/api/v1/ready`** (database + storage; 503 when
   either fails) every 1–5 min and alerts by email/chat. Render's own health check uses `/api/v1/health`.
@@ -362,14 +457,17 @@ with `signtool verify /pa /v <file>` and the file's Properties › Digital Signa
 
 **Status:** BLOCKED on a certificate or an Azure Trusted Signing account (not available).
 
-## Before anything is deployed (approval needed)
+## Before the VPS install (approval needed)
 
-1. Render and Vercel accounts and plans (one always-on Render instance with a disk), a domain, and a
-   Git remote with the `staging` environment and its secrets.
-2. Turso: staging database exists (at `0016`, 10 migrations pending, needs the approved first
-   migration); a separate production database and scoped per-environment tokens (DB-16, DB-17).
-3. Microsoft 365 tenant setup and a passing `verify:graph` (docs/onedrive.md).
-4. HR/Legal: notice wording (including whether the screenshot notice should mention timelapse videos), retention periods, screenshot viewers, app exclusions.
-5. Signing certificates.
-6. Approval to deploy.
-7. If timelapses are wanted: FFmpeg with libx264 on the API host, and acceptance of its licensing.
+1. **Domain and DNS** for `app.<domain>` / `api.<domain>` → the VPS IP (owner).
+2. **Entra app registration** for the OneDrive connection (tenant admin; redirect URI needs the domain;
+   docs/onedrive.md), and the IT storage account's sign-in at connect time (explicit approval, normal Chrome).
+3. **Approval of VPS Phase 1B/F**: Hostinger snapshot, `install-vps.sh`, env files, first `deploy.sh --migrate`
+   (creates the production database), first admin, first backup and OneDrive upload (explicit approvals for
+   the migration and the OneDrive connect).
+4. **Off-site retention decision**: leave `ONEDRIVE_BACKUP_KEEP_DAYS` unset (never delete) or set a period.
+5. **Alert destination** (Teams/Slack webhook or mail) and the external uptime monitor account.
+6. HR/Legal: notice wording (including whether the screenshot notice should mention timelapse videos),
+   retention periods, screenshot viewers, app exclusions; acceptance of FFmpeg/libx264 licensing for videos.
+7. Signing certificates for the desktop builds.
+8. A Git remote (the repository is local only; `deploy.sh` clones from `WORKFOLIO_REPO_URL`).

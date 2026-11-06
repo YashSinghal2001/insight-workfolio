@@ -11,10 +11,15 @@ Built for 10 employees initially, designed to scale to 50–100+.
 > (macOS, off by default):** when an admin turns them on and the employee has acknowledged the
 > separate screenshot notice and allowed screen recording, the app captures the main screen at a
 > fixed interval (WebP), queues it locally and uploads it through the API; the app always shows
-> the screenshot state. Admins browse screenshots in an audited gallery. Storage: Microsoft Graph
-> adapter (not yet verified against a tenant: no credentials; docs/onedrive.md) or a
-> development-only local adapter. No keystrokes, window titles, websites or
-> clipboard. Windows activity and screenshot capture are pending (docs/windows.md).
+> the screenshot state. Admins browse screenshots in an audited gallery. Storage: the company
+> OneDrive through Microsoft Graph (delegated, `SCREENSHOT_STORAGE=onedrive`, tested against a fake
+> tenant only; docs/onedrive.md) or a development-only local adapter. No keystrokes, window titles,
+> websites or clipboard. Windows activity and screenshot capture are pending (docs/windows.md).
+>
+> **Deployment (selected 2026-11-05, not yet installed):** one Hostinger VPS runs the API, the
+> dashboard and a persistent local SQLite database behind Caddy; screenshots and timelapse videos
+> live in OneDrive, encrypted database backups go to a dedicated OneDrive folder. Assets and runbooks:
+> `deploy/README.md`, docs/deployment.md. The earlier Render + Vercel + Turso plan is superseded.
 
 ## Quick start
 

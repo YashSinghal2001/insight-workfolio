@@ -1,0 +1,27 @@
+# Nightly database backup (deploy/scripts/backup-db.sh), started by workfolio-backup.timer.
+# Optional settings (encryption passphrase file, off-site upload command, retention) in /etc/workfolio/backup.env.
+[Unit]
+Description=Insight Workfolio database backup
+Documentation=file:/opt/workfolio/current/deploy/README.md
+After=workfolio-api.service
+
+[Service]
+Type=oneshot
+User=workfolio
+Group=workfolio
+EnvironmentFile=-/etc/workfolio/backup.env
+ExecStart=/opt/workfolio/current/deploy/scripts/backup-db.sh
+UMask=0077
+SyslogIdentifier=workfolio-backup
+Nice=10
+IOSchedulingClass=idle
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/backups/workfolio
+# The online backup API opens the live database read-only, but SQLite still needs to create the -shm/-wal sidecars.
+ReadWritePaths=/var/lib/workfolio/db
+# The off-site uploader (dist/cli/backup-upload.js) shares the API's OneDrive connection file and writes back
+# the refresh token Microsoft rotates on each use.
+ReadWritePaths=/var/lib/workfolio/secrets
+PrivateTmp=yes

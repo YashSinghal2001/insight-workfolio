@@ -4,7 +4,7 @@
 import "reflect-metadata";
 import assert from "node:assert/strict";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, describe, test } from "node:test";
@@ -39,6 +39,7 @@ const ms = {
   files: new Map<string, Uint8Array>(),
   sessions: new Map<string, Uint8Array>(),
   folderExists: false,
+  subfolders: new Set<string>(), // children of the app folder created by name (id `fld:<name>`)
   calls: [] as { url: string; auth: string | null; body: string }[],
   n: 0,
 };
@@ -49,7 +50,7 @@ globalThis.fetch = (async (input: string | URL | Request, init: RequestInit = {}
   if (url.startsWith("http://localhost") || url.startsWith("http://[::1]")) return realFetch(input, init);
   const method = init.method ?? "GET";
   const auth = new Headers(init.headers).get("authorization");
-  ms.calls.push({ url, auth, body: init.body instanceof URLSearchParams ? init.body.toString() : "" });
+  ms.calls.push({ url, auth, body: init.body instanceof URLSearchParams || typeof init.body === "string" ? init.body.toString() : "" });
   if (url === `https://login.microsoftonline.com/${TENANT}/oauth2/v2.0/token`) {
     const f = init.body as URLSearchParams;
     if (f.get("client_secret") !== SECRET) return json(401, { error: "invalid_client" });
@@ -90,21 +91,37 @@ globalThis.fetch = (async (input: string | URL | Request, init: RequestInit = {}
   if (path.startsWith("/me/drive/root:/InsightWorkfolio?")) return ms.folderExists ? json(200, { id: "fld-app", folder: {} }) : json(404, { error: { code: "itemNotFound" } });
   if (path === "/me/drive/root/children" && method === "POST") return (ms.folderExists = true), json(201, { id: "fld-app" });
   if (path.startsWith("/sites") || path.startsWith("/users")) return json(403, { error: { code: "accessDenied" } }); // Files.ReadWrite: no sites, no other users
-  const m = /^\/drives\/drv-it\/items\/fld-app:\/(.+?)(:\/content)?(\?.*)?$/.exec(path);
-  if (!m) return json(400, { error: { code: "invalidRequest" } });
-  const key = decodeURIComponent(m[1]!);
+  // Subfolders of the app folder (the off-site backup folder): create, look up by name, list children.
+  if (path === "/drives/drv-it/items/fld-app/children" && method === "POST") {
+    const { name } = JSON.parse(String(init.body)) as { name: string };
+    if (ms.subfolders.has(name)) return json(409, { error: { code: "nameAlreadyExists" } });
+    ms.subfolders.add(name);
+    return json(201, { id: `fld:${name}`, folder: {} });
+  }
+  const sub = /^\/drives\/drv-it\/items\/fld-app:\/([^/:?]+)\?/.exec(path);
+  if (sub && method === "GET" && ms.subfolders.has(decodeURIComponent(sub[1]!))) return json(200, { id: `fld:${decodeURIComponent(sub[1]!)}`, folder: {} });
+  const children = /^\/drives\/drv-it\/items\/([^/]+)\/children\?/.exec(path);
+  if (children && decodeURIComponent(children[1]!).startsWith("fld:")) {
+    const prefix = `${decodeURIComponent(children[1]!).slice(4)}/`;
+    const value = [...ms.files].filter(([k]) => k.startsWith(prefix) && !k.slice(prefix.length).includes("/")).map(([k, b]) => ({ id: `item:${k}`, name: k.slice(prefix.length), size: b.length }));
+    return json(200, { value });
+  }
+  const m = /^\/drives\/drv-it\/items\/([^/:]+):\/(.+?)(:\/content)?(\?.*)?$/.exec(path);
+  const folder = m && decodeURIComponent(m[1]!);
+  if (!m || !(folder === "fld-app" || (folder!.startsWith("fld:") && ms.subfolders.has(folder!.slice(4))))) return json(400, { error: { code: "invalidRequest" } });
+  const key = (folder === "fld-app" ? "" : `${folder!.slice(4)}/`) + decodeURIComponent(m[2]!);
   const item = (b: Uint8Array) => ({ id: `item:${key}`, size: b.length });
   if (method === "PUT") {
     ms.files.set(key, new Uint8Array(init.body as Uint8Array));
     return json(201, item(ms.files.get(key)!));
   }
-  if (method === "POST" && m[2] === undefined && key.endsWith(":/createUploadSession")) {
+  if (method === "POST" && m[3] === undefined && key.endsWith(":/createUploadSession")) {
     return json(200, { uploadUrl: `https://graph.microsoft.com/v1.0/__upload/${encodeURIComponent(key.slice(0, -":/createUploadSession".length))}` });
   }
   const file = ms.files.get(key);
   if (!file) return json(404, { error: { code: "itemNotFound" } });
   if (method === "DELETE") return ms.files.delete(key), new Response(null, { status: 204 });
-  if (m[2]) return new Response(file, { status: 200, headers: { "content-length": String(file.length) } });
+  if (m[3]) return new Response(file, { status: 200, headers: { "content-length": String(file.length) } });
   return json(200, item(file));
 }) as typeof fetch;
 
@@ -113,7 +130,8 @@ const { configureApp } = await import("../dist/app.setup.js");
 const { DATABASE } = await import("../dist/database/database.module.js");
 const { hashPassword } = await import("../dist/auth/crypto.js");
 const { readOneDriveConnection, scopesAcceptable } = await import("../dist/storage/onedrive.js");
-const { SCREENSHOT_STORAGE } = await import("../dist/screenshots/storage.js");
+const { SCREENSHOT_STORAGE, ONEDRIVE_AUTH } = await import("../dist/screenshots/storage.js");
+const { run: backupUpload } = await import("../dist/cli/backup-upload.js");
 const { TimelapseService } = await import("../dist/screenshots/timelapse.service.js");
 const { TIMELAPSE_ENCODER } = await import("../dist/screenshots/timelapse-encoder.js");
 const { DEFAULT_SCREENSHOT_NOTICE_VERSION } = await import("@workfolio/shared");
@@ -282,6 +300,67 @@ describe("OneDrive (IT storage account, delegated Files.ReadWrite) — MOCKED Mi
     assert.deepEqual([...(await storage.get("screenshots/unassigned/emp-2/2026-11/after-restart.webp"))], [9, 9]);
     await storage.delete("screenshots/unassigned/emp-2/2026-11/after-restart.webp");
     assert.equal((await api("/storage/onedrive/status", { cookie: admin })).body.connected, true);
+  });
+
+  test("off-site backups (cli/backup-upload): encrypted files only, dedicated folder, size check, shared token, opt-in retention", async () => {
+    const lines: string[] = [];
+    const upload = (args: string[], extra: Record<string, string> = {}) => backupUpload(args, { ...process.env, ...extra }, (l) => lines.push(l));
+    const gpg = (name: string, n = 5000) => {
+      const file = join(DIR, name);
+      writeFileSync(file, Buffer.concat([Buffer.from([0x8c]), randomBytes(n - 1)])); // OpenPGP symmetric-key packet first
+      return file;
+    };
+    const was = new Map(ms.files);
+    // refused: not a backup name, a plain gzip, a .gpg without an OpenPGP packet; nothing is created or uploaded
+    writeFileSync(join(DIR, "workfolio-20261105T023000Z.db.gz"), randomBytes(100));
+    writeFileSync(join(DIR, "workfolio-20261105T023000Z.db.gz.gpg"), Buffer.from("plain text"));
+    writeFileSync(join(DIR, "notes.gpg"), Buffer.from([0x8c, 1, 2]));
+    for (const f of ["workfolio-20261105T023000Z.db.gz", "workfolio-20261105T023000Z.db.gz.gpg", "notes.gpg", "missing.db.gz.gpg"]) assert.equal(await upload(["upload", join(DIR, f)]), 2, f);
+    assert.equal(await upload(["upload"]), 2);
+    assert.equal(await upload(["bogus"]), 2);
+    assert.deepEqual([...ms.files.keys()], [...was.keys()]);
+    assert.equal(ms.subfolders.size, 0, "a refused upload creates nothing");
+    assert.ok(lines.some((l) => l.includes("unencrypted backups never leave the VPS")));
+
+    // check: creates InsightWorkfolio/db-backups once, uploads nothing
+    assert.equal(await upload(["check"]), 0);
+    assert.deepEqual([...ms.subfolders], ["db-backups"]);
+    assert.ok(lines.at(-1)!.includes("it@tffdigital.com") && lines.at(-1)!.includes("InsightWorkfolio/db-backups"));
+
+    // upload: resumable session into the backup folder only; local bytes == remote bytes; the folder is reused
+    const a = gpg("workfolio-20261001T023000Z.db.gz.gpg", 12_000);
+    assert.equal(await upload(["upload", a]), 0, lines.join("\n"));
+    assert.deepEqual(Buffer.from(ms.files.get("db-backups/workfolio-20261001T023000Z.db.gz.gpg")!), readFileSync(a));
+    assert.equal(ms.subfolders.size, 1);
+    const b = gpg("workfolio-20261105T023000Z.db.gz.gpg.tmp"); // wrong name: refused, even if encrypted
+    assert.equal(await upload(["upload", b]), 2);
+    const c = gpg(`workfolio-${new Date().toISOString().replace(/[-:]/g, "").slice(0, 15)}Z.db.gz.gpg`);
+    assert.equal(await upload(["upload", c]), 0);
+    assert.equal(await upload(["list"]), 0);
+    assert.ok(lines.at(-1)!.startsWith("2 off-site backup(s)"));
+    const backupCalls = ms.calls.filter((x) => x.url.includes("/drives/drv-it/items/fld%3A"));
+    assert.ok(backupCalls.length && backupCalls.every((x) => x.url.includes("/items/fld%3Adb-backups")), "only the backup folder is addressed");
+    assert.ok(!ms.calls.some((x) => /fld-app:\/(screenshots|timelapses)/.test(x.url) && x.body.includes("db-backups")), "screenshot and timelapse folders untouched");
+    for (const line of lines) for (const leak of [SECRET, ms.refresh!, "at-", process.env.ONEDRIVE_TOKEN_KEY!]) assert.ok(!line.includes(leak), `output never shows ${leak}`);
+
+    // the CLI refreshed and rotated the shared token: the running API follows the file instead of its stale copy
+    const auth = app.get(ONEDRIVE_AUTH) as { token: (fresh: boolean) => Promise<string> };
+    const conn = await readOneDriveConnection(TOKEN_FILE, Buffer.from(process.env.ONEDRIVE_TOKEN_KEY!, "base64"));
+    assert.equal(conn.refreshToken, ms.refresh, "the CLI wrote the rotated token back");
+    ms.access.clear();
+    assert.ok(ms.access.has(await auth.token(true)), "the API refreshed with the token the CLI left behind");
+    await app.get(SCREENSHOT_STORAGE).stat("screenshots/unassigned/e/2026-11/nothing.webp");
+
+    // retention: only with ONEDRIVE_BACKUP_KEEP_DAYS, only backup-named items older than that, never the new one
+    const d = gpg(`workfolio-${new Date(Date.now() - 60_000).toISOString().replace(/[-:]/g, "").slice(0, 15)}Z.db.gz.gpg`);
+    assert.equal(await upload(["upload", d]), 0);
+    assert.ok(ms.files.has("db-backups/workfolio-20261001T023000Z.db.gz.gpg"), "nothing deleted without the setting");
+    assert.equal(await upload(["upload", gpg(`workfolio-${new Date(Date.now() - 120_000).toISOString().replace(/[-:]/g, "").slice(0, 15)}Z.db.gz.gpg`)], { ONEDRIVE_BACKUP_KEEP_DAYS: "30" }), 0);
+    assert.ok(!ms.files.has("db-backups/workfolio-20261001T023000Z.db.gz.gpg"), "the October backup is older than 30 days");
+    assert.equal([...ms.files.keys()].filter((k) => k.startsWith("db-backups/")).length, 3);
+    assert.ok(lines.some((l) => l.includes("removed off-site backup older than 30 days")));
+    // the backup folder can never be the screenshot or timelapse folder (env validation)
+    for (const bad of ["screenshots", "timelapses", "Timelapses"]) await assert.rejects(upload(["check"], { ONEDRIVE_BACKUP_FOLDER: bad }), /screenshot or timelapse folder/);
   });
 
   test("revoked authorization: clear 'reconnect' error, nothing marked stored; disconnect forgets the connection", async () => {

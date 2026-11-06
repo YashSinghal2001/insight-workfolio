@@ -1,3 +1,7 @@
+# SUPERSEDED (2026-11-05): the selected deployment is the Hostinger VPS (deploy/README.md, docs/deployment.md):
+# API + dashboard + a local SQLite file on one server, screenshots and timelapses in OneDrive. This blueprint
+# is the PREVIOUS plan (Render + Vercel + Turso), kept for reference only; do not sync it.
+#
 # Render Blueprint for the API (apps/api). NOT DEPLOYED and not validated by Render (needs an account):
 # check it in the Render dashboard (Blueprints › New) before the first sync. docs/deployment.md has the full plan.
 #

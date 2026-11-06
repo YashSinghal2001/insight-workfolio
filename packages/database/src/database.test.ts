@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { createDatabase, foreignKeysEnforced, guardViolation, isUniqueViolation, migrate, MIGRATIONS, pingDatabase, schemaVersion } from "../dist/index.js";
+import { createDatabase, enableWal, foreignKeysEnforced, guardViolation, isUniqueViolation, journalMode, migrate, MIGRATIONS, pingDatabase, schemaVersion } from "../dist/index.js";
 
 test("pings an in-memory database", async () => {
   const db = createDatabase({ url: ":memory:" });
@@ -742,4 +742,29 @@ test("a lower migration id added later (e.g. reserved 0018 after 0019) is applie
     MIGRATIONS.splice(at, 1);
   }
   db.close();
+});
+
+test("enableWal: a file database switches to WAL once and stays there across connections; :memory: is unaffected", async () => {
+  const { mkdtempSync, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const dir = mkdtempSync(join(tmpdir(), "wf-wal-"));
+  try {
+    const url = `file:${join(dir, "wal.db")}`;
+    let db = createDatabase({ url });
+    assert.equal(await journalMode(db), "delete", "libsql's default for a new file");
+    assert.equal(await enableWal(db), "wal");
+    await migrate(db);
+    db.close();
+    db = createDatabase({ url });
+    assert.equal(await journalMode(db), "wal", "persisted in the file");
+    assert.equal(await enableWal(db), "wal", "repeatable");
+    assert.ok(await foreignKeysEnforced(db), "foreign keys stay on");
+    db.close();
+    const mem = createDatabase({ url: ":memory:" });
+    assert.equal(await enableWal(mem), "memory");
+    mem.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

@@ -1,3 +1,6 @@
+# SUPERSEDED (2026-11-05): deployment goes to the Hostinger VPS with deploy/scripts/deploy.sh (deploy/README.md).
+# This workflow belongs to the PREVIOUS plan (Render + Vercel + Turso) and is kept for reference; it must not
+# be enabled against the VPS (the migration step targets a Turso URL, never the VPS file).
 # Staging deploy. NEVER RUN YET: no remote, no Render/Vercel accounts, no GitHub `staging` environment
 # or secrets exist (docs/deployment.md). The Turso staging database exists but has not been migrated by
 # this workflow.

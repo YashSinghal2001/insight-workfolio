@@ -1,0 +1,63 @@
+# Insight Workfolio API (NestJS). Installed at /etc/systemd/system/workfolio-api.service by deploy/scripts/install-vps.sh.
+# One process only (API-13): in-process locks, rate limits, OAuth state and schedulers are not shared.
+# Listens on 127.0.0.1:4000 (HOST/PORT in /etc/workfolio/api.env); only Caddy on this host reaches it.
+[Unit]
+Description=Insight Workfolio API
+Documentation=file:/opt/workfolio/current/deploy/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=workfolio
+Group=workfolio
+WorkingDirectory=/opt/workfolio/current/apps/api
+EnvironmentFile=/etc/workfolio/api.env
+Environment=NODE_ENV=production
+# The API verifies the schema at boot and refuses to start while a migration is pending (db:migrate first).
+ExecStart=/usr/bin/node dist/main.js
+Restart=on-failure
+RestartSec=5s
+# A boot refused by env validation or a pending migration must not restart-loop forever.
+StartLimitIntervalSec=300
+StartLimitBurst=5
+TimeoutStopSec=30s
+KillSignal=SIGTERM
+LimitNOFILE=65536
+UMask=0077
+
+# Logs: pino JSON lines on stdout -> journald (journalctl -u workfolio-api)
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=workfolio-api
+
+# Memory (measured idle ~170 MB; the encoder child is counted here too)
+MemoryHigh=1536M
+MemoryMax=2048M
+
+# Hardening: read-only system, writable only under /var/lib/workfolio (database, OneDrive token file,
+# timelapse scratch). FFmpeg runs as a child of this unit and inherits the sandbox.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/workfolio
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+[Install]
+WantedBy=multi-user.target

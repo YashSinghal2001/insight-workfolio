@@ -139,8 +139,14 @@ Errors:
 | `FFMPEG_PATH` | `ffmpeg` | Must have `libx264` and the `webp_pipe` demuxer. Checked at startup; if they are missing, the feature reports itself unavailable (dashboard warning, 503 on create), and the rest of the API is unaffected |
 | `TIMELAPSE_DIR` | `./data/timelapses` | Must be on persistent local disk, readable only by the API user. Gitignored. When unset under `NODE_ENV=test`, a new temporary folder is used, so tests never sweep a real one |
 | `TIMELAPSE_TTL_HOURS` | `24` | 1–168 |
+| `TIMELAPSE_MIN_FREE_MB` | `1024` (`2048` in the VPS template) | Disk guard: while the `TIMELAPSE_DIR` filesystem has less than this plus one maximum video (150 MB) free, creating a video answers 503 "low on disk space", automatic jobs fail with the same reason and a warning is logged (`monitor.sh` alerts on it). `0` disables. Protects the database, which shares the disk on the VPS |
 
-## Production prerequisites (not done; no host exists)
+## Production prerequisites (Hostinger VPS selected 2026-11-05; not installed yet)
+
+On the VPS: `install-vps.sh` installs Ubuntu's `ffmpeg` package (libx264 + `webp_pipe`, both checked),
+`FFMPEG_PATH=/usr/bin/ffmpeg`, `TIMELAPSE_DIR=/var/lib/workfolio/tmp/timelapses` (0700 scratch, emptied after
+each OneDrive upload, tmpfiles.d age 2 days), encoding under the API unit's memory limit. See `deploy/README.md`
+"FFmpeg" and "Logs, temporary files, disk". The general requirements:
 
 - **Install FFmpeg** with libx264 on the API host, for example from the distribution's packages.
   - Licensing: libx264 is GPL and H.264 is patent-encumbered. FFmpeg runs as a separate

@@ -1,0 +1,44 @@
+# Insight Workfolio reverse proxy. Installed at /etc/caddy/Caddyfile. WORKFOLIO_DOMAIN and ACME_EMAIL come
+# from /etc/caddy/workfolio.env through the systemd drop-in deploy/caddy/caddy-override.conf.
+#
+# Caddy terminates TLS (Let's Encrypt, automatic issue and renewal) and is the only public listener
+# (80 -> 443 redirect, 443). The apps listen on loopback only and are reached here by 127.0.0.1 address.
+# Caddy sets X-Forwarded-For / X-Forwarded-Proto on every proxied request; the API trusts them from
+# loopback only (TRUST_PROXY=loopback). Security headers (HSTS, nosniff, frame denial, no-store,
+# referrer policy) are set by the apps themselves, not duplicated here.
+{
+	email {$ACME_EMAIL}
+	# Admin API off: nothing on this host needs to reconfigure Caddy at runtime.
+	admin off
+}
+
+app.{$WORKFOLIO_DOMAIN} {
+	encode zstd gzip
+	reverse_proxy 127.0.0.1:3000
+	log {
+		output file /var/log/caddy/app.access.log {
+			roll_size 50MiB
+			roll_keep 5
+		}
+	}
+}
+
+api.{$WORKFOLIO_DOMAIN} {
+	# Screenshot uploads are raw WebP up to 10 MB; JSON bodies are capped at 1 MB by the API.
+	request_body {
+		max_size 12MB
+	}
+	# Timelapse downloads can take a while over slow links; the API bounds each stream itself.
+	reverse_proxy 127.0.0.1:4000 {
+		transport http {
+			response_header_timeout 60s
+		}
+		flush_interval -1
+	}
+	log {
+		output file /var/log/caddy/api.access.log {
+			roll_size 50MiB
+			roll_keep 5
+		}
+	}
+}

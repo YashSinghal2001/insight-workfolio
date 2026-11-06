@@ -37,7 +37,7 @@ automatically when the API starts (they are additive and idempotent).
 
 | API variable | Local default | Production |
 | --- | --- | --- |
-| `DATABASE_URL` | `file:./data/dev.db` | **Required**: `libsql://…` (Turso). `file:` is rejected at boot. |
+| `DATABASE_URL` | `file:./data/dev.db` | **Required**: `file:/absolute/path.db` (VPS, selected; docs/deployment.md) or `libsql://…` (Turso, previous plan). A relative `file:` is rejected at boot. |
 | `DATABASE_AUTH_TOKEN` | empty | **Required** for `libsql://` |
 | `JWT_SECRET` | ephemeral random key (warning logged) | **Required**, ≥ 32 chars, e.g. `node -e "console.log(require('crypto').randomBytes(48).toString('base64url'))"` |
 | `CORS_ORIGINS` | local dashboard + Tauri origins | Exact dashboard origin + `tauri://localhost,http://tauri.localhost` |
@@ -76,7 +76,7 @@ pnpm --filter @workfolio/api admin:create --email you@company.com
   for one who hasn't issues a fresh link (the old one stops working).
 - If a different admin already exists, it refuses unless you pass `--additional`.
 - `--super-admin` creates the Super Admin (CEO) identity instead of Admin; see [roles.md](roles.md).
-- In production, run it once from the server against Turso (same env as the API) and open
+- In production, run it once on the VPS as `workfolio` (`node --env-file=/etc/workfolio/api.env dist/cli/create-admin.js …` in `/opt/workfolio/current/apps/api`) and open
   the link yourself. Never paste the link into chat, email or tickets.
 
 ## Adding employees

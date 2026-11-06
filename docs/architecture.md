@@ -4,7 +4,7 @@
  ┌──────────────────────┐        HTTPS / JSON         ┌───────────────────────┐
  │  Desktop (Tauri 2)   │ ──────────────────────────▶ │                       │
  │  Rust core + TS UI   │                             │   API (NestJS)        │      libSQL       ┌──────────────┐
- │  local SQLite queue* │                             │   /api/v1/*           │ ────────────────▶ │ Turso        │
+ │  local SQLite queue* │                             │   /api/v1/*           │ ────────────────▶ │ SQLite file  │
  └──────────────────────┘                             │   auth*, RBAC*,       │                   │ (SQLite)     │
  ┌──────────────────────┐        HTTPS / JSON         │   validation, logs    │                   └──────────────┘
  │ Dashboard (Next.js)  │ ──────────────────────────▶ │                       │   Microsoft Graph ┌──────────────┐
@@ -36,8 +36,9 @@ Tauri capabilities grant only `core:default`.
 schemas. Pure TypeScript with no runtime secrets; `sideEffects: false` so clients tree-shake it.
 
 **`packages/database`** — `createDatabase()`, `pingDatabase()` and `migrate()` over `@libsql/client`.
-Uses a local `file:` SQLite DB in development and Turso (`libsql://` + auth token) in
-production. Imported only by the API.
+Uses a local `file:` SQLite DB in development and, in production, a persistent SQLite file on the
+Hostinger VPS (`file:/var/lib/workfolio/db/workfolio.db`, WAL mode; selected 2026-11-05) or Turso
+(`libsql://` + auth token; previous plan, still supported). Imported only by the API.
 
 ## Database schema
 

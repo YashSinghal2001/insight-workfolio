@@ -21,6 +21,13 @@ approval. Report: [status/ONEDRIVE-INTEGRATION-REPORT.md](status/ONEDRIVE-INTEGR
   `timelapses/<employee id>/<id>.mp4`. Folders are IDs, never names. Access is enforced by the API (admin,
   team-head scope, the employee), never by folder permissions; nothing is shared or linked.
 - **Same adapter:** `GraphStorage` in delegated mode (rows record `MICROSOFT_GRAPH`; no migration needed).
+- **Database backups (2026-11-05):** the nightly, gpg-encrypted database backup is uploaded into
+  `<ONEDRIVE_ROOT_FOLDER>/<ONEDRIVE_BACKUP_FOLDER>` (default `db-backups`, a sibling of `screenshots/` and
+  `timelapses/`, never inside them) by `apps/api/src/cli/backup-upload.ts`, a short-lived process started by
+  the VPS backup timer that reuses this connection (same token file, same scope). Both processes re-read the
+  token file before every refresh, so the rotated refresh token is followed by whichever process did not
+  rotate it. The uploader refuses unencrypted files and deletes nothing unless `ONEDRIVE_BACKUP_KEEP_DAYS` is
+  set (then older backups go to the recycle bin). Details: `deploy/README.md` "Backups".
 - **Dashboard:** Settings › Microsoft OneDrive: account, status, usage, team folders, last upload, last
   check, Connect/Reconnect, Disconnect. No token or secret is ever sent to the dashboard or desktops.
 - **Verify on the real account** (after connecting): `pnpm --filter @workfolio/api verify:onedrive <env-file>`

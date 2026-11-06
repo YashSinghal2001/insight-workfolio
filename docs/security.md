@@ -21,18 +21,24 @@ privilege are product requirements, not afterthoughts.
 
 | Scope | Where | May contain secrets? |
 | --- | --- | --- |
-| API | `apps/api/.env` (server only) | **Yes**: Turso token, Graph credentials, signing keys |
+| API | `apps/api/.env` (development) / `/etc/workfolio/api.env` on the VPS (root:workfolio 0640) | **Yes**: JWT secret, OneDrive client secret and token key, (previous plan: Turso token, Graph credentials) |
 | Dashboard | `NEXT_PUBLIC_*` in `.env.local` | **No**: embedded in the browser bundle |
 | Desktop | `VITE_*` in `.env` | **No**: embedded in the app binary |
 
 - `.env*` files are git-ignored except `.env.example`, which contains no real values.
 - Only the API has database or Microsoft Graph access. `@workfolio/database` is marked
   server-only and must never be imported by `apps/dashboard` or `apps/desktop`.
-- Production config is validated at boot: Turso (`libsql://`) required, never local SQLite;
-  remote DB requires a token; `JWT_SECRET` (≥ 32 chars) required. Validation errors print
-  variable names, never values.
-- Hosted secrets live only in platform settings: Render env vars / Secret Files (`render.yaml` lists
-  them with `sync: false`, no values), Vercel project env, GitHub `staging` environment secrets.
+- Production config is validated at boot: `DATABASE_URL` must be an absolute `file:` path (the VPS,
+  selected) or `libsql://`/`https://` (Turso, previous plan); a relative `file:`, `:memory:` and `wss://`
+  are refused; a remote DB requires a token; `JWT_SECRET` (≥ 32 chars) required; `HOST` defaults to
+  `127.0.0.1`. Validation errors print variable names, never values.
+- On the VPS, secrets live only in `/etc/workfolio/*.env` (root:workfolio 0640) and
+  `/var/lib/workfolio/secrets/` (0700: the encrypted OneDrive token file, the backup passphrase); the API
+  and the backup/monitor units run as the unprivileged `workfolio` user under systemd sandboxing, both
+  apps listen on loopback only and Caddy terminates TLS (`deploy/README.md`). Database backups are
+  gpg-encrypted before they leave the host; the OneDrive uploader refuses unencrypted files.
+- Previous plan (reference): hosted secrets in Render env vars / Secret Files, Vercel project env, GitHub
+  `staging` environment secrets.
 
 ### Microsoft app containment (SEC-11)
 

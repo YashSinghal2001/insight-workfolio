@@ -7,4 +7,6 @@ import type { Env } from "./config/env.js";
 
 const app = await NestFactory.create(AppModule, { bufferLogs: true });
 configureApp(app);
-await app.listen(app.get<ConfigService<Env, true>>(ConfigService).get("PORT"));
+const config = app.get<ConfigService<Env, true>>(ConfigService);
+// Loopback by default (HOST): only the reverse proxy on this host reaches the API directly.
+await app.listen(config.get("PORT"), config.get("HOST"));

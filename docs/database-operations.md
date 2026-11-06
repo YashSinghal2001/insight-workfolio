@@ -1,21 +1,47 @@
 # Database operations
 
-How the libSQL/Turso schema is migrated, dumped and restored. Code lives in
-`packages/database/src/migrations.ts`; operational scripts in `apps/api/scripts/`.
+How the SQLite/libSQL schema is migrated, backed up, verified and restored. Code lives in
+`packages/database/src/migrations.ts`; the production scripts in `deploy/scripts/` (reference:
+`deploy/README.md`), the developer/Turso scripts in `apps/api/scripts/`.
 
-## Migrations: local vs hosted (forward-only)
+**Selected architecture (2026-11-05): one persistent SQLite file on the Hostinger VPS**,
+`DATABASE_URL=file:/var/lib/workfolio/db/workfolio.db`, WAL mode, owned by the `workfolio` service user,
+backed up nightly with an encrypted copy in the company OneDrive. Turso (hosted libSQL) remains supported
+by the code and documented below as the **previous plan**, kept for reference; no production Turso database
+exists or is planned.
 
-Implemented in this change set. Which one applies is decided by `DATABASE_URL`:
+## Production on the VPS: local SQLite file (selected)
 
-| `DATABASE_URL` | At API boot | How migrations are applied |
+| Topic | How it works | Where |
 |---|---|---|
-| Local: `file:` or `:memory:` | Applies pending migrations (`migrate()`), as before | Automatically at boot, or `pnpm --filter @workfolio/api db:migrate` |
-| Hosted: `libsql://` or `https://` (Turso) | **Never migrates.** Runs a read-only `migrationStatus()` check. If any migration is pending, or the database lists an unknown id or an applied migration with an edited checksum, the API **refuses to start** with an error that names the ids (no secrets) and tells the operator to run `pnpm --filter @workfolio/api db:migrate` | Only the explicit `db:migrate` command, dry-run first: from a trusted machine with approval, or the approval-gated job in `.github/workflows/deploy-staging.yml` |
+| Location | `file:/var/lib/workfolio/db/workfolio.db` (absolute path, outside the releases, 0700 directory, 0600 file). Production refuses a relative `file:`, `:memory:` and `wss://` | `apps/api/src/config/env.ts` |
+| Journal mode | WAL, set **only** by `db:migrate` (every run) and `restore-db.sh`. The production API never changes it; it warns at boot if the file is not in WAL | `packages/database/src/index.ts` `enableWal`, `apps/api/src/cli/migrate.ts` |
+| Migrations at boot | `NODE_ENV=production` ⇒ **verify-only** (same as a hosted URL): read-only `migrationStatus()`, refuse to start on pending, unknown or edited ids, foreign keys must be enforced; the file's hash is unchanged by a boot. Development (`NODE_ENV` ≠ production, `file:`) still migrates at boot | `apps/api/src/database/prepare.ts`, `apps/api/test/database-startup.e2e.test.ts` |
+| Applying migrations | `deploy.sh <ref> --migrate` (backup → `db:migrate` with the new build → activate → restart) or `deploy.sh --migrate-only` after a restore. Direct form: `cd /opt/workfolio/current/apps/api && node --env-file=/etc/workfolio/api.env dist/cli/migrate.js [--dry-run]` as `workfolio` | `deploy/scripts/deploy.sh` |
+| Backups | `backup-db.sh` nightly (02:30 UTC): sqlite3 online backup API → `integrity_check` → gzip → gpg (AES-256) → `/var/backups/workfolio/workfolio-<ts>.db.gz.gpg` (0600, 30 days) → off-site upload. **Never `cp` the live file** (its newest pages may be in `-wal`) | `deploy/scripts/backup-db.sh`, `deploy/README.md` "Backups" |
+| Off-site copy | Encrypted file only, into the OneDrive folder `InsightWorkfolio/db-backups` through the API's own connection (`dist/cli/backup-upload.js`); the uploader refuses unencrypted files; off-site deletion only with `ONEDRIVE_BACKUP_KEEP_DAYS` | `apps/api/src/cli/backup-upload.ts` |
+| Integrity | every backup copy (`PRAGMA integrity_check` must be `ok`), every restore (before and after installing the file), every rehearsal (`verify-backup.sh`) | `deploy/scripts/lib.sh` `integrity_check` |
+| Restore | `restore-db.sh <file> [--yes]` as root: verify copy → stop API → move `.db` + `-wal` + `-shm` aside together → install 0600 → `journal_mode=WAL` → `integrity_check` → `db:migrate --dry-run` (PENDING ⇒ exit 3, API left stopped, run `deploy.sh --migrate-only`) → start → health check. Exact sequence in `deploy/README.md` "Restore" | `deploy/scripts/restore-db.sh` |
+| Rehearsal | `verify-backup.sh [file]` on a temporary copy: decrypt, unpack, integrity, row counts, migration dry-run; monthly on the newest local file, quarterly on a copy fetched back from OneDrive | `deploy/scripts/verify-backup.sh`, `deploy/README.md` "Restore rehearsal" |
+| Monitoring | `monitor.sh` every 5 min: backup younger than 30 h, last backup run succeeded, disk, readiness | `deploy/scripts/monitor.sh` |
+| Dump (SQL text) | `pnpm --filter @workfolio/api db:dump file:/var/lib/workfolio/db/workfolio.db --out <dir>` still works for an inspectable SQL dump; the nightly `.db.gz.gpg` is the restore format | `apps/api/scripts/db-dump.mjs` |
 
-Consequences for hosted environments: deploy order is **migrate → deploy**. A build that carries a new
-migration fails to boot until `db:migrate` has run against that database, so starting the API (locally
-or on Render) can no longer change a hosted schema by accident. Before this change set, any API boot
-pointed at Turso applied every pending migration.
+Rules that did not change: forward-only, additive migrations with checksums (below); a schema rollback is a
+data restore; one API process.
+
+## Migrations: local vs hosted vs production file (forward-only)
+
+Which path applies is decided by `DATABASE_URL` **and** `NODE_ENV`:
+
+| `DATABASE_URL` / `NODE_ENV` | At API boot | How migrations are applied |
+|---|---|---|
+| Local `file:` or `:memory:`, `NODE_ENV` ≠ `production` (development, tests) | Applies pending migrations (`migrate()`), WAL on for a file | Automatically at boot, or `pnpm --filter @workfolio/api db:migrate` |
+| Absolute `file:`, `NODE_ENV=production` (**the VPS**) | **Never migrates.** Read-only `migrationStatus()`; refuses to start on pending, unknown or edited ids; warns if not WAL | `deploy.sh --migrate` / `--migrate-only`, i.e. `db:migrate` after a backup |
+| Hosted: `libsql://` or `https://` (Turso, previous plan) | **Never migrates.** Same read-only check and refusal | Only the explicit `db:migrate` command, dry-run first |
+
+Consequences: deploy order is **backup → migrate → deploy**. A build that carries a new migration fails to
+boot until `db:migrate` has run against that database, so starting the API can never change the production
+schema by accident.
 
 Rules shared by both paths (`packages/database/src/migrations.ts`):
 
@@ -68,8 +94,11 @@ edited migration refused, a fresh file database applies 0001–0017 + 0019 and a
 
 ## Staging vs production separation
 
-- Staging is the Turso database `workfolio` (org `yashsinghal`, aws-ap-south-1). Production gets a
-  **separate Turso database** (DB-17, not created yet), never `workfolio` promoted in place.
+- Production is the SQLite file on the VPS (above). The Turso database `workfolio` (org `yashsinghal`,
+  aws-ap-south-1) is the **previous plan's staging database**; it is not used by the VPS deployment and
+  must not be migrated or written by it. A staging VPS, if ever wanted, is a second server with its own file.
+- Previous plan (kept for reference): production would have been a **separate Turso database** (DB-17), never
+  `workfolio` promoted in place.
 - Each database has its **own tokens**. A staging token must never be able to reach production, and
   the reverse.
 - Each environment has its own env file, Render service settings and GitHub environment secrets.
@@ -96,7 +125,10 @@ edited migration refused, a fresh file database applies 0001–0017 + 0019 and a
   repository working tree (git-ignored). Move it outside the repo and rotate it once the Render and
   GitHub secrets exist (audit S2–S4).
 
-## First staging migration runbook (Turso `workfolio`, 0016 → 0028)
+## Previous plan (Turso): first staging migration runbook (`workfolio`, 0016 → 0028)
+
+> Kept for reference only. The selected deployment migrates the VPS file through `deploy.sh --migrate`
+> (above); nothing below is part of the Hostinger rollout.
 
 Requires approval (D3; DB-09, DB-10, DB-07). Nothing here has been run yet. `<env>` is the staging env
 file **outside the repo** (mode 600). Do not start the API against staging before step 7.
@@ -130,8 +162,10 @@ or a trusted machine) → `verify:turso` → deploy.
 
 ## Dump before every migration-bearing deploy (DB-15)
 
-Run this before deploying any build that adds a migration. It is a consistent read-only snapshot taken
-in one read transaction, with schema and all rows, `schema_migrations` included.
+On the VPS this is automatic: `deploy.sh --migrate` runs `backup-db.sh` before `db:migrate` (binary,
+integrity-checked, encrypted). The SQL dump below remains the inspectable form and the Turso path of the
+previous plan. It is a consistent read-only snapshot taken in one read transaction, with schema and all rows,
+`schema_migrations` included.
 
 ```sh
 pnpm build:packages
@@ -182,7 +216,9 @@ This used a copy of `apps/api/data/dev.db` in a scratch directory. The original 
 This rehearses the **procedure**. It is not a Turso rehearsal: a dump of the Turso staging database
 has not been taken yet.
 
-## Turso point-in-time restore rehearsal (DB-14): steps for the account owner
+## Previous plan: Turso point-in-time restore rehearsal (DB-14)
+
+> Superseded by `deploy/README.md` "Restore rehearsal" for the VPS. Kept for reference.
 
 These steps need the Turso account and CLI, so the owner runs them. Restore into a **new** database
 and never overwrite `workfolio`. Turso's CLI flags change between versions, so check them first with
@@ -205,7 +241,11 @@ and never overwrite `workfolio`. Turso's CLI flags change between versions, so c
 
 Do not point any API instance at the restored database.
 
-## Plan and restore window (DB-13): to be filled in by the account owner
+## Previous plan: Turso plan and restore window (DB-13)
+
+> Superseded: on the VPS the restore window is the local retention (`BACKUP_KEEP_DAYS`, 30 nightly files) plus
+> the off-site OneDrive copies (`ONEDRIVE_BACKUP_KEEP_DAYS`, unset = kept until removed by hand) plus Hostinger's
+> weekly snapshot.
 
 | Field | Value |
 |---|---|

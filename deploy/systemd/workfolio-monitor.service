@@ -1,0 +1,24 @@
+# Local monitor (deploy/scripts/monitor.sh), started by workfolio-monitor.timer every 5 minutes. Checks the API,
+# dashboard, units, disk, backups, OneDrive failures in the API log and the timelapse scratch directory; alerts
+# through /etc/workfolio/monitor.env (webhook and/or command) on every change of state.
+[Unit]
+Description=Insight Workfolio local health monitor
+Documentation=file:/opt/workfolio/current/deploy/README.md
+After=workfolio-api.service workfolio-dashboard.service
+
+[Service]
+Type=oneshot
+User=workfolio
+Group=workfolio
+EnvironmentFile=-/etc/workfolio/monitor.env
+ExecStart=/opt/workfolio/current/deploy/scripts/monitor.sh
+# WARN (2) and FAIL (1) are reported in the output and by alerts; the unit itself must not be "failed" for them.
+SuccessExitStatus=1 2
+UMask=0077
+SyslogIdentifier=workfolio-monitor
+Nice=10
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/workfolio/monitor
+PrivateTmp=yes

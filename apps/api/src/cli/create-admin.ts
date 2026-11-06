@@ -18,7 +18,7 @@ import { emailSchema } from "@workfolio/shared";
 import { accountAudit } from "../audit/account-audit.js";
 import { setupLink } from "../auth/setup-token.js";
 import { validateEnv } from "../config/env.js";
-import { isHostedDatabaseUrl, prepareDatabase } from "../database/prepare.js";
+import { prepareDatabase, prepareOptionsFor } from "../database/prepare.js";
 import { setupTokenStatements } from "../auth/setup-token.js";
 
 const out = (line: string) => process.stdout.write(`${line}\n`);
@@ -34,9 +34,9 @@ if (!email.success) {
 
 const db = createDatabase({ url: env.DATABASE_URL, authToken: env.DATABASE_AUTH_TOKEN });
 try {
-  // Same rule as API startup: migrates a local file, but only verifies a hosted database (refuses if
-  // migrations are pending; apply them with db:migrate first).
-  await prepareDatabase(db, isHostedDatabaseUrl(env.DATABASE_URL));
+  // Same rule as API startup: migrates a local file outside production, but only verifies a hosted or
+  // production database (refuses if migrations are pending; apply them with db:migrate first).
+  await prepareDatabase(db, prepareOptionsFor(env.DATABASE_URL, env.NODE_ENV));
   const admins = (await db.execute("SELECT id, email, password_hash FROM users WHERE role = 'ADMIN'")).rows;
   const existing = admins.find((a) => a.email === email.data);
   let userId: string;

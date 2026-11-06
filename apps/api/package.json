@@ -9,6 +9,7 @@
     "start": "node dist/main.js",
     "admin:create": "node dist/cli/create-admin.js",
     "db:migrate": "node dist/cli/migrate.js",
+    "db:backup-upload": "node dist/cli/backup-upload.js",
     "verify:graph": "node scripts/verify-graph.mjs",
     "verify:onedrive": "node scripts/verify-onedrive.mjs",
     "verify:google-drive": "node scripts/verify-google-drive.mjs",
