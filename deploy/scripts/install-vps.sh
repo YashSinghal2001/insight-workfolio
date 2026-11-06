@@ -107,15 +107,28 @@ EOF
 chmod 440 /etc/sudoers.d/workfolio
 visudo -cf /etc/sudoers.d/workfolio
 
-log "Caddyfile (validated; Caddy reloaded only if WORKFOLIO_DOMAIN is set)"
-install -m 644 -o root -g caddy "$here/caddy/Caddyfile" /etc/caddy/Caddyfile
+log "Caddyfile (variant chosen from /etc/caddy/workfolio.env; validated; Caddy reloaded only when a site is configured)"
 install -d -m 755 -o caddy -g caddy /var/log/caddy
-if grep -qE '^WORKFOLIO_DOMAIN=(example\.com)?$' /etc/caddy/workfolio.env; then
-  echo "  WORKFOLIO_DOMAIN not set yet: Caddy left as is (no public site until the domain exists)"
+caddy_domain=$(sed -n 's/^WORKFOLIO_DOMAIN=//p' /etc/caddy/workfolio.env | tail -1)
+caddy_ip=$(sed -n 's/^WORKFOLIO_PUBLIC_IP=//p' /etc/caddy/workfolio.env | tail -1)
+if [ -n "$caddy_domain" ] && [ "$caddy_domain" != "example.com" ]; then
+  echo "  domain $caddy_domain: two-hostname Caddyfile (app./api.)"
+  install -m 644 -o root -g caddy "$here/caddy/Caddyfile" /etc/caddy/Caddyfile
+elif [ -n "$caddy_ip" ]; then
+  echo "  no domain, WORKFOLIO_PUBLIC_IP=$caddy_ip: single-origin Caddyfile.ip (Let's Encrypt short-lived IP certificate)"
+  caddy_major=$(caddy version | sed -n 's/^v\([0-9]*\)\..*/\1/p'); caddy_minor=$(caddy version | sed -n 's/^v[0-9]*\.\([0-9]*\).*/\1/p')
+  if [ "${caddy_major:-0}" -lt 2 ] || { [ "${caddy_major:-0}" = 2 ] && [ "${caddy_minor:-0}" -lt 10 ]; }; then
+    echo "Caddy $(caddy version) is older than 2.10: the ACME 'profile shortlived' option (IP certificates) needs 2.10+" >&2; exit 1
+  fi
+  install -m 644 -o root -g caddy "$here/caddy/Caddyfile.ip" /etc/caddy/Caddyfile
 else
+  echo "  neither WORKFOLIO_DOMAIN nor WORKFOLIO_PUBLIC_IP set: Caddy left as is (no public site)"
+fi
+if [ -n "$caddy_domain" ] && [ "$caddy_domain" != "example.com" ] || [ -n "$caddy_ip" ]; then
   (set -a; . /etc/caddy/workfolio.env; set +a; caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile)
   systemctl enable --now caddy
   systemctl reload caddy
+  echo "  watch issuance: journalctl -u caddy -f   (an IP certificate is reissued about every 2 days)"
 fi
 
 log "swap ${SWAP_GB}G (build headroom)"

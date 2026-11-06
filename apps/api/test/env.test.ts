@@ -78,6 +78,15 @@ test("DATABASE_URL: production accepts a persistent local file by absolute path 
   }
 });
 
+test("single-origin launch on a public IP: https IP-literal origins are accepted in production, plain http is not", () => {
+  const ip = { ...production, CORS_ORIGINS: "https://189.72.144.117,tauri://localhost,http://tauri.localhost", DASHBOARD_URL: "https://189.72.144.117" };
+  const env = validateEnv(ip);
+  assert.deepEqual(env.CORS_ORIGINS, ["https://189.72.144.117", "tauri://localhost", "http://tauri.localhost"]);
+  assert.equal(env.DASHBOARD_URL, "https://189.72.144.117");
+  refused({ CORS_ORIGINS: "http://189.72.144.117,tauri://localhost" }, "CORS_ORIGINS");
+  refused({ DASHBOARD_URL: "http://189.72.144.117" }, "DASHBOARD_URL");
+});
+
 test("TIMELAPSE_MIN_FREE_MB: 1024 by default; 0 disables; negative or huge refused", () => {
   assert.equal(validateEnv(production).TIMELAPSE_MIN_FREE_MB, 1024);
   assert.equal(validateEnv({ ...production, TIMELAPSE_MIN_FREE_MB: "0" }).TIMELAPSE_MIN_FREE_MB, 0);
@@ -144,6 +153,8 @@ test("OneDrive (IT storage account): accepted in production when complete; parti
   bad({ ONEDRIVE_TOKEN_KEY: Buffer.alloc(16).toString("base64") }, "ONEDRIVE_TOKEN_KEY");
   bad({ ONEDRIVE_TOKEN_FILE: "data/onedrive.json" }, "ONEDRIVE_TOKEN_FILE");
   bad({ ONEDRIVE_REDIRECT_URI: "https://api.example.com/api/v1/storage/google-drive/oauth/callback" }, "ONEDRIVE_REDIRECT_URI");
+  assert.equal(validateEnv({ ...od, ONEDRIVE_REDIRECT_URI: "https://189.72.144.117/api/v1/storage/onedrive/oauth/callback" }).ONEDRIVE_REDIRECT_URI, "https://189.72.144.117/api/v1/storage/onedrive/oauth/callback", "single-origin launch");
+  bad({ ONEDRIVE_REDIRECT_URI: "http://189.72.144.117/api/v1/storage/onedrive/oauth/callback" }, "ONEDRIVE_REDIRECT_URI");
   // Off-site database backups: a dedicated subfolder, never the screenshot or timelapse folders; retention opt-in.
   assert.deepEqual([env.ONEDRIVE_BACKUP_FOLDER, env.ONEDRIVE_BACKUP_KEEP_DAYS], ["db-backups", undefined]);
   assert.equal(validateEnv({ ...od, ONEDRIVE_BACKUP_FOLDER: "Backups 2026", ONEDRIVE_BACKUP_KEEP_DAYS: "90" }).ONEDRIVE_BACKUP_KEEP_DAYS, 90);

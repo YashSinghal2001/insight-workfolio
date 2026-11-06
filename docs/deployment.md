@@ -164,9 +164,13 @@ workfolio-backup.timer (02:30 UTC) ──▶ backup-db.sh ──▶ /var/backups
 workfolio-monitor.timer (5 min)    ──▶ monitor.sh   ──▶ webhook / command alerts
 ```
 
-- DNS (owner-provided, **blocked**: no domain yet): `A app.<domain>` and `A api.<domain>` → `189.72.144.117`
-  (plus `AAAA` if the VPS gets IPv6). Both under one registrable domain. Caddy issues certificates on first
-  request once the records resolve; `ACME_EMAIL` in `/etc/caddy/workfolio.env`.
+- **First launch without a domain (decided 2026-11-06):** the single origin `https://189.72.144.117` with
+  `deploy/caddy/Caddyfile.ip` (`/api/*` → API, rest → dashboard) and a Let's Encrypt short-lived IP certificate;
+  details and limitations in `deploy/README.md` "Temporary launch on the public IP". No DNS needed. OneDrive,
+  screenshots and timelapses stay disabled until OneDrive is configured.
+- Later, with a domain: `A app.<domain>` and `A api.<domain>` → `189.72.144.117` (plus `AAAA` if the VPS gets
+  IPv6), both under one registrable domain; `install-vps.sh` switches to the two-hostname Caddyfile. Caddy issues
+  certificates on first request once the records resolve; `ACME_EMAIL` in `/etc/caddy/workfolio.env`.
 - The OneDrive redirect URI `https://api.<domain>/api/v1/storage/onedrive/oauth/callback` needs the domain
   first, so the Entra app registration (docs/onedrive.md) comes after DNS.
 

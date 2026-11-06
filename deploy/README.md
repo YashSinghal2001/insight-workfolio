@@ -14,9 +14,10 @@ are templates. Status: written and tested on a developer machine; **nothing has 
 | `systemd/workfolio-monitor.service` + `.timer` | `/etc/systemd/system/` | local monitor every 5 min: health, backups, OneDrive failures, disk, alerts |
 | `tmpfiles/workfolio.conf` | `/etc/tmpfiles.d/` | directory layout, ownership, modes; 2-day age on the timelapse scratch dir |
 | `journald/workfolio.conf` | `/etc/systemd/journald.conf.d/` | journal capped at 1 GB / 30 days |
-| `caddy/Caddyfile` | `/etc/caddy/Caddyfile` | `app.<domain>` → `127.0.0.1:3000`, `api.<domain>` → `127.0.0.1:4000`, Let's Encrypt |
+| `caddy/Caddyfile` | `/etc/caddy/Caddyfile` (when `WORKFOLIO_DOMAIN` is set) | `app.<domain>` → `127.0.0.1:3000`, `api.<domain>` → `127.0.0.1:4000`, Let's Encrypt |
+| `caddy/Caddyfile.ip` | `/etc/caddy/Caddyfile` (when only `WORKFOLIO_PUBLIC_IP` is set) | **temporary launch without a domain:** one origin `https://<ip>`, `/api/*` → `127.0.0.1:4000`, rest → `127.0.0.1:3000`, Let's Encrypt short-lived IP certificate |
 | `caddy/caddy-override.conf` | `/etc/systemd/system/caddy.service.d/override.conf` | lets Caddy read `WORKFOLIO_DOMAIN` / `ACME_EMAIL` |
-| `caddy/workfolio.env.example` | `/etc/caddy/workfolio.env` | domain and ACME e-mail (not secret) |
+| `caddy/workfolio.env.example` | `/etc/caddy/workfolio.env` | domain **or** public IP, and ACME e-mail (not secret); decides which Caddyfile the installer uses |
 | `env/api.env.example` | `/etc/workfolio/api.env` (root:workfolio 0640) | every API variable; secrets go here only |
 | `env/dashboard.env.example` | `/etc/workfolio/dashboard.env` | `NEXT_PUBLIC_API_URL` (build-time) |
 | `env/backup.env.example` | `/etc/workfolio/backup.env` | retention, encryption passphrase file, off-site upload command |
@@ -59,11 +60,34 @@ journald                                    API and dashboard logs: journalctl -
 Screenshots and timelapse videos are **never** stored under any of these paths: the API uploads them to the
 IT account's OneDrive and keeps only the encoder's temporary `.part` file while a video is being made.
 
+## Temporary launch on the public IP (single origin, no domain)
+
+Selected for the first production launch (2026-11-06): no domain yet, so the whole site is `https://189.72.144.117`.
+`install-vps.sh` installs `caddy/Caddyfile.ip` when `/etc/caddy/workfolio.env` has `WORKFOLIO_PUBLIC_IP` and no
+real `WORKFOLIO_DOMAIN`. What differs from the two-hostname layout, and what does not:
+
+| Topic | Single origin on the IP |
+| --- | --- |
+| Routing | Caddy matches `/api/*` → API (`127.0.0.1:4000`), everything else → dashboard (`127.0.0.1:3000`). The dashboard has no route handlers under `/api`; the API's routes all live under `/api/v1`; auth cookies are already `Path=/api` |
+| Certificate | Let's Encrypt issues certificates for public IP addresses only with the ACME **`shortlived`** profile: ~6 days validity, renewed by Caddy automatically (about every 2 days, ARI-driven). Needs Caddy ≥ 2.10 (`install-vps.sh` checks) and ports 80/443 open. If issuance fails the site stays down and `journalctl -u caddy` says why; there is deliberately no self-signed fallback |
+| Cookies / CORS | One origin: cookies are first-party, `Secure` + `HttpOnly` + `SameSite=Strict` unchanged, CORS never exercised (`CORS_ORIGINS` still lists the origin plus the desktop origins) |
+| Binding / ports | unchanged: both apps on loopback, UFW 22/80/443 only |
+| Values | `WORKFOLIO_PUBLIC_IP=189.72.144.117` + `ACME_EMAIL` (`/etc/caddy/workfolio.env`); `NEXT_PUBLIC_API_URL=https://189.72.144.117` (`dashboard.env`, build-time); `CORS_ORIGINS=https://189.72.144.117,tauri://localhost,http://tauri.localhost`, `DASHBOARD_URL=https://189.72.144.117`, `ONEDRIVE_REDIRECT_URI=https://189.72.144.117/api/v1/storage/onedrive/oauth/callback` (`api.env`); desktop release builds `WORKFOLIO_API_URL=https://189.72.144.117` |
+| Health checks | unchanged (loopback); external monitor on `https://189.72.144.117/api/v1/health` |
+| Disabled for now | OneDrive (placeholder `ONEDRIVE_*`, not connected; whether Entra accepts an IP-literal redirect URI is unverified), screenshots (policy off), timelapses (need stored screenshots). `/ready` answers 503 by design until OneDrive is connected |
+| Limitations | a VPS IP change means a new certificate, a dashboard rebuild, a desktop rebuild and an Entra change; a Let's Encrypt or port-80 outage longer than ~4 days takes the site down (90-day certificates ride that out); no HSTS preload |
+| Moving to a domain later | set `WORKFOLIO_DOMAIN`, clear `WORKFOLIO_PUBLIC_IP`, re-run `install-vps.sh` (switches to `Caddyfile`), update the five URL values, redeploy the dashboard, re-package the desktop app, update the Entra redirect URI; sessions end, database/OneDrive/backups unaffected |
+
+Verified on a developer machine with Caddy 2.11.9: both Caddyfiles pass `caddy validate`; the adapted JSON of
+`Caddyfile.ip` shows the TLS policy `subjects ["189.72.144.117"], issuer acme, profile "shortlived"`, listener
+`:443`, the `/api/*` subroute with the 12 MB body cap to `127.0.0.1:4000` and the catch-all with compression to
+`127.0.0.1:3000`. Real issuance for an IP address can only be observed on the VPS.
+
 ## Network binding (what listens where)
 
 | Listener | Address | Set by | Reached by |
 | --- | --- | --- | --- |
-| Caddy | `0.0.0.0:80`, `0.0.0.0:443` (+ IPv6) | Caddy defaults | the internet (UFW allows 22, 80, 443 only) |
+| Caddy | `0.0.0.0:80`, `0.0.0.0:443` (+ IPv6) | Caddy defaults | the internet (UFW allows 22, 80, 443 only); serves `app./api.<domain>` or, without a domain, the single origin `https://<ip>` |
 | API | `127.0.0.1:4000` | `HOST`/`PORT` in `api.env` (`HOST` defaults to `127.0.0.1` in code too) | Caddy (`reverse_proxy 127.0.0.1:4000`), `healthcheck.sh`, `deploy.sh` |
 | Dashboard | `127.0.0.1:3000` | `--hostname 127.0.0.1 --port 3000` in the unit (Next's own default would be `0.0.0.0`) | Caddy (`reverse_proxy 127.0.0.1:3000`), `healthcheck.sh` |
 | SSH | `0.0.0.0:22` | sshd | admins |
