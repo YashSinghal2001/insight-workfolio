@@ -49,7 +49,10 @@ if [ "$check_dashboard" = 1 ]; then
 fi
 
 if [ "$SYSTEMCTL" != ":" ] && command -v "$SYSTEMCTL" >/dev/null 2>&1; then
-  for unit in "$API_SERVICE" "$DASHBOARD_SERVICE"; do
+  units="$API_SERVICE"
+  # --no-dashboard also skips the dashboard unit: deploy.sh checks the API first, before the dashboard is (re)started.
+  if [ "$check_dashboard" = 1 ]; then units="$units $DASHBOARD_SERVICE"; fi
+  for unit in $units; do
     state=$("$SYSTEMCTL" is-active "$unit" 2>/dev/null || true)
     [ "$state" = active ] && log "$unit: active" || fail "$unit: $state"
   done
