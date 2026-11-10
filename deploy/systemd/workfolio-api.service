@@ -6,6 +6,10 @@ Description=Insight Workfolio API
 Documentation=file:/opt/workfolio/current/deploy/README.md
 After=network-online.target
 Wants=network-online.target
+# Rate limit for Restart=: a boot refused by env validation or a pending migration must not loop forever
+# (StartLimit* are [Unit] settings; in [Service] systemd ignores them).
+StartLimitIntervalSec=300
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -18,9 +22,6 @@ Environment=NODE_ENV=production
 ExecStart=/usr/bin/node dist/main.js
 Restart=on-failure
 RestartSec=5s
-# A boot refused by env validation or a pending migration must not restart-loop forever.
-StartLimitIntervalSec=300
-StartLimitBurst=5
 TimeoutStopSec=30s
 KillSignal=SIGTERM
 LimitNOFILE=65536
