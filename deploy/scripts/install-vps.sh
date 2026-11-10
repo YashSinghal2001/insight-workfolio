@@ -136,7 +136,7 @@ if [ -n "$caddy_domain" ] && [ "$caddy_domain" != "example.com" ] || [ -n "$cadd
 fi
 
 log "swap ${SWAP_GB}G (build headroom)"
-if ! swapon --show | grep -q .; then
+if [ -z "$(swapon --show --noheadings 2>/dev/null)" ]; then
   fallocate -l "${SWAP_GB}G" /swapfile && chmod 600 /swapfile && mkswap /swapfile >/dev/null && swapon /swapfile
   grep -q '^/swapfile' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
   printf 'vm.swappiness=10\n' > /etc/sysctl.d/90-workfolio.conf && sysctl -q -p /etc/sysctl.d/90-workfolio.conf
