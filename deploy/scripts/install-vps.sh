@@ -26,8 +26,12 @@ apt-get update -q
 apt-get install -y -q ca-certificates curl gnupg git ufw fail2ban sqlite3 ffmpeg unattended-upgrades debian-keyring debian-archive-keyring apt-transport-https
 
 log "ffmpeg: libx264 and WebP demuxer (required by the timelapse encoder)"
-ffmpeg -hide_banner -encoders 2>/dev/null | grep -q libx264 || { echo "ffmpeg without libx264" >&2; exit 1; }
-ffmpeg -hide_banner -demuxers 2>/dev/null | grep -q webp_pipe || { echo "ffmpeg without webp_pipe" >&2; exit 1; }
+# Capture first, then grep: with `set -o pipefail`, `ffmpeg | grep -q` fails whenever grep exits before
+# ffmpeg finishes writing (SIGPIPE), which made a perfectly good ffmpeg look like it lacked libx264.
+ffmpeg_encoders=$(ffmpeg -hide_banner -encoders 2>/dev/null || true)
+ffmpeg_demuxers=$(ffmpeg -hide_banner -demuxers 2>/dev/null || true)
+grep -q libx264 <<<"$ffmpeg_encoders" || { echo "ffmpeg without libx264" >&2; exit 1; }
+grep -q webp_pipe <<<"$ffmpeg_demuxers" || { echo "ffmpeg without webp_pipe" >&2; exit 1; }
 ffmpeg -version | head -1
 
 log "Node.js $NODE_MAJOR + corepack/pnpm"
