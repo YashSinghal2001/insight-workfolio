@@ -144,11 +144,55 @@ echo "6. monitor.sh: verdict, state, alert on change only"
 export MONITOR_STATE_DIR="$tmp/monitor" ALERT_CMD="cat \"\$2\" >> '$tmp/alerts.log'" TIMELAPSE_DIR="$tmp/data/tmp/timelapses"
 run_monitor() { set +e; "$here/monitor.sh" --no-dashboard > "$tmp/monitor.log" 2>&1; rc=$?; set -e; debug_file="$tmp/monitor.log"; }
 run_monitor
-check "API up but not ready: WARN (exit 2), alert sent once (state changed from the initial OK)" bash -c "[ $rc = 2 ] && grep -q '^WARN: health' '$tmp/monitor.log' && grep -q 'backup: a backup younger' '$tmp/monitor.log' && [ \"\$(grep -c 'workfolio .*: WARN' '$tmp/alerts.log')\" = 1 ]"
+check "API up but not ready: WARN (exit 2), alert sent once (state changed from the initial OK)" bash -c "[ $rc = 2 ] && grep -q '^WARN: health' '$tmp/monitor.log' && grep -q 'backup: a backup younger' '$tmp/monitor.log' && [ \"\$(grep -c '^Severity: WARNING (now WARN, was OK)' '$tmp/alerts.log')\" = 1 ] && grep -q '^Affected: API' '$tmp/alerts.log' && grep -q '^Next step (API): ' '$tmp/alerts.log' && grep -q -E '^Time: 20[0-9-]+ [0-9:]+ UTC' '$tmp/alerts.log'"
 run_monitor
-check "same verdict again: no second alert" test "$(grep -c '^workfolio .*: WARN' "$tmp/alerts.log")" = 1
+check "same verdict again: no second alert" test "$(grep -c '^Severity: ' "$tmp/alerts.log")" = 1
 BACKUP_MAX_AGE_HOURS=0 run_monitor
-check "stale backup: FAIL (exit 1) and an alert" bash -c "[ $rc = 1 ] && grep -q 'FAIL: backup: no backup younger' '$tmp/monitor.log' && grep -q ': FAIL (was WARN)' '$tmp/alerts.log'"
+check "stale backup: FAIL (exit 1) and an alert" bash -c "[ $rc = 1 ] && grep -q 'FAIL: backup: no backup younger' '$tmp/monitor.log' && grep -q '^Severity: CRITICAL (now FAIL, was WARN)' '$tmp/alerts.log' && grep -q '^Next step (Backups): ' '$tmp/alerts.log'"
+echo "6b. alert channels: Teams (all events) and ntfy (critical only), independent of each other"
+hook_port=$((port + 1)); hooks="$tmp/hooks.jsonl"; : > "$hooks"
+node -e "
+  const http = require('http'), fs = require('fs');
+  http.createServer((q, r) => { let b = ''; q.on('data', (d) => (b += d)).on('end', () => {
+    fs.appendFileSync(process.argv[1], JSON.stringify({ path: q.url, title: q.headers.title || null, priority: q.headers.priority || null, type: q.headers['content-type'] || null, body: b }) + '\\n');
+    r.statusCode = q.url === '/fail' ? 500 : 200; r.end('ok'); }); }).listen(Number(process.argv[2]), '127.0.0.1');
+" "$hooks" "$hook_port" &
+holder=$!
+for _ in $(seq 1 30); do curl -s -o /dev/null "http://127.0.0.1:$hook_port/ping" && break; sleep 0.1; done
+: > "$hooks"
+teams_url="http://127.0.0.1:$hook_port/teams"; ntfy_url="http://127.0.0.1:$hook_port/ntfy"
+hits() { grep -c "\"path\":\"/$1\"" "$hooks" || true; }
+run_channels() { set +e; env MONITOR_STATE_DIR="$tmp/monitor2" ALERT_CMD= ALERT_TEAMS_WEBHOOK_URL="$teams_url" ALERT_NTFY_URL="$ntfy_url" "$@" "$here/monitor.sh" --no-dashboard > "$tmp/monitor2.log" 2>&1; rc=$?; set -e; debug_file="$tmp/monitor2.log"; }
+run_channels
+check "WARN event: Teams gets it, ntfy does not (routine events are not duplicated to the phone)" bash -c "[ $rc = 2 ] && [ $(hits teams) = 1 ] && [ $(hits ntfy) = 0 ] && grep -q 'alert: teams sent' '$tmp/monitor2.log'"
+run_channels BACKUP_MAX_AGE_HOURS=0
+check "FAIL event: both channels; Teams body is an Adaptive Card naming severity, service and next step; ntfy is urgent" node -e "
+  const rows = require('fs').readFileSync('$hooks', 'utf8').trim().split('\\n').map((l) => JSON.parse(l));
+  const teams = rows.filter((r) => r.path === '/teams'), ntfy = rows.filter((r) => r.path === '/ntfy');
+  const card = JSON.parse(teams.at(-1).body), content = card.attachments[0].content, text = content.body.map((b) => b.text).join('\\n');
+  const ok = $rc === 1 && teams.length === 2 && ntfy.length === 1 && card.type === 'message' && card.attachments[0].contentType === 'application/vnd.microsoft.card.adaptive'
+    && content.type === 'AdaptiveCard' && /\\[CRITICAL\\] Insight Workfolio/.test(text) && /Severity: CRITICAL \\(now FAIL, was WARN\\)/.test(text) && /Time: 20.* UTC/.test(text)
+    && /Affected: .*Backups/.test(text) && /Next step \\(Backups\\): /.test(text)
+    && ntfy[0].priority === 'urgent' && /^\\[CRITICAL\\]/.test(ntfy[0].title) && /Severity: CRITICAL/.test(ntfy[0].body) && !/password|secret|token|passphrase/i.test(text + ntfy[0].body);
+  process.exit(ok ? 0 : 1);
+"
+run_channels
+check "recovery from FAIL: both channels are told" bash -c "[ $(hits teams) = 3 ] && [ $(hits ntfy) = 2 ]"
+rm -rf "$tmp/monitor2"; before=$(hits ntfy)
+run_channels ALERT_TEAMS_WEBHOOK_URL="http://127.0.0.1:$hook_port/fail" BACKUP_MAX_AGE_HOURS=0
+check "Teams endpoint failing: ntfy still receives the critical alert, the failure is logged, state is saved" bash -c "[ $(hits ntfy) = $((before + 1)) ] && grep -q 'alert: teams FAILED' '$tmp/monitor2.log' && grep -q 'alert: ntfy sent' '$tmp/monitor2.log' && grep -q '^FAIL ' '$tmp/monitor2/state'"
+rm -rf "$tmp/monitor2"; before=$(hits teams)
+run_channels ALERT_NTFY_URL="http://127.0.0.1:$((hook_port + 7))/closed" BACKUP_MAX_AGE_HOURS=0
+check "ntfy endpoint unreachable: Teams still receives the critical alert" bash -c "[ $(hits teams) = $((before + 1)) ] && grep -q 'alert: ntfy FAILED' '$tmp/monitor2.log' && grep -q 'alert: teams sent' '$tmp/monitor2.log'"
+state_before=$(cat "$tmp/monitor2/state"); t=$(hits teams); n=$(hits ntfy)
+set +e
+out=$(env MONITOR_STATE_DIR="$tmp/monitor2" ALERT_TEAMS_WEBHOOK_URL="$teams_url" ALERT_NTFY_URL="$ntfy_url" "$here/monitor.sh" --test-alert all 2>&1); rc=$?
+out2=$(env MONITOR_STATE_DIR="$tmp/monitor2" ALERT_TEAMS_WEBHOOK_URL="http://127.0.0.1:$hook_port/fail" ALERT_NTFY_URL="$ntfy_url" "$here/monitor.sh" --test-alert teams 2>&1); rc2=$?
+out3=$(env MONITOR_STATE_DIR="$tmp/monitor2" ALERT_TEAMS_WEBHOOK_URL= ALERT_NTFY_URL="$ntfy_url" "$here/monitor.sh" --test-alert all 2>&1); rc3=$?
+set -e
+check "--test-alert: each channel tested on its own, failures reported per channel, state untouched, URLs never printed" bash -c "[ $rc = 0 ] && grep -q 'teams: sent' <<<'$out' && grep -q 'ntfy: sent' <<<'$out' && [ $rc2 = 1 ] && grep -q 'teams: FAILED' <<<'$out2' && [ $rc3 = 0 ] && grep -q 'teams: not configured' <<<'$out3' && [ $(hits teams) = $((t + 1)) ] && [ $(hits ntfy) = $((n + 2)) ] && [ '$(cat "$tmp/monitor2/state")' = '$state_before' ] && ! grep -q '127.0.0.1:$hook_port' <<<'$out$out2$out3' && ! grep -q '127.0.0.1:$hook_port' '$tmp/monitor2.log'"
+kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null || true; holder=""
+
 kill "$api_pid" 2>/dev/null; wait "$api_pid" 2>/dev/null || true; api_pid=""
 run_monitor
 check "API down: FAIL with the health failure named" bash -c "[ $rc = 1 ] && grep -q 'FAIL: health: api health' '$tmp/monitor.log'"

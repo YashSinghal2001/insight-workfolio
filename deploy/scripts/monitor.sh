@@ -11,9 +11,19 @@
 #     STORAGE_EXPECTED_DOWN=1 in monitor.env so the /ready 503 does not pin the verdict at WARN
 #   - timelapse scratch: size of TIMELAPSE_DIR over TIMELAPSE_SCRATCH_WARN_MB (WARN), low-disk refusals
 #     logged by the API (WARN)
-# Alerts (monitor.env: ALERT_WEBHOOK_URL and/or ALERT_CMD) go out when the verdict CHANGES, and again every
-# ALERT_REPEAT_MINUTES while it stays FAIL. State lives in $WORKFOLIO_DATA/monitor/. Exit code = 0 OK,
-# 2 WARN, 1 FAIL (the unit is a oneshot; its own exit status is 0 so the timer keeps firing).
+# Alerts go out when the verdict CHANGES, and again every ALERT_REPEAT_MINUTES while it stays FAIL. Channels
+# (monitor.env; each is optional and independent: one failing never stops another):
+#   ALERT_TEAMS_WEBHOOK_URL  Microsoft Teams "Workflows" webhook (Adaptive Card). Primary: every event
+#                            (ALERT_TEAMS_MIN_LEVEL=WARN, the default; FAIL = critical events only)
+#   ALERT_NTFY_URL           ntfy topic URL (phone push). Secondary: critical events only by default
+#                            (ALERT_NTFY_MIN_LEVEL=FAIL: a FAIL verdict, its repeats and the recovery from it)
+#   ALERT_WEBHOOK_URL / ALERT_CMD   generic JSON {"text"} webhook / any command: every event
+# Each alert carries severity, UTC time, server, affected services, the failing checks and a next step. It
+# never contains secrets or personal data (only check names, unit names, paths and counts).
+#   monitor.sh --test-alert [teams|ntfy|all]   sends a TEST message through the chosen channel(s) only: no
+#                                              checks run, the state file is untouched; exit 1 if one fails
+# State lives in $WORKFOLIO_DATA/monitor/. Exit code = 0 OK, 2 WARN, 1 FAIL (the unit is a oneshot; its own
+# exit status is 0 so the timer keeps firing).
 # This monitor runs ON the VPS: when the VPS itself is down nothing fires. Pair it with an external uptime
 # monitor on https://api.<domain>/api/v1/health (deploy/README.md "Monitoring"). Arguments are passed to
 # healthcheck.sh (e.g. --no-dashboard on a host without the dashboard).
@@ -21,6 +31,10 @@
 
 : "${ALERT_WEBHOOK_URL:=}"
 : "${ALERT_CMD:=}"
+: "${ALERT_TEAMS_WEBHOOK_URL:=}"
+: "${ALERT_TEAMS_MIN_LEVEL:=WARN}"
+: "${ALERT_NTFY_URL:=}"
+: "${ALERT_NTFY_MIN_LEVEL:=FAIL}"
 : "${ALERT_REPEAT_MINUTES:=360}"
 : "${BACKUP_MAX_AGE_HOURS:=30}"
 : "${TIMELAPSE_SCRATCH_WARN_MB:=1024}"
@@ -30,6 +44,57 @@
 : "${MONITOR_STATE_DIR:=$WORKFOLIO_DATA/monitor}"
 : "${JOURNALCTL:=journalctl}"
 scripts="$(dirname "$(readlink -f "$0")")"
+
+host=$(hostname -s 2>/dev/null || hostname)
+
+# ---- alert channels -------------------------------------------------------------------------------
+# URLs are handed to curl through a config on stdin (-K -), never as an argument: they are secrets and
+# must not show up in the process list or in any log line.
+
+# Microsoft Teams (Workflows "post to a channel when a webhook request is received"): the flow posts each
+# attachment's Adaptive Card. $1 title, $2 body text (one TextBlock per line), $3 level.
+send_teams() {
+  local payload
+  payload=$(TITLE="$1" BODY="$2" LEVEL="$3" "$NODE" -e '
+    const { TITLE, BODY, LEVEL } = process.env;
+    const color = { CRITICAL: "Attention", WARNING: "Warning", RECOVERED: "Good", TEST: "Accent" }[LEVEL] || "Default";
+    const card = { type: "AdaptiveCard", $schema: "http://adaptivecards.io/schemas/adaptive-card.json", version: "1.4", msteams: { width: "Full" },
+      body: [{ type: "TextBlock", text: TITLE, weight: "Bolder", size: "Medium", color, wrap: true },
+        ...BODY.split("\n").filter(Boolean).map((text) => ({ type: "TextBlock", text, wrap: true, spacing: "Small" }))] };
+    process.stdout.write(JSON.stringify({ type: "message", attachments: [{ contentType: "application/vnd.microsoft.card.adaptive", contentUrl: null, content: card }] }));
+  ') || return 1
+  printf 'url = "%s"\n' "$ALERT_TEAMS_WEBHOOK_URL" | curl -fsS --max-time 20 -o /dev/null -H 'content-type: application/json' --data-binary "$payload" -K -
+}
+
+# ntfy topic (phone push). $1 title (ASCII), $2 body text, $3 level.
+send_ntfy() {
+  local priority=default tags=information_source
+  case "$3" in
+    CRITICAL) priority=urgent; tags=rotating_light ;;
+    WARNING) priority=default; tags=warning ;;
+    RECOVERED) priority=default; tags=white_check_mark ;;
+    TEST) priority=low; tags=test_tube ;;
+  esac
+  printf 'url = "%s"\n' "$ALERT_NTFY_URL" | curl -fsS --max-time 15 -o /dev/null -H "Title: $1" -H "Priority: $priority" -H "Tags: $tags" --data-binary "$2" -K -
+}
+
+# Which channels take an event: $1 channel minimum level (WARN = everything, FAIL = critical events only),
+# $2 = 1 when the event is critical (FAIL now, or recovering from FAIL).
+wants() { [ "$1" != FAIL ] || [ "$2" = 1 ]; }
+
+if [ "${1:-}" = "--test-alert" ]; then
+  which=${2:-all}
+  title="[TEST] Insight Workfolio monitoring on $host"
+  text="Severity: TEST (no action needed)"$'\n'"Time: $(date -u '+%Y-%m-%d %H:%M UTC')"$'\n'"Server: $host"$'\n'"This is a delivery test of this alert channel. Real alerts name the affected service and the next step."
+  rc=0
+  for channel in teams ntfy; do
+    [ "$which" = all ] || [ "$which" = "$channel" ] || continue
+    case "$channel" in teams) url=$ALERT_TEAMS_WEBHOOK_URL ;; ntfy) url=$ALERT_NTFY_URL ;; esac
+    if [ -z "$url" ]; then echo "$channel: not configured"; [ "$which" = all ] || rc=1; continue; fi
+    if "send_$channel" "$title" "$text" TEST; then echo "$channel: sent"; else echo "$channel: FAILED"; rc=1; fi
+  done
+  exit "$rc"
+fi
 
 verdict=OK
 report=""
@@ -93,23 +158,49 @@ previous=$(cat "$state" 2>/dev/null || echo "OK 0")
 prev_verdict=${previous%% *}
 prev_at=${previous##* }
 now=$(date +%s)
-subject="workfolio $(hostname -s 2>/dev/null || hostname): $verdict"
+subject="workfolio $host: $verdict"
 printf '%s\n%s' "$subject" "$report"
 alert=0
 if [ "$verdict" != "$prev_verdict" ]; then alert=1
 elif [ "$verdict" = FAIL ] && [ $((now - prev_at)) -ge $((ALERT_REPEAT_MINUTES * 60)) ]; then alert=1
 fi
 if [ "$alert" = 1 ]; then
-  body="$subject (was $prev_verdict)"$'\n'"$report"
+  case "$verdict" in FAIL) level=CRITICAL ;; WARN) level=WARNING ;; *) level=RECOVERED ;; esac
+  critical=0
+  if [ "$verdict" = FAIL ] || [ "$prev_verdict" = FAIL ]; then critical=1; fi
+  problems=$(printf '%s' "$report" | grep -E '^(FAIL|WARN): ' || true)
+  # Affected services and a next step, derived from the failing checks (names and commands only).
+  affected=""; actions=""
+  add() { case ", $affected, " in *", $1, "*) ;; *) affected="${affected:+$affected, }$1"; actions="$actions"$'\n'"Next step ($1): $2" ;; esac; }
+  if grep -q -E 'api health|api ready|workfolio-api' <<<"$problems"; then add "API" "systemctl status $API_SERVICE; journalctl -u $API_SERVICE -n 50"; fi
+  if grep -q -E 'dashboard' <<<"$problems"; then add "Dashboard" "systemctl status $DASHBOARD_SERVICE; journalctl -u $DASHBOARD_SERVICE -n 50"; fi
+  if grep -q -E 'filesystem' <<<"$problems"; then add "Disk" "df -h; du -sh /opt/workfolio/releases /var/backups/workfolio /var/log"; fi
+  if grep -q -E '^(FAIL|WARN): backup' <<<"$problems"; then add "Backups" "journalctl -u $BACKUP_SERVICE -n 30; systemctl start $BACKUP_SERVICE"; fi
+  if grep -q -E 'onedrive|storage check' <<<"$problems"; then add "OneDrive storage" "dashboard Settings > Microsoft OneDrive (reconnect if needed); journalctl -u $API_SERVICE | grep -i storage"; fi
+  if grep -q -E 'timelapse' <<<"$problems"; then add "Timelapse scratch" "ls -la $TIMELAPSE_DIR; df -h"; fi
+  title="[$level] Insight Workfolio on $host"
+  body="Severity: $level (now $verdict, was $prev_verdict)"$'\n'"Time: $(date -u '+%Y-%m-%d %H:%M UTC')"$'\n'"Server: $host"
+  if [ -n "$problems" ]; then
+    body="$body"$'\n'"Affected: ${affected:-see checks}"$'\n'"$problems$actions"
+  else
+    body="$body"$'\n'"All checks pass again: API, dashboard, services, disk, backups."
+  fi
+  # Every channel is tried; a failure is logged (to the journal) and never stops the others.
+  if [ -n "$ALERT_TEAMS_WEBHOOK_URL" ] && wants "$ALERT_TEAMS_MIN_LEVEL" "$critical"; then
+    if send_teams "$title" "$body" "$level"; then log "alert: teams sent"; else warn "alert: teams FAILED"; fi
+  fi
+  if [ -n "$ALERT_NTFY_URL" ] && wants "$ALERT_NTFY_MIN_LEVEL" "$critical"; then
+    if send_ntfy "$title" "$body" "$level"; then log "alert: ntfy sent"; else warn "alert: ntfy FAILED"; fi
+  fi
   if [ -n "$ALERT_WEBHOOK_URL" ]; then
-    # JSON-escape through node (always present on the VPS); the URL is never logged.
-    payload=$(printf '%s' "$body" | "$NODE" -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(JSON.stringify({text:s})))')
-    curl -sS --max-time 15 -o /dev/null -H 'content-type: application/json' --data "$payload" "$ALERT_WEBHOOK_URL" && note "alert: webhook sent" || warn "alert: webhook failed"
+    # Generic JSON {"text"} webhook; JSON-escaped through node (always present on the VPS).
+    payload=$(printf '%s\n%s' "$title" "$body" | "$NODE" -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(JSON.stringify({text:s})))')
+    if printf 'url = "%s"\n' "$ALERT_WEBHOOK_URL" | curl -fsS --max-time 15 -o /dev/null -H 'content-type: application/json' --data-binary "$payload" -K -; then log "alert: webhook sent"; else warn "alert: webhook FAILED"; fi
   fi
   if [ -n "$ALERT_CMD" ]; then
     bodyfile=$(mktemp "$MONITOR_STATE_DIR/alert.XXXXXX")
     printf '%s\n' "$body" > "$bodyfile"
-    bash -c "$ALERT_CMD" alert "$subject" "$bodyfile" && note "alert: command sent" || warn "alert: command failed"
+    if bash -c "$ALERT_CMD" alert "$title" "$bodyfile"; then log "alert: command sent"; else warn "alert: command FAILED"; fi
     rm -f "$bodyfile"
   fi
   printf '%s %s\n' "$verdict" "$now" > "$state"

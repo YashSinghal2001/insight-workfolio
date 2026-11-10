@@ -263,11 +263,22 @@ Two layers, because a monitor that runs on the VPS cannot report that the VPS is
 | `TIMELAPSE_DIR` size | > `TIMELAPSE_SCRATCH_WARN_MB` (1024) | |
 
 Alerts go out **on change of verdict** (OK → WARN/FAIL, back to OK) and every `ALERT_REPEAT_MINUTES` (360)
-while FAIL persists, never on every run; the last verdict is in `/var/lib/workfolio/monitor/state`.
-Destinations in `monitor.env`: `ALERT_WEBHOOK_URL` (JSON `{"text": …}`: Teams incoming webhook/Workflow, Slack,
-ntfy, …) and/or `ALERT_CMD` (run as `bash -c "$ALERT_CMD" alert <subject> <body file>`, e.g. local `mail`).
-Without either, the verdict is only logged: `journalctl -t workfolio-monitor`. The webhook URL is a secret
-(0640 file); it is never printed. Run `deploy/scripts/monitor.sh` by hand for the current verdict.
+while FAIL persists, never on every run; the last verdict is in `/var/lib/workfolio/monitor/state`. Channels in
+`monitor.env`, each optional and independent (a failing provider is logged and never stops another):
+
+| Channel | Setting | Receives |
+| --- | --- | --- |
+| Microsoft Teams (primary) | `ALERT_TEAMS_WEBHOOK_URL`: a Workflows flow from the template "Post to a channel when a webhook request is received"; the monitor posts an Adaptive Card | every event (`ALERT_TEAMS_MIN_LEVEL=WARN`) |
+| ntfy phone push (secondary) | `ALERT_NTFY_URL`: full topic URL, random topic name | critical events only (`ALERT_NTFY_MIN_LEVEL=FAIL`): a FAIL, its repeats, and the recovery from it |
+| generic | `ALERT_WEBHOOK_URL` (JSON `{"text"}`), `ALERT_CMD` (`bash -c "$ALERT_CMD" alert <title> <body file>`) | every event |
+
+Each alert states severity (CRITICAL / WARNING / RECOVERED), UTC time, server, affected services, the failing
+checks and a next-step command per service. It contains check names, unit names, paths and counts only: never a
+secret or personal data. URLs are passed to curl on stdin, never on the command line, and are never logged.
+`monitor.sh --test-alert [teams|ntfy|all]` sends a TEST message through the chosen channel(s) without running
+checks or touching the state. While OneDrive is intentionally not connected, `STORAGE_EXPECTED_DOWN=1` keeps the
+verdict at OK so that real changes alert. Without any channel the verdict is only logged:
+`journalctl -t workfolio-monitor`.
 
 OneDrive health beyond the log: the dashboard's Settings › Microsoft OneDrive page shows the connection, last
 check, last error and quota (`GET /api/v1/storage/onedrive/status`, admin session). Quota is not polled by the
