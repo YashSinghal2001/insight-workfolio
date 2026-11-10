@@ -100,7 +100,15 @@ install -d -m 755 /etc/systemd/system/caddy.service.d
 install -m 644 "$here/caddy/caddy-override.conf" /etc/systemd/system/caddy.service.d/override.conf
 systemctl daemon-reload
 systemctl restart systemd-journald
-systemd-analyze verify /etc/systemd/system/workfolio-*.service /etc/systemd/system/workfolio-*.timer
+# Verify our units only (the tool also prints unrelated distro warnings). Before the first deploy the
+# ExecStart/WorkingDirectory paths under /opt/workfolio/current do not exist yet: that one complaint is expected.
+verify_out=$(systemd-analyze verify /etc/systemd/system/workfolio-*.service /etc/systemd/system/workfolio-*.timer 2>&1 | grep -E 'workfolio-' || true)
+if [ ! -e /opt/workfolio/current ]; then
+  verify_out=$(grep -v -E 'is not executable: No such file|No such file or directory' <<<"$verify_out" || true)
+  echo "  (no release deployed yet: missing /opt/workfolio/current paths are expected until deploy.sh runs)"
+fi
+if [ -n "$verify_out" ]; then printf '%s\n' "$verify_out" >&2; echo "systemd unit verification failed" >&2; exit 1; fi
+echo "  units verified"
 systemctl enable workfolio-api workfolio-dashboard workfolio-backup.timer workfolio-monitor.timer >/dev/null
 echo "  units enabled (not started: deploy a release first, then: systemctl start workfolio-backup.timer workfolio-monitor.timer)"
 
