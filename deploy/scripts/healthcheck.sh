@@ -6,6 +6,8 @@
 #   Dashboard GET http://127.0.0.1:3000/              (200 or a redirect)
 #   Services  systemctl is-active (when systemd is present)
 #   Disk      warns at DISK_WARN_PERCENT (default 80 %), fails at DISK_FAIL_PERCENT (default 95 %) for the data filesystem.
+# STORAGE_EXPECTED_DOWN=1 (monitor.env, while OneDrive is intentionally not connected yet): a 503 from /ready
+#   whose database check is up is reported as expected instead of a warning; a database failure still warns.
 # Exit 0 = healthy, 1 = something is down, 2 = healthy with warnings. Used by deploy.sh and restore-db.sh;
 # wire it to an external uptime monitor or cron for alerts.
 . "$(dirname "$(readlink -f "$0")")/lib.sh"
@@ -35,7 +37,15 @@ if [ "$check_ready" = 1 ]; then
   c=$(code "$WORKFOLIO_API_URL/api/v1/ready" 10)
   case "$c" in
     200) log "api ready: 200" ;;
-    503) soft "api ready: 503 (database or storage check failing; OneDrive not connected yet?)" ;;
+    503)
+      body=$(curl -sS --max-time 10 "$WORKFOLIO_API_URL/api/v1/ready" 2>/dev/null || true)
+      if [ "${STORAGE_EXPECTED_DOWN:-0}" = 1 ] && [[ "$body" == *'"database":{"status":"up"'* ]]; then
+        log "api ready: 503, database up, storage not connected (expected: STORAGE_EXPECTED_DOWN=1)"
+      elif [[ "$body" == *'"database":{"status":"up"'* ]]; then
+        soft "api ready: 503 (storage check failing: OneDrive not connected, revoked or unreachable)"
+      else
+        soft "api ready: 503 (database check failing)"
+      fi ;;
     *) fail "api ready: HTTP $c" ;;
   esac
 fi

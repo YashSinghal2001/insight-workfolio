@@ -134,6 +134,11 @@ set +e
 rc=$?
 set -e
 check "healthcheck.sh: exit 2 (healthy with the ready warning)" bash -c "[ $rc = 2 ] && grep -q 'api health: 200' '$tmp/health.log' && grep -q 'ready: 503' '$tmp/health.log'"
+set +e
+STORAGE_EXPECTED_DOWN=1 "$here/healthcheck.sh" --no-dashboard > "$tmp/health2.log" 2>&1
+rc=$?
+set -e
+check "healthcheck.sh with STORAGE_EXPECTED_DOWN=1: exit 0, storage reported as expected, database up" bash -c "[ $rc = 0 ] && grep -q 'database up, storage not connected (expected' '$tmp/health2.log' && ! grep -q WARNING '$tmp/health2.log'"
 
 echo "6. monitor.sh: verdict, state, alert on change only"
 export MONITOR_STATE_DIR="$tmp/monitor" ALERT_CMD="cat \"\$2\" >> '$tmp/alerts.log'" TIMELAPSE_DIR="$tmp/data/tmp/timelapses"

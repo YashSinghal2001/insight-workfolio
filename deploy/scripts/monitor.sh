@@ -6,8 +6,9 @@
 #   - backups: newest local backup younger than BACKUP_MAX_AGE_HOURS (FAIL), last workfolio-backup run
 #     succeeded (FAIL: covers a failed off-site upload too), backup directory readable
 #   - OneDrive: storage failures logged by the API in the last LOG_WINDOW_MINUTES (WARN; "Screenshot storage
-#     failed", "Timelapse upload to storage failed", "Readiness check failed: storage"); needs the workfolio
-#     user in the systemd-journal group (install-vps.sh)
+#     failed", "Timelapse upload/delete ... failed", "reconnect OneDrive"); needs the workfolio user in the
+#     systemd-journal group (install-vps.sh). While OneDrive is intentionally not connected, set
+#     STORAGE_EXPECTED_DOWN=1 in monitor.env so the /ready 503 does not pin the verdict at WARN
 #   - timelapse scratch: size of TIMELAPSE_DIR over TIMELAPSE_SCRATCH_WARN_MB (WARN), low-disk refusals
 #     logged by the API (WARN)
 # Alerts (monitor.env: ALERT_WEBHOOK_URL and/or ALERT_CMD) go out when the verdict CHANGES, and again every
@@ -66,7 +67,9 @@ fi
 # 3. OneDrive / storage failures and low-disk refusals in the API log --------------------------------
 if [ "$SYSTEMCTL" != ":" ] && command -v "$JOURNALCTL" >/dev/null 2>&1; then
   if lines=$("$JOURNALCTL" -u "$API_SERVICE" --since "-${LOG_WINDOW_MINUTES}min" -o cat --no-pager 2>/dev/null); then
-    storage=$(printf '%s\n' "$lines" | grep -c -E 'Screenshot storage failed|Timelapse upload to storage failed|Timelapse delete from storage failed|Readiness check failed: storage|reconnect OneDrive' || true)
+    # Not counted: "Readiness check failed: storage" (written by this monitor's own /ready probe; the health
+    # check above already reports readiness).
+    storage=$(printf '%s\n' "$lines" | grep -c -E 'Screenshot storage failed|Timelapse upload to storage failed|Timelapse delete from storage failed|reconnect OneDrive' || true)
     [ "$storage" = 0 ] && note "onedrive: no storage failures in the last ${LOG_WINDOW_MINUTES} min" || warn_ "onedrive: $storage storage failure line(s) in the last ${LOG_WINDOW_MINUTES} min (journalctl -u $API_SERVICE | grep -i storage)"
     lowdisk=$(printf '%s\n' "$lines" | grep -c 'Timelapse refused: low disk space' || true)
     [ "$lowdisk" = 0 ] || warn_ "timelapse: $lowdisk video(s) refused for low disk space"
