@@ -169,3 +169,37 @@ uptime monitor on `https://189.72.144.117/api/v1/health`; new Entra registration
 backups, screenshots, timelapses); a domain (IP certificates renew every ~2 days and depend on Let's Encrypt and
 port 80 staying reachable); `/home/workfolio/app` is now only the operator checkout (deploys build from
 `/opt/workfolio/repo`); Docker keep/disable; merge into `main` on the owner's decision.
+
+## 7. Post-launch audit, 2026-11-10 (read-only) and remaining work
+
+Verified on the VPS and from outside, after the reboot test:
+
+| Area | Finding | Status |
+|---|---|---|
+| Services / timers | Caddy, API, dashboard, backup timer, monitor timer, UFW, fail2ban, unattended-upgrades active; 0 failed units | VERIFIED |
+| Exposure | UFW: OpenSSH, 80, 443 only; ports 3000, 4000 and Caddy's admin port closed from outside; unauthenticated API 401 | VERIFIED |
+| Resources | disk 6.6 G of 96 G (7 %), RAM 680 MB used, swap unused, clock synchronized | VERIFIED |
+| Updates | 14 packages upgradable (4 security); unattended-upgrades applies security updates; no reboot pending | VERIFIED (watch) |
+| Backup files | passphrase file 0600 `workfolio`, secrets dir 0700, backup dir 0700, backup 0600, "PGP symmetric key encrypted data - AES with 256-bit key"; rehearsal RESTORABLE | VERIFIED |
+| Backup automation | timer active, next run 2026-11-11 02:39 UTC; only a manual run has happened so far | NOT YET VERIFIED (first scheduled run) |
+| Off-site copy | none: `BACKUP_UPLOAD_CMD` unset by design until OneDrive is connected. Hostinger snapshot of 2026-11-10 expires 2026-11-11; weekly Hostinger backups start on or after 2026-11-12 | OPEN RISK |
+| Passphrase escrow | exists only on the VPS until the owner stores it in the password manager | PENDING (owner) |
+| Certificate renewal | Let's Encrypt short-lived certificate valid to 2026-11-16 22:07 UTC; ARI renewal window 2026-11-13 13:01–16:12 UTC, Caddy selected 14:07 UTC | SCHEDULED, NOT YET VERIFIED |
+| Logs | Caddy: 3 "connection refused" lines during the reboot only; API: only "Readiness check failed: storage" warnings (OneDrive off); no secrets in journals, shell history or deploy logs | VERIFIED |
+| Monitor verdict | permanently WARN while OneDrive is disconnected (its own `/ready` probes produce the storage warnings), so new WARN-level problems would not change the verdict; FAIL conditions still do. No alert destination configured | OPEN (fix with the alert setup) |
+| Unit sandboxing | API and dashboard exposure 1.7 (OK); backup and monitor units 8.3 (unprivileged user, `ProtectSystem=strict`, but fewer restrictions) | IMPROVE (low priority) |
+| SSH | effective: root login no, password auth no; `MaxAuthTries` default 6; stale `PermitRootLogin yes` line in the main file overridden by the drop-in | VERIFIED (cosmetic cleanup open) |
+
+Remaining work, in priority order:
+
+1. Backup passphrase into the company password manager (owner; the only copy is on the VPS).
+2. Alerts: ntfy topic (simplest; no account, phone push) through `ALERT_CMD`; make the monitor treat "OneDrive not
+   connected" as expected while it is intentionally off; external uptime monitor on `/api/v1/health` (owner creates
+   the account).
+3. OneDrive: new Entra app registration (delegated `Files.ReadWrite`, Web redirect URI
+   `https://189.72.144.117/api/v1/storage/onedrive/oauth/callback`; never the old app-only registration, SEC-11),
+   real values into `api.env` by the owner, connect, `verify-onedrive`, then off-site backups; screenshots and
+   timelapses stay off until separately approved. Whether Entra accepts an IP-literal redirect URI is unverified.
+4. Observe the first scheduled backup (2026-11-11) and the first automatic certificate renewal (2026-11-13).
+5. Hardening: backup/monitor unit sandbox, `MaxAuthTries`, Docker keep/disable.
+6. Later: domain, merge into `main`, desktop release build for `https://189.72.144.117`, HR/Legal items.
