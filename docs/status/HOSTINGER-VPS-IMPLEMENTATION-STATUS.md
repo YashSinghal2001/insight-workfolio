@@ -134,3 +134,38 @@ that left the guard tripped; the selftest's reliance on sidecar files that the s
 6. ⛔ **Git remote**: `deploy.sh` clones from `WORKFOLIO_REPO_URL`; the repository is local only today, and the
    Phase A–D work is uncommitted on `deploy/hostinger-vps`.
 7. HR/Legal items unchanged (notice wording, retention periods, FFmpeg/libx264 licensing acceptance).
+
+## 6. Deployment record: first production launch, 2026-11-10
+
+**Live at `https://189.72.144.117`** (single origin on the VPS public IP, no domain). Deployed commit `2cceaa1`
+from `origin/deploy/hostinger-vps`; release `/opt/workfolio/releases/20261110T071831Z-2cceaa1bb073`. Not merged
+into `main`. hPanel snapshot taken 2026-11-10 before the first change.
+
+| Step | Result |
+|---|---|
+| Root pre-checks | `sshd -T`: root login no, password auth no, pubkey yes; UFW active (22 → now 22/80/443); fail2ban sshd jail active; Docker active with 0 containers; kernel 7.0.0-42, no reboot pending |
+| `install-vps.sh` | Caddy 2.11.9, sqlite3, ffmpeg 8.0.1 (libx264 + webp_pipe), directories, six units verified and enabled, sudoers `parsed OK`, journald limits, `workfolio` in `systemd-journal` |
+| Certificate | Let's Encrypt, ACME profile `shortlived`, subject IP `189.72.144.117`, issuer YE2, valid 2026-11-10 → 2026-11-16, HTTP-01; trusted by curl/openssl from outside |
+| Env files | `/etc/workfolio/*.env` 0640 root:workfolio; `JWT_SECRET`, `ONEDRIVE_TOKEN_KEY`, backup passphrase generated on the VPS and never displayed; OneDrive values are placeholders; `WEBSITE_*_APPROVED=false` |
+| Migration (owner-approved gate) | dry run: applied 0, pending 26; then 26 applied, journal mode WAL, foreign keys enforced, schema `0028_auto_timelapse`; no prior database existed, so no pre-migration file backup (snapshot is the rollback) |
+| Services | `workfolio-api` 127.0.0.1:4000, `workfolio-dashboard` 127.0.0.1:3000, Caddy 80/443; ports 3000/4000 closed from outside |
+| Admin | `IT@TFFDigital.com`, role ADMIN / `SUPER_ADMIN`, password set by the owner through the one-time link (link never read by the operator); audit rows `ACCOUNT_CREATED`, `SETUP_LINK_ISSUED`, `PASSWORD_SET` |
+| Cookies / headers | `wf_access` (Path=/api) and `wf_refresh` (Path=/api/v1/auth): `HttpOnly; Secure; SameSite=Strict`; HSTS, nosniff, frame deny, no-referrer, `no-store` on the API; unauthenticated API 401; foreign-origin preflight gets no allow-origin |
+| Backup | `workfolio-backup` → `workfolio-20261110T071940Z.db.gz.gpg` (0600); `verify-backup.sh`: decrypts, integrity ok, RESTORABLE, applied 26 / pending 0. Local only: no off-site upload until OneDrive is connected |
+| Monitoring | `workfolio-monitor.timer` every 5 min, verdict WARN (readiness 503: OneDrive not connected, expected); no alert destination configured yet (journal only) |
+| Reboot test | site back ~20 s after going down; all units, both timers, UFW, fail2ban, swap active; 0 failed units; database WAL, `integrity_check` ok, files 0600; no sandbox errors in the API journal |
+| Logs | no password, token or JWT patterns in the API/dashboard journal |
+| Disabled by design | OneDrive (not connected), screenshots (no policy row), timelapses, website tracking |
+
+Script bugs found on the real server and fixed during the rollout (commits `33c3bf8` … `2cceaa1`): `StartLimit*` in
+the wrong unit section; `ffmpeg | grep -q` under `pipefail`; unit verification before the first release exists;
+`caddy validate` as root creating a root-owned access log, and `reload` with `admin off`; API-only health check
+testing the dashboard unit; gpg needing a private `GNUPGHOME` and `--pinentry-mode loopback` under `ProtectHome`;
+database file created 0644 (now 0600, `umask 077` in `migrate_cli`).
+
+Open after launch: store the backup passphrase in the password manager (`sudo cat
+/var/lib/workfolio/secrets/backup-passphrase` on the VPS); alert destination in `monitor.env` and an external
+uptime monitor on `https://189.72.144.117/api/v1/health`; new Entra registration and OneDrive connect (then off-site
+backups, screenshots, timelapses); a domain (IP certificates renew every ~2 days and depend on Let's Encrypt and
+port 80 staying reachable); `/home/workfolio/app` is now only the operator checkout (deploys build from
+`/opt/workfolio/repo`); Docker keep/disable; merge into `main` on the owner's decision.
