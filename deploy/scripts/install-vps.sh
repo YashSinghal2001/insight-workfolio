@@ -137,9 +137,14 @@ else
   echo "  neither WORKFOLIO_DOMAIN nor WORKFOLIO_PUBLIC_IP set: Caddy left as is (no public site)"
 fi
 if [ -n "$caddy_domain" ] && [ "$caddy_domain" != "example.com" ] || [ -n "$caddy_ip" ]; then
-  (set -a; . /etc/caddy/workfolio.env; set +a; caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile)
-  systemctl enable --now caddy
-  systemctl reload caddy
+  # Validate as the caddy user: validation opens the access-log writers, and a log file created by root
+  # would be unwritable for the service. chown repairs files left by an earlier root-run validation.
+  chown -R caddy:caddy /var/log/caddy
+  (set -a; . /etc/caddy/workfolio.env; set +a; runuser -u caddy -- caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile)
+  # restart, not reload: both Caddyfiles set `admin off`, and `caddy reload` needs the admin API.
+  systemctl enable caddy >/dev/null
+  systemctl restart caddy
+  systemctl is-active --quiet caddy || { journalctl -u caddy -n 20 --no-pager >&2; echo "caddy did not start" >&2; exit 1; }
   echo "  watch issuance: journalctl -u caddy -f   (an IP certificate is reissued about every 2 days)"
 fi
 
