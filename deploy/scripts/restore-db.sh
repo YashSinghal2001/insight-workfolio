@@ -43,7 +43,8 @@ case "$backup" in
   *.gpg)
     need gpg
     [ -n "${BACKUP_GPG_PASSPHRASE_FILE:-}" ] || die "set BACKUP_GPG_PASSPHRASE_FILE to decrypt $backup"
-    gpg --batch --quiet --passphrase-file "$BACKUP_GPG_PASSPHRASE_FILE" --decrypt "$backup" | gzip -dc > "$restored" ;;
+    export GNUPGHOME="$work/gnupg"; mkdir -m 700 "$GNUPGHOME"   # private gpg home (no keyring needed; works under ProtectHome)
+    gpg --batch --quiet --pinentry-mode loopback --passphrase-file "$BACKUP_GPG_PASSPHRASE_FILE" --decrypt "$backup" | gzip -dc > "$restored" ;;
   *.gz) gzip -dc "$backup" > "$restored" ;;
   *.db) cp "$backup" "$restored" ;;
   *) die "unsupported backup name (expected .db, .db.gz or .db.gz.gpg): $backup" ;;

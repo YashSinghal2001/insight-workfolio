@@ -50,7 +50,8 @@ disk_used_percent() { df -P "$1" | awk 'NR==2 {gsub("%", "", $5); print $5}'; }
 migrate_cli() {
   [ -f "$WORKFOLIO_API_DIR/dist/cli/migrate.js" ] || die "no API build at $WORKFOLIO_API_DIR (run deploy.sh first)"
   [ -r "$WORKFOLIO_API_ENV" ] || die "cannot read $WORKFOLIO_API_ENV"
-  (cd "$WORKFOLIO_API_DIR" && "$NODE" --env-file="$WORKFOLIO_API_ENV" dist/cli/migrate.js "$@")
+  # umask 077: the first run creates the database file; it must be 0600 whatever the caller's umask is.
+  (umask 077; cd "$WORKFOLIO_API_DIR" && "$NODE" --env-file="$WORKFOLIO_API_ENV" dist/cli/migrate.js "$@")
 }
 # Note: helpers open files read-write on purpose. A read-only open (-readonly) of a WAL database fails with
 # "unable to open database file" when its -shm sidecar is absent (after a clean close), and these PRAGMAs do

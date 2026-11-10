@@ -34,7 +34,12 @@ file="$copy.gz"
 if [ -n "${BACKUP_GPG_PASSPHRASE_FILE:-}" ]; then
   need gpg
   [ -r "$BACKUP_GPG_PASSPHRASE_FILE" ] || die "BACKUP_GPG_PASSPHRASE_FILE is not readable"
-  gpg --batch --yes --quiet --symmetric --cipher-algo AES256 --passphrase-file "$BACKUP_GPG_PASSPHRASE_FILE" --output "$file.gpg" "$file"
+  # Private gpg home inside the work directory: the unit runs with ProtectHome (no ~/.gnupg), and symmetric
+  # encryption needs no keyring. gpg >= 2.1 only reads --passphrase-file with --pinentry-mode loopback.
+  export GNUPGHOME="$work/gnupg"
+  mkdir -m 700 "$GNUPGHOME"
+  gpg --batch --yes --quiet --pinentry-mode loopback --symmetric --cipher-algo AES256 --passphrase-file "$BACKUP_GPG_PASSPHRASE_FILE" --output "$file.gpg" "$file"
+  gpgconf --kill gpg-agent >/dev/null 2>&1 || true
   rm -f "$file"
   file="$file.gpg"
 fi

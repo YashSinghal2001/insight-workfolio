@@ -36,7 +36,8 @@ case "$backup" in
   *.gpg)
     need gpg
     [ -n "${BACKUP_GPG_PASSPHRASE_FILE:-}" ] || die "set BACKUP_GPG_PASSPHRASE_FILE to decrypt $backup"
-    gpg --batch --quiet --passphrase-file "$BACKUP_GPG_PASSPHRASE_FILE" --decrypt "$backup" | gzip -dc > "$copy" || die "decrypt/unpack failed"
+    export GNUPGHOME="$work/gnupg"; mkdir -m 700 "$GNUPGHOME"   # private gpg home (no keyring needed; works under ProtectHome)
+    gpg --batch --quiet --pinentry-mode loopback --passphrase-file "$BACKUP_GPG_PASSPHRASE_FILE" --decrypt "$backup" | gzip -dc > "$copy" || die "decrypt/unpack failed"
     log "decrypted with the passphrase file: the off-site copies are readable" ;;
   *.gz) gzip -dc "$backup" > "$copy" || die "unpack failed" ;;
   *.db) cp "$backup" "$copy" ;;
