@@ -203,3 +203,24 @@ Remaining work, in priority order:
 4. Observe the first scheduled backup (2026-11-11) and the first automatic certificate renewal (2026-11-13).
 5. Hardening: backup/monitor unit sandbox, `MaxAuthTries`, Docker keep/disable.
 6. Later: domain, merge into `main`, desktop release build for `https://189.72.144.117`, HR/Legal items.
+
+## 8. Post-launch work completed, 2026-11-10 (later the same day)
+
+Production release `565ba80` (script and documentation changes only; no application code changed).
+
+| Item | Result | Status |
+|---|---|---|
+| Backup passphrase escrow | displayed once in the root console for the owner (never read by the operator), stored by the owner in the company password manager; screen, scrollback and shell history wiped | DONE (owner-confirmed) |
+| Monitor verdict | `STORAGE_EXPECTED_DOWN=1` in `monitor.env` while OneDrive is intentionally off: verdict is now OK, so any new warning changes it and alerts. **Remove the flag when OneDrive is connected** | DONE |
+| Alert channel: Microsoft Teams (primary) | Workflows flow "Post to a channel when a webhook request is received"; URL pasted by the owner into a hidden prompt on the VPS (`ALERT_TEAMS_WEBHOOK_URL`, never shown in chat, logs or Git); Adaptive Card; receives every event | DONE: test card confirmed visible by the owner |
+| Alert channel: ntfy (secondary, phone) | random topic generated on the VPS (`ALERT_NTFY_URL`), owner subscribed in the ntfy app and stored the topic in the password manager; receives critical events only (FAIL, its repeats, recovery from FAIL) | DONE: test push confirmed by the owner |
+| Independence and content | each channel is tried separately, failures are logged and do not stop the other; alerts carry severity, UTC time, server, affected services, failing checks, next-step commands; no secrets or personal data; URLs go to curl on stdin and are not logged (journal checked: 0 matches) | VERIFIED (selftest 49/49 with a fake endpoint; delivery by `--test-alert` per channel) |
+| Schedules | monitor every 5 min, backup 02:30 UTC, certificate renewal by Caddy: unchanged | VERIFIED |
+
+Not done on production on purpose: a real FAIL drill (stopping the API to trigger a critical alert) was not run;
+the routing and failure independence are covered by the selftest, the delivery by the per-channel test messages.
+
+Still open, in order: external uptime monitor on `https://189.72.144.117/api/v1/health` (owner creates the account);
+OneDrive (new Entra registration, connect, then off-site backups; screenshots and timelapses only after separate
+approval); first scheduled backup (2026-11-11 02:39 UTC) and first certificate renewal (2026-11-13 ~14:07 UTC) to be
+observed; unit sandbox hardening for the backup and monitor units; domain; merge into `main`.
