@@ -247,3 +247,28 @@ Still unverified: whether Entra accepts the IP-literal redirect URI `https://189
 provisioned OneDrive for Business (the adapter refuses anything else); the UptimeRobot alert contact.
 
 Operational note from hPanel: the VPS plan expires 2026-12-05 and auto-renewal is off.
+
+## 10. OneDrive connection, step 1: redirect URI and identifiers, 2026-11-11
+
+Approved by the owner; limited to the existing delegated Entra registration "Insight Workfolio" (created 2026-11-03).
+
+| Step | What was done | Verification |
+|---|---|---|
+| Redirect URI | Entra › App registrations › Insight Workfolio › Authentication: platform **Web**, `https://189.72.144.117/api/v1/storage/onedrive/oauth/callback`; implicit grant and hybrid flows left off; no logout URL | the portal accepted the IP-literal https URI (the open question of §9 is closed); the app overview shows "1 web, 0 spa, 0 public client"; permissions and the existing client secret untouched |
+| Backup of the configuration | `/etc/workfolio/api.env.bak-20261111-pre-onedrive`, 0600 root:root, byte-identical to the file before the change | `cmp` |
+| Identifiers | `ONEDRIVE_TENANT_ID` and `ONEDRIVE_CLIENT_ID` set to the values read from the app overview; nothing else changed | key-name diff against the backup: exactly these two keys, same line count; file still 0640 root:workfolio; `validateEnv` of the current release accepts the file; `ONEDRIVE_CLIENT_SECRET` still the placeholder |
+| API | **not restarted** (start time unchanged, health 200): the running process still has the old values | `systemctl show`, `/api/v1/health` |
+
+Next: the owner enters the existing client secret into a hidden prompt on the VPS (never in chat), then an API restart
+(needs approval), Connect in the dashboard as the IT account, `verify-onedrive`. Off-site backups only after that.
+
+### The restart of 2026-11-11 05:43 UTC, explained
+
+hPanel › Latest Actions lists **"Restart VPS", Success, 2026-11-11 11:13:27 IST** (05:43:27 UTC): the restart was issued
+with the Reboot button of the hPanel account. The guest-agent log shows two web-console launches from hPanel at
+05:42:08 and 05:42:31 UTC just before it and one at 05:44:15 right after. Nothing inside the VPS caused it: no shutdown
+sequence in the journal, no OOM, panic, watchdog or I/O error, no package activity, unattended-upgrades auto-reboot
+off. The hPanel Reboot is a hard reset (the root filesystem journal was recovered at boot), not a clean shutdown; the
+SQLite database passed `quick_check` and both backups are intact. For a planned restart use `systemctl reboot` in the
+console instead. The single UptimeRobot 502 (05:43:51 UTC) was its check arriving two seconds after the API unit
+started and before it listened; its re-check at 05:44:06 got 200.
