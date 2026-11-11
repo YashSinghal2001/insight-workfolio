@@ -272,3 +272,27 @@ off. The hPanel Reboot is a hard reset (the root filesystem journal was recovere
 SQLite database passed `quick_check` and both backups are intact. For a planned restart use `systemctl reboot` in the
 console instead. The single UptimeRobot 502 (05:43:51 UTC) was its check arriving two seconds after the API unit
 started and before it listened; its re-check at 05:44:06 got 200.
+
+## 11. OneDrive connected and verified, 2026-11-11
+
+Client secret entered by the owner into a hidden prompt on the VPS (length only was displayed); Microsoft's token
+endpoint accepted it before the restart. API restarted with the owner's approval at 06:35:58 UTC (API only). The owner
+connected OneDrive in the dashboard as `IT@TFFDigital.com` at 06:39 UTC. No data was uploaded; Phase 4 not started.
+
+| # | Check | Result | Evidence |
+|---|---|---|---|
+| 1 | Connected account and drive | PASS | verifier: account `it@tffdigital.com`, the account's own OneDrive for Business, 0.00 GB of 1024 GB used, app folder `InsightWorkfolio` exists; API log "OneDrive connected" once |
+| 2 | Token file | PASS | `/var/lib/workfolio/secrets/onedrive.json`, 0600 workfolio:workfolio, 1932 bytes, directory 0700 |
+| 3 | Encrypted at rest | PASS | `file`: data; 0 matches for token, tenant, account or JWT markers; 0 printable runs of 16+ characters; 0 token or secret patterns in the API journal. Only the refresh token is stored; access tokens exist in memory only |
+| 4 | Controlled refresh and persistence | PASS (API-side pickup NOT TESTED live) | three refreshes from separate processes: Microsoft rotated the refresh token each time, the file was rewritten atomically (hash and mtime changed, mode unchanged), and each later run succeeded with the token written by the previous one. The running API re-reads the file at its next refresh (about one hour after connect); to be re-checked at the start of Phase 4 |
+| 5 | Verifier isolation probes | PARTIAL | `/sites/root` 403, `/sites?search=*` 403, `/users` 403, `/me/drive/sharedWithMe` 403; **`/me/insights/shared` 200**, so the script stopped with "boundary breach" (exit 4). Follow-up, status and counts only: that response is an empty list (0 items); the access token carries exactly `Files.ReadWrite openid profile email`; `/me/insights/trending` 401 |
+| 6 | Readiness | PASS | `/api/v1/ready` 200: database up, storage up, provider `MICROSOFT_GRAPH` |
+| 7 | Monitoring flag | ACTION NEEDED (not changed) | `STORAGE_EXPECTED_DOWN=1` is still set; verdict OK. With the flag set a lost OneDrive connection (`/ready` 503, database up) is logged as expected and does not warn. It must be removed now that OneDrive is connected; removal has no effect while `/ready` is 200 |
+| 8 | Screenshots, timelapses, website tracking | PASS (all off) | `screenshot_policies` 0 rows, `screenshots` 0, `timelapses` 0, `website_policies` 0 rows; `WEBSITE_TRACKING_APPROVED=false`, `WEBSITE_RETENTION_APPROVED=false`; no upload lines in the API log |
+| 9 | No backup or production data uploaded | PASS | no `BACKUP_UPLOAD_CMD`; `db-backups` folder not created; drive usage 0.00 GB |
+
+About check 5: Microsoft Graph answers `/me/insights/shared` for a token that has only `Files.ReadWrite`; the list was
+empty. The application never calls that endpoint. Residual exposure: if someone shares a file with the IT account, this
+token could list that item's insight metadata (title, link, who shared it). Keep the IT account a storage-only account
+that nothing is shared with. The verifier was not changed; whether to treat an empty answer as a pass is the owner's
+decision.
