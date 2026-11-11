@@ -7,6 +7,17 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      # Set both to build the Windows installer for a real server instead of the placeholder (still unsigned).
+      # Public https URLs, not secrets. The browser suites are skipped on such a run.
+      desktop_api_url:
+        description: "Windows installer: https API URL to package (empty = placeholder test build)"
+        required: false
+        default: ""
+      desktop_dashboard_url:
+        description: "Windows installer: https dashboard URL shown to administrators"
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -87,7 +98,7 @@ jobs:
 
   browser-suites:
     name: Browser suites (manual)
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch' && inputs.desktop_api_url == ''
     # verify-*.mjs hardcode /Applications/Google Chrome.app (preinstalled on GitHub macOS runners).
     runs-on: macos-latest
     timeout-minutes: 60
@@ -161,17 +172,32 @@ jobs:
         run: cargo test
       - name: Test desktop (TypeScript)
         run: pnpm --filter @workfolio/desktop exec node --test
-      # Placeholder API on the reserved .invalid TLD (RFC 2606): it can never resolve, so this
-      # installer cannot talk to any real server. Unsigned (no WINDOWS_*/AZURE_* variables).
-      - name: Build UNSIGNED NSIS installer (TEST ARTIFACT ONLY, placeholder API URL, not for distribution)
+      # Default: placeholder API on the reserved .invalid TLD (RFC 2606): it can never resolve, so that
+      # installer cannot talk to any real server. A manual run with desktop_api_url packages that server
+      # instead. Unsigned either way (no WINDOWS_*/AZURE_* variables).
+      - name: Build UNSIGNED NSIS installer (placeholder API URL unless desktop_api_url is given)
         env:
-          WORKFOLIO_API_URL: https://api.example.invalid
-          WORKFOLIO_DASHBOARD_URL: https://app.example.invalid
+          WORKFOLIO_API_URL: ${{ inputs.desktop_api_url || 'https://api.example.invalid' }}
+          WORKFOLIO_DASHBOARD_URL: ${{ inputs.desktop_dashboard_url || (inputs.desktop_api_url && 'missing') || 'https://app.example.invalid' }}
         run: pnpm --filter @workfolio/desktop package -- --bundles nsis
-      - name: Upload unsigned NSIS test installer (TEST ARTIFACT ONLY)
+      # The packaged front end and the app binary (CSP connect-src) must name the requested origin; the
+      # binary must name neither the dev API nor, on a real build, the placeholder.
+      - name: Verify packaged API URL, print size and SHA-256
+        env:
+          API_URL: ${{ inputs.desktop_api_url || 'https://api.example.invalid' }}
+        run: |
+          origin=$(node -e 'console.log(new URL(process.env.API_URL).origin)')
+          grep -rqF "$origin" apps/desktop/dist/assets
+          grep -aqF "$origin" apps/desktop/src-tauri/target/release/*.exe
+          ! grep -aqF "localhost:4000" apps/desktop/src-tauri/target/release/*.exe
+          if [ "$origin" != "https://api.example.invalid" ]; then ! grep -aqF "example.invalid" apps/desktop/src-tauri/target/release/*.exe; fi
+          echo "packaged API origin: $origin"
+          ls -l apps/desktop/src-tauri/target/release/bundle/nsis/*.exe
+          sha256sum apps/desktop/src-tauri/target/release/bundle/nsis/*.exe
+      - name: Upload unsigned NSIS installer
         uses: actions/upload-artifact@v4
         with:
-          name: insight-workfolio-windows-nsis-UNSIGNED-TEST-ONLY
+          name: ${{ inputs.desktop_api_url && 'insight-workfolio-windows-nsis-UNSIGNED' || 'insight-workfolio-windows-nsis-UNSIGNED-TEST-ONLY' }}
           path: apps/desktop/src-tauri/target/release/bundle/nsis/*.exe
           if-no-files-found: error
           retention-days: 7
