@@ -302,3 +302,41 @@ Update 07:26 UTC, check 7 closed with the owner's approval: `STORAGE_EXPECTED_DO
 one line removed, nothing added; both alert URLs still set; file still 0640 root:workfolio). A monitor run right after
 finished with verdict OK. From now on a lost OneDrive connection (`/ready` 503) is a WARN and goes to Teams; schedules
 unchanged.
+
+## 12. Phase 3 close-out: API token refresh and the insights isolation finding, 2026-11-11
+
+Read-only checks and documentation research. Nothing uploaded, no setting changed, Phase 4 not started.
+
+### API token refresh (check 4b of §11): PASS
+
+The token file was rewritten at 07:36:30 UTC by the running API (same process since 06:35:58, 0 restarts; no other
+process touched the file after 06:43), i.e. when its first access token neared expiry. Before that, three other
+processes had rotated the refresh token; the API re-read the file, refreshed and wrote the new token back (0600
+workfolio:workfolio, 1932 bytes, no readable markers). `/api/v1/ready` 200 at 07:37:58 with storage up; 0 storage or
+token error lines in the API journal since connect; monitor verdict OK on every run.
+
+### `/me/insights/shared` (check 5 of §11): stays PARTIAL, accepted only with restrictions
+
+| Question | Finding | Source |
+|---|---|---|
+| Is the token over-scoped? | No. Scopes in the access token: `Files.ReadWrite openid profile email` | token `scp` claim, read on the server |
+| Why does the endpoint answer? | Microsoft documents `Sites.Read.All` as the least privilege for "List shared", and does not list any `Files.*` permission, yet Graph answers 200 for this `Files.ReadWrite` token (also `/me/insights/used`: 200). It is behaviour of the Graph insights service, not of this app registration | Microsoft Learn `insights-list-shared`; observed |
+| What would be visible per shared item? | Title, type and media type, the name and URL of the location (site or owner's OneDrive), a link and ID, a preview image URL, a short preview text, and how it was shared: who (name and address), when, the subject, and whether by link or attachment. An insight item returned to this token today (the account's own document) carried a 147-character preview text | Microsoft Learn resource pages; field names and lengths read on the server, never the values |
+| Which items? | Documents in the tenant shared with the account, files sent to it as e-mail attachments, and links in Outlook and Teams messages | Microsoft Learn `insights-list-shared`, `officegraphinsights` |
+| Could the token open such a file? | Microsoft: shared items cannot be accessed "if the request doesn't contain one of the *.All permissions"; `/me/drive/sharedWithMe` 403, `/sites/*` 403, `/users` 403 here. Not testable end to end today: 0 shared items | Microsoft Learn `drive-sharedwithme`; observed |
+| Narrower permission? | None that fits. `Files.ReadWrite.AppFolder` (delegated) is in preview and documented for personal Microsoft accounts only; the `*.Selected` scopes are the route rejected under SEC-11 | Microsoft Learn permissions reference, `drive-get-specialfolder` |
+| Safer configuration? | Item insights can be switched off per user or per group, but Microsoft's page does not state that this covers the "shared" insight. Microsoft has deprecated `/insights/shared`: it "will stop returning data after November 2026" | Microsoft Learn `insights-customize-item-insights-privacy`, `insights-list-shared` |
+
+Recommendation: **acceptable with documented restrictions; disconnecting is not required.** The exposure needs the
+refresh token, which exists only encrypted on the VPS, and a holder of that token already has the designed access to
+the account's whole own OneDrive, which is the larger exposure. Restrictions: (1) nothing sensitive is shared with or
+mailed as an attachment to the IT account, or, better, (2) before screenshots are ever enabled, move storage to a
+dedicated storage-only account (no mailbox use, nothing else in its OneDrive; needs a licence with OneDrive and one
+reconnect); (3) keep the verifier strict: this probe keeps failing until Microsoft retires the endpoint, and is re-run
+after November 2026; (4) on any suspicion of compromise: Disconnect in the dashboard, delete the client secret, revoke
+the account's sessions. The account's OneDrive root holds two items besides `InsightWorkfolio`; the token can read them.
+
+### UptimeRobot alert contact: NOT VERIFIED
+
+No UptimeRobot message was found in the two mailboxes reachable from the operator's session, the dashboard was not
+visible, and the server log cannot show notification settings. Polling itself is verified (§9).
