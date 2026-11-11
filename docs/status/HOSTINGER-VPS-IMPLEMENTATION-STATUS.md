@@ -296,3 +296,9 @@ empty. The application never calls that endpoint. Residual exposure: if someone 
 token could list that item's insight metadata (title, link, who shared it). Keep the IT account a storage-only account
 that nothing is shared with. The verifier was not changed; whether to treat an empty answer as a pass is the owner's
 decision.
+
+Update 07:26 UTC, check 7 closed with the owner's approval: `STORAGE_EXPECTED_DOWN=1` removed from
+`/etc/workfolio/monitor.env` (backup `/etc/workfolio/monitor.env.bak-20261111-pre-flag`, 0600 root:root; diff: that
+one line removed, nothing added; both alert URLs still set; file still 0640 root:workfolio). A monitor run right after
+finished with verdict OK. From now on a lost OneDrive connection (`/ready` 503) is a WARN and goes to Teams; schedules
+unchanged.
