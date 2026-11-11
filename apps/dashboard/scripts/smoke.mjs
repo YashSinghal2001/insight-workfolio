@@ -2,6 +2,8 @@
 // Data and auth behaviour are covered by the API integration tests; pages here render without a session.
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 
 const port = 3100;
 const server = spawn("pnpm", ["exec", "next", "start", "--port", String(port)], { stdio: "ignore" });
@@ -57,6 +59,23 @@ try {
     assert.equal(status, 200, `${path} returned ${status}`);
     for (const text of texts) assert.ok(html.includes(text), `${path} missing: ${text}`);
   }
+  // Desktop installers: every manifest entry is a real file in public/downloads with the recorded size and
+  // SHA-256, served as-is; and nothing sits in public/downloads that the manifest does not vouch for.
+  const releases = JSON.parse(readFileSync(new URL("../src/lib/desktop-releases.json", import.meta.url), "utf8"));
+  const dir = new URL("../public/downloads/", import.meta.url);
+  const listed = Object.values(releases).filter(Boolean);
+  for (const r of listed) {
+    assert.match(r.file, /^[\w.-]+\.(dmg|exe)$/, `installer file name: ${r.file}`);
+    const bytes = readFileSync(new URL(r.file, dir));
+    assert.equal(bytes.length, r.sizeBytes, `${r.file} size`);
+    assert.equal(createHash("sha256").update(bytes).digest("hex"), r.sha256, `${r.file} sha256`);
+    const res = await fetch(`http://localhost:${port}/downloads/${r.file}`);
+    assert.equal(res.status, 200, `/downloads/${r.file} returned ${res.status}`);
+    assert.equal(createHash("sha256").update(Buffer.from(await res.arrayBuffer())).digest("hex"), r.sha256, `/downloads/${r.file} served bytes`);
+  }
+  const present = existsSync(dir) ? readdirSync(dir) : [];
+  assert.deepEqual(present.sort(), listed.map((r) => r.file).sort(), "public/downloads must hold exactly the installers in desktop-releases.json");
+  console.log(`desktop installers: ${listed.length} verified (${listed.map((r) => r.file).join(", ") || "none published"})`);
   console.log(`dashboard smoke test: PASS (${Object.keys(ROUTES).length} routes)`);
 } finally {
   server.kill();

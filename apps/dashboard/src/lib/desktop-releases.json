@@ -1,0 +1,18 @@
+{
+  "macos": {
+    "version": "0.1.0",
+    "releasedAt": "2026-11-11",
+    "file": "Insight-Workfolio_0.1.0_universal.dmg",
+    "arch": "Universal (Apple Silicon and Intel)",
+    "sizeBytes": 6901787,
+    "sha256": "25c07a9fdbd9ccf425d9b6139b0a2c92b08bb544ca5e943ed094518f0817d4fb"
+  },
+  "windows": {
+    "version": "0.1.0",
+    "releasedAt": "2026-11-11",
+    "file": "Insight-Workfolio_0.1.0_x64-setup.exe",
+    "arch": "64-bit (x64)",
+    "sizeBytes": 2674954,
+    "sha256": "9a496e363b7bc120e9294b916c5729f14a47fd646f690c7edf042353890fce4d"
+  }
+}

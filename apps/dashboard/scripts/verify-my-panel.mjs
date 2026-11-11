@@ -196,6 +196,7 @@ try {
   let t = await text();
   check("sign-in: employee lands on /my (My dashboard) with the employee navigation, not the admin sidebar", (await h1()) === "My dashboard" && (await js(`!!document.querySelector('nav[aria-label="My workspace"]') && !document.querySelector('nav[aria-label="Main"]')`)) && (await js(`document.querySelectorAll('nav[aria-label="My workspace"] a').length`)) === 10);
   check("dashboard: welcome, attendance state, today's activity, website card, project + running timer, pending leave, recent screenshots", /Welcome, Ana Employee/.test(t) && /Clocked in/.test(t) && /Code Editor/.test(t) && /Website activity today/.test(t) && /Ana Project/.test(t) && /Timer running: Ana Project · Write the spec/.test(t) && (await js(`document.querySelector('ul[aria-label="My pending leave"]')?.children.length`)) === 1 && (await js(`document.querySelectorAll('ul[aria-label="Recent screenshots"] li').length`)) === 3, t.slice(0, 300).replace(/\n/g, " | "));
+  check("dashboard: desktop app section with a macOS and a Windows card, each either a /downloads/ link or a disabled button", (await js(`(() => { const s = document.querySelector('section[aria-label="Desktop app"]'); return !!s && ['macos', 'windows'].every((p) => { const c = s.querySelector('[data-platform=' + p + ']'); const a = c?.querySelector('a[download]'); return !!c && (a ? new URL(a.href).pathname.startsWith('/downloads/') && a.origin === location.origin : c.querySelector('button')?.disabled === true); }); })()`)) === true);
   await waitFor(`[...document.querySelectorAll('ul[aria-label="Recent screenshots"] img')].length === 3 && [...document.querySelectorAll('ul[aria-label="Recent screenshots"] img')].every((i) => i.src.startsWith('blob:') && i.complete && i.naturalWidth > 0)`, "dashboard thumbnails");
   check("dashboard: thumbnails load as blob URLs through the API (no image URL in the page)", !(await js(`document.documentElement.outerHTML`)).includes("/content"));
   check("dashboard: no productivity score or ranking", !/score|rank/i.test(t));
@@ -384,6 +385,7 @@ try {
     await waitFor(`location.pathname === '/' && !!document.querySelector('nav[aria-label="Main"]')`, `${label} admin overview`);
     await cdp("Page.navigate", { url: `${APP}/employees` });
     await waitFor(`document.body.innerText.includes('Ana Employee') && document.body.innerText.includes('Ben Other')`, `${label} employees`);
+    check(`${label}: no desktop download section in the admin panel`, !(await js(`!!document.querySelector('section[aria-label="Desktop app"]')`)));
     const badge = await js(`document.querySelector('[data-testid="platform-role"]')?.textContent`);
     await cdp("Page.navigate", { url: `${APP}/my` });
     await waitFor(`/no employee profile/.test(document.body.innerText)`, `${label} /my without profile`);

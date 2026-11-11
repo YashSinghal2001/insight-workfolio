@@ -23,6 +23,7 @@ import { Card } from "@/components/ui";
 import { EmptyState, PageHeader, StatCard } from "@/components/kit";
 import { UpdatedAt, dayLabel, timeIn, useApi, useMe } from "@/components/my-ui";
 import { CategoryTotals } from "./_components/categories";
+import { DesktopDownloads } from "./_components/desktop-downloads";
 import { Loaded } from "./_components/states";
 
 const STATE_LABEL: Record<AttendanceCurrent["state"], string> = { CLOCKED_IN: "Clocked in", ON_BREAK: "On a break", CLOCKED_OUT: "Clocked out" };
@@ -75,6 +76,8 @@ export default function MyDashboard() {
           }}
         </Loaded>
       </section>
+
+      <DesktopDownloads />
 
       <div className="grid gap-4 md:grid-cols-2">
         <Card title="Application activity today" actions={more("/my/activity", "Details")}>
