@@ -365,3 +365,27 @@ documented restrictions. Scheduled uploads were **not** enabled; no local backup
 State after the test: one encrypted backup is off-site in `InsightWorkfolio/db-backups`; the temporary test directory
 (test files and the downloaded copy) was removed; monitor verdict OK. Enabling the nightly upload needs the owner's
 separate approval.
+
+## 14. Phase 4: backup service sandbox test, 2026-11-11 08:05 to 08:08 UTC
+
+Approved by the owner as a single controlled service run. This closes check 12 of §13. The upload command was in the
+configuration only for that run and was removed again afterwards: **the nightly timer still does not upload.**
+
+| # | Check | Result | Evidence |
+|---|---|---|---|
+| 1 | Backup of the configuration | PASS | `/etc/workfolio/backup.env.bak-20261111-pre-upload`, 0600 root:root, byte-identical |
+| 2 | Upload command added | PASS | one line appended (`diff`: `25a26`), the documented uploader command; `systemd-run` with the same `EnvironmentFile` shows systemd parses it with `"$1"` intact |
+| 3 | Service run under its own restrictions | PASS | `systemctl start workfolio-backup.service` (the unit the timer starts: `User=workfolio`, `ProtectSystem=strict`, `ProtectHome`, `PrivateTmp`, `NoNewPrivileges`): Result success, exit 0, 3.1 s. Journal: backup written `workfolio-20261111T080631Z.db.gz.gpg` (integrity ok), "uploaded ... (31827 bytes) to InsightWorkfolio/db-backups", "off-site upload done" |
+| 4 | Encrypted before upload | PASS | first byte 0x8c (OpenPGP); the uploader accepts nothing else (§13 check 3) |
+| 5 | Size and SHA-256, local against remote | PASS | 31827 bytes local, confirmed by OneDrive, and downloaded; SHA-256 identical (`282c9181...c98e35`); OneDrive QuickXorHash matches; `cmp` identical; `list` shows 2 off-site backups |
+| 6 | Restore rehearsal of the downloaded copy | PASS | integrity ok, schema `0028_auto_timelapse`, applied 26, pending 0, "RESTORABLE" |
+| 7 | Monitoring | PASS | monitor run after the test: verdict OK, health ok, "backup unit: last run ok", no storage failures |
+| 8 | Local backups and retention | PASS | three local files now (the two earlier ones unchanged, plus this run's); `BACKUP_KEEP_DAYS=30`; no off-site retention setting; nothing deleted locally or remotely |
+| 9 | Live database | PASS | file identical before and after (size, mtime, SHA-256); readiness 200 |
+| 10 | Secrets | PASS | 0 token, secret or PGP patterns in the journal for the test window; token file and passphrase file 0600 workfolio:workfolio; the journal line for the upload shows the command only |
+| 11 | Screenshots, timelapses, website tracking | PASS (all off) | 0 policy rows, 0 screenshots, 0 timelapses, 0 website policies |
+| 12 | Configuration restored | PASS | upload line removed; `backup.env` byte-identical to the pre-test backup, 0640 root:workfolio; timers unchanged (backup next 2026-11-12 02:32 UTC, without upload) |
+
+Still not tested on production: off-site retention (not configured) and the upload-failure path (automated tests only;
+a failing upload fails the backup unit, which the monitor reports as FAIL to Teams and ntfy). Enabling the nightly
+upload means adding the same line back and needs the owner's separate approval.
