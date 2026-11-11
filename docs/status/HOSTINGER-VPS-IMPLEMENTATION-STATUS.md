@@ -340,3 +340,28 @@ the account's sessions. The account's OneDrive root holds two items besides `Ins
 
 No UptimeRobot message was found in the two mailboxes reachable from the operator's session, the dashboard was not
 visible, and the server log cannot show notification settings. Polling itself is verified (§9).
+
+## 13. Phase 4: controlled off-site encrypted backup test, 2026-11-11 08:01 to 08:03 UTC
+
+Approved by the owner for testing only. The isolation finding of §12 was accepted by the owner as PARTIAL with the
+documented restrictions. Scheduled uploads were **not** enabled; no local backup was deleted or changed.
+
+| # | Check | Result | Evidence |
+|---|---|---|---|
+| 1 | Readiness and OneDrive connectivity | PASS | `/api/v1/ready` 200, database up, storage up, before and after the test |
+| 2 | Dedicated folder | PASS | `backup-upload.js check` created `InsightWorkfolio/db-backups` (exit 0); the app folder contains only `db-backups/` (no screenshot or timelapse folder exists) |
+| 3 | Uploader refuses unencrypted input | PASS | four harmless test files, each `REFUSED`, exit 2, before any contact with OneDrive: a plain file with another name; a plain-text file with a valid backup name; a gzip file with a valid backup name; a missing file. No real database content was used |
+| 4 | Upload of the existing encrypted backup only | PASS | `workfolio-20261111T023808Z.db.gz.gpg` (first byte 0x8c, OpenPGP), "uploaded ... (31402 bytes)", exit 0; `list`: 0 off-site backups before, 1 after |
+| 5 | Size and hash, local against remote | PASS | size 31402 local, 31402 confirmed by OneDrive, 31402 downloaded; SHA-256 of the downloaded bytes equals the local file's (`4cf2d4d0...354da58`); OneDrive's own QuickXorHash equals the locally computed one; `cmp` identical |
+| 6 | Download and integrity | PASS | copy fetched back through the same adapter into a private 0700 test directory, file 0600 |
+| 7 | Restore rehearsal on the downloaded copy | PASS | `verify-backup.sh`: decrypted with the passphrase file, `integrity_check` ok, schema `0028_auto_timelapse`, WAL, 212 pages, users 1, other main tables 0, migrations applied 26, pending 0, "RESTORABLE", exit 0. Live database file identical before and after (size, mtime, SHA-256); no temporary directory left behind |
+| 8 | Local backups and retention | PASS | both local files unchanged (names, sizes, timestamps); `BACKUP_KEEP_DAYS=30`; `backup.env` untouched since 2026-11-10; no `BACKUP_UPLOAD_CMD`; no `ONEDRIVE_BACKUP_KEEP_DAYS`; timers unchanged |
+| 9 | Remote permissions | PASS | the uploaded file is not shared; its only permission is the inherited owner |
+| 10 | Secrets | PASS | 0 token, secret or PGP patterns in the journal for the test window; token file still 0600 workfolio:workfolio; passphrase never left the VPS |
+| 11 | Screenshots, timelapses, website tracking | PASS (all off) | 0 policy rows, 0 screenshots, 0 timelapses, 0 website policies; both website approval flags false |
+| 12 | Upload from inside the hardened backup unit | NOT TESTED | every step above ran as the `workfolio` user from a root console, not under `workfolio-backup.service`'s sandbox; to be proven by one manual run of the unit when scheduled uploads are enabled |
+| 13 | Off-site retention and upload-failure handling | NOT TESTED on production | retention is off (nothing is ever deleted off-site); the failure path is covered by the automated tests only |
+
+State after the test: one encrypted backup is off-site in `InsightWorkfolio/db-backups`; the temporary test directory
+(test files and the downloaded copy) was removed; monitor verdict OK. Enabling the nightly upload needs the owner's
+separate approval.
