@@ -224,3 +224,26 @@ Still open, in order: external uptime monitor on `https://189.72.144.117/api/v1/
 OneDrive (new Entra registration, connect, then off-site backups; screenshots and timelapses only after separate
 approval); first scheduled backup (2026-11-11 02:39 UTC) and first certificate renewal (2026-11-13 ~14:07 UTC) to be
 observed; unit sandbox hardening for the backup and monitor units; domain; merge into `main`.
+
+## 9. Uptime monitor and OneDrive / Entra audit, 2026-11-11 (read-only)
+
+Nothing was changed on the VPS, in Microsoft 365 or in the application. Release still `565ba80`.
+
+| Check | Evidence | Result |
+|---|---|---|
+| External uptime monitor (UptimeRobot) | Caddy access log: user agent `UptimeRobot/2.0`, `GET /api/v1/health`, first request 2026-11-10 09:58 UTC, one request every 5 minutes, 236 requests, 235 × 200 | POLLING VERIFIED. Alert contact not verified (the UptimeRobot dashboard was not visible to the operator) |
+| The one non-200 | 502 at 05:43:51 UTC during an unclean guest restart of the VPS at about 05:43 UTC (journal of the previous boot ends without shutdown messages; hypervisor uptime unchanged; unattended-upgrades auto-reboot is off). UptimeRobot re-checked 15 s later: 200 | Cause of the restart not established (not issued from inside the OS). Recovery: API, dashboard and Caddy active within a few seconds, `PRAGMA quick_check` ok, monitor verdict OK, no failed units |
+| First scheduled backup | `workfolio-20261111T023808Z.db.gz.gpg`, 02:38 UTC, encrypted, integrity ok, mode 0600; the 2026-11-10 file is still there | DONE (observed) |
+| Production OneDrive configuration | `SCREENSHOT_STORAGE=onedrive`; redirect URI, account (`IT@TFFDigital.com`), root folder `InsightWorkfolio`, backup folder `db-backups`, token file path set; token key set (32 bytes); tenant ID, client ID and client secret still placeholders; no token file; `api.env` 0640 root:workfolio, secrets directory 0700; no `BACKUP_UPLOAD_CMD`; `STORAGE_EXPECTED_DOWN=1`; `/ready` 503 by design | NOT CONNECTED, as intended |
+| Screenshots | `screenshot_policies`: 0 rows (the policy defaults to off), `screenshots`: 0 rows. Connecting OneDrive does not enable capture; that takes an admin policy change | OFF |
+| Entra app registrations (portal, signed in as the IT account, view only) | Two live registrations: "TFF Website Mail" (unrelated) and "Insight Workfolio", created 2026-11-03: single tenant, Microsoft Graph **delegated** `Files.ReadWrite`, `offline_access`, `openid`, `profile` only, all granted for the tenant, no application permission, one client secret, **no redirect URI**. Deleted registrations: one older "Insight Workfolio" with a different client ID, deleted 2026-11-03 | The app-only `Sites.Selected` registration that SEC-11 is about no longer exists. The live one is already the delegated registration this mode needs: **use it, do not create a third**. It still needs the Web redirect URI and a client secret known to the VPS |
+
+Corrections to earlier sections: §5, §7 and the readiness report say "a new Entra registration is required". That was
+written from the repository documents; the portal shows the new delegated registration was already created on
+2026-11-03 and the old app deleted the same day. Never restore the deleted registration (SEC-11).
+
+Still unverified: whether Entra accepts the IP-literal redirect URI `https://189.72.144.117/api/v1/storage/onedrive/oauth/callback`
+(Microsoft's redirect-URI page requires https and does not mention public IP addresses); that the IT account has a
+provisioned OneDrive for Business (the adapter refuses anything else); the UptimeRobot alert contact.
+
+Operational note from hPanel: the VPS plan expires 2026-12-05 and auto-renewal is off.
