@@ -2,9 +2,13 @@
 
 ## Mode `SCREENSHOT_STORAGE=onedrive`: the IT storage account's OneDrive (2026-11-03)
 
-**Status: implemented and tested against a FAKE Microsoft only** (`apps/api/test/onedrive.e2e.test.ts`). Not yet
-connected to the real `IT@TFFDigital.com` account: that needs the Microsoft 365 steps below, which wait for
-approval. Report: [status/ONEDRIVE-INTEGRATION-REPORT.md](status/ONEDRIVE-INTEGRATION-REPORT.md).
+**Status: connected in production since 2026-11-11** to the real `IT@TFFDigital.com` account, for the off-site
+database backups only; screenshots and timelapses are still off (no policy enables them). Verified on the real
+account: sign-in, token encryption at rest, refresh-token rotation and persistence, readiness, upload, hash match,
+download and restore rehearsal. One isolation probe (`/me/insights/shared`) answers 200 with an empty list; accepted
+by the owner as PARTIAL with restrictions (keep the account storage-only). Evidence:
+[status/HOSTINGER-VPS-IMPLEMENTATION-STATUS.md](status/HOSTINGER-VPS-IMPLEMENTATION-STATUS.md) §9 to §15. Earlier
+report (fake Microsoft only): [status/ONEDRIVE-INTEGRATION-REPORT.md](status/ONEDRIVE-INTEGRATION-REPORT.md).
 
 - **Auth:** delegated OAuth 2.0 authorization code + PKCE, confidential client (secret on the API only).
   The IT account signs in once; the app gets **`Files.ReadWrite` + `offline_access`** (+ `openid profile`

@@ -389,3 +389,19 @@ configuration only for that run and was removed again afterwards: **the nightly 
 Still not tested on production: off-site retention (not configured) and the upload-failure path (automated tests only;
 a failing upload fails the backup unit, which the monitor reports as FAIL to Teams and ntfy). Enabling the nightly
 upload means adding the same line back and needs the owner's separate approval.
+
+## 15. Nightly off-site upload enabled, 2026-11-11 08:27 UTC
+
+Approved by the owner. One line added to `/etc/workfolio/backup.env` (pre-change copy:
+`/etc/workfolio/backup.env.bak-20261111-pre-upload`, 0600 root:root): the `BACKUP_UPLOAD_CMD` line documented in
+`deploy/env/backup.env.example`, calling the API's own `dist/cli/backup-upload.js upload "$1"`.
+
+Verified: `diff` against the pre-change copy shows only that line; file 0640 root:workfolio; systemd parses the value
+with `"$1"` intact; `BACKUP_KEEP_DAYS=30` unchanged; no `ONEDRIVE_BACKUP_KEEP_DAYS` (nothing is ever deleted off-site);
+both timers enabled, next backup 2026-11-12 02:32 UTC; monitor verdict OK; readiness 200; three local backups
+unchanged; screenshots, timelapses and website tracking still off (0 rows each). No service was restarted and no backup
+was run for this change: the same unit and command were proven in §14.
+
+If an upload fails, the backup run fails, the local backup is kept, and the monitor reports FAIL to Teams and ntfy.
+Roll back by deleting that one line. To observe: the first unattended upload on 2026-11-12 (expect a fourth local file
+and a third off-site file with matching size and SHA-256).
