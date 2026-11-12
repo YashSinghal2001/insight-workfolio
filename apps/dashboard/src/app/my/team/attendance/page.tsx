@@ -5,6 +5,7 @@ import { attendanceTotals, formatDuration, localDate, type AttendanceOverviewRow
 import { DataTable, EmptyState, PageHeader, StatCard, StatGrid, StatusBadge, type Tone } from "@/components/kit";
 import { useApi } from "@/components/my-ui";
 import { formatInZone, inputClass } from "@/components/ui";
+import { LIVE_STATUS } from "../../_components/live-status";
 import { Loaded } from "../../_components/states";
 
 const TZ = Intl.DateTimeFormat().resolvedOptions().timeZone;
@@ -42,7 +43,7 @@ export default function TeamAttendancePage() {
           page.items.length === 0 ? (
             <EmptyState title="Your team has no members yet." />
           ) : (
-            <DataTable label="Live team attendance" head={["Member", "Status", "Clocked in", "Net working time", "Last sync"]} minWidth={720}>
+            <DataTable label="Live team attendance" head={["Member", "Attendance", "Now", "Clocked in", "Net working time", "Last sync"]} minWidth={800}>
               {page.items.map((r) => {
                 const s = r.session;
                 const t = s && attendanceTotals({ start: s.clockInAt, end: s.clockOutAt }, s.breaks.map((b) => ({ start: b.startedAt, end: b.endedAt })), now);
@@ -52,7 +53,11 @@ export default function TeamAttendancePage() {
                       <span className="font-medium">{r.fullName}</span>
                       <div className="font-mono text-xs text-muted">{r.employeeCode}</div>
                     </td>
-                    <td><StatusBadge tone={STATE[r.state].tone}>{STATE[r.state].label}</StatusBadge></td>
+                    <td>
+                      <StatusBadge tone={STATE[r.state].tone}>{STATE[r.state].label}</StatusBadge>
+                      {r.missingClockOut && <div className="mt-1 text-xs text-muted">Forgot to clock out</div>}
+                    </td>
+                    <td><StatusBadge tone={LIVE_STATUS[r.liveStatus].tone}>{LIVE_STATUS[r.liveStatus].label}</StatusBadge></td>
                     <td>{s && r.state !== "CLOCKED_OUT" ? formatInZone(s.clockInAt, r.timezone) : "—"}</td>
                     <td className="tabular-nums">{t ? (r.state === "CLOCKED_OUT" ? <span className="text-muted">Last shift {formatDuration(t.netMs)}</span> : formatDuration(t.netMs)) : "—"}</td>
                     <td>{r.lastEvent ? formatInZone(r.lastEvent.receivedAt, r.timezone) : <span className="text-muted">Never</span>}</td>

@@ -41,9 +41,12 @@ pub struct Sample {
     pub app: Option<App>,
     /// Time since the last keyboard/mouse input; negative = no valid reading.
     pub idle_ms: i64,
-    /// Not observable: screen locked, Mac going to sleep, or this user's session not in front
-    /// (fast user switching, logout). Nothing is attributed, neither ACTIVE nor IDLE.
+    /// Screen locked or secure desktop: IDLE from the lock until unlock, whatever is typed at the
+    /// lock screen (the employee notice counts a locked screen as idle time).
     pub locked: bool,
+    /// Not observable: computer going to sleep, or this user's session not in front (fast user
+    /// switching, logout). Nothing is attributed, neither ACTIVE nor IDLE. Wins over `locked`.
+    pub away: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -87,6 +90,10 @@ pub struct Tracker {
     last: Option<(i64, i64, i64)>,
     /// Start of the current unobserved stretch, until the next observable sample ends it.
     unobserved_from: Option<i64>,
+    /// The screen was locked at the previous sample or lock event: activity resumes at the first
+    /// unlocked sample (the Unlocked event triggers one at once), never at an earlier input such
+    /// as the password, or the input before the lock after a face or fingerprint unlock.
+    was_locked: bool,
     /// Latest stretch that could not be observed (sleep, suspended process, clock change):
     /// (last trustworthy sample, first sample after it), wall-clock ms. Shown to the employee.
     pub last_gap: Option<(i64, i64)>,
@@ -98,7 +105,7 @@ fn new_interval(kind: Kind, app: Option<App>, start_ms: i64, end_ms: i64) -> Int
 
 impl Tracker {
     pub fn new(cfg: Config) -> Self {
-        Tracker { cfg, open: None, held: Vec::new(), last: None, unobserved_from: None, last_gap: None }
+        Tracker { cfg, open: None, held: Vec::new(), last: None, unobserved_from: None, was_locked: false, last_gap: None }
     }
 
     /// Feeds one sample. Returns the intervals it closed (never overlapping, never empty).
@@ -107,9 +114,11 @@ impl Tracker {
         let mut out = Vec::new();
         let mut closed = Vec::new();
         let mut prev_wall = None;
-        // No valid idle reading (not evidence of input), a locked screen or another session in
-        // front: unobserved until the next observable sample. Never counted as idle or active.
-        let observable = s.idle_ms >= 0 && !s.locked;
+        // No valid idle reading (not evidence of input), sleep or another session in front:
+        // unobserved until the next observable sample. Never counted as idle or active.
+        // A locked screen is observed and idle, whatever the idle counter says.
+        let locked = s.locked && !s.away;
+        let observable = !s.away && (locked || s.idle_ms >= 0);
         // An excluded app in front is treated as input now: never idle while it is in front.
         let idle_ms = if idle_excluded(s.app.as_ref(), &self.cfg.idle_excluded_apps) { s.idle_ms.min(0) } else { s.idle_ms };
         if let Some((last_wall, last_mono, _)) = self.last {
@@ -138,6 +147,13 @@ impl Tracker {
             self.last_gap = Some(gap(from));
         }
 
+        // Interval arithmetic never runs backwards: a sample stamped before what is already
+        // recorded (a lock event applied past it, a small clock step) counts as taken at that point.
+        let now = s.wall_ms.max(self.open.as_ref().map_or(i64::MIN, |o| o.end_ms.max(o.start_ms))).max(self.held.last().map_or(i64::MIN, |h| h.end_ms));
+        if locked {
+            return self.locked_sample(out, now);
+        }
+        let was_locked = std::mem::take(&mut self.was_locked);
         let (kind, app) = if idle_ms >= self.cfg.idle_threshold_ms {
             (Kind::Idle, None)
         } else if let Some(app) = &s.app {
@@ -145,7 +161,7 @@ impl Tracker {
         } else {
             // No foreground application (e.g. login window): attribute nothing.
             if let Some(mut open) = self.open.take() {
-                open.end_ms = s.wall_ms;
+                open.end_ms = now;
                 push(&mut closed, open);
             }
             return self.settle(out, closed, last_input);
@@ -162,18 +178,19 @@ impl Tracker {
         match self.open.take() {
             None => {
                 let start = match (kind, floor) {
-                    (Kind::Idle, Some(f)) => last_input.clamp(f, s.wall_ms),
-                    _ => s.wall_ms,
+                    (Kind::Idle, Some(f)) => last_input.clamp(f.min(now), now),
+                    _ => now,
                 };
-                self.open = Some(new_interval(kind, app, start, s.wall_ms));
+                self.open = Some(new_interval(kind, app, start, now));
             }
             Some(mut open) => {
                 let same = open.kind == kind && open.app == app;
-                // Split long intervals only while input is recent, so a later idle transition can
-                // never reach back into an already closed (uploaded) interval.
-                let split = same && s.wall_ms - open.start_ms >= self.cfg.max_interval_ms && idle_ms < self.cfg.sample_ms;
+                // Split long active intervals only while input is recent, so a later idle transition
+                // can never reach back into an already closed (uploaded) interval. Idle is never
+                // cut back, so it splits whenever it is long: a long absence uploads as it goes.
+                let split = same && now - open.start_ms >= self.cfg.max_interval_ms && (kind == Kind::Idle || idle_ms < self.cfg.sample_ms);
                 if same && !split {
-                    open.end_ms = s.wall_ms;
+                    open.end_ms = now;
                     self.open = Some(open);
                 } else {
                     // Idle starts at the last input (retroactively), and ends at the new input (both
@@ -183,15 +200,16 @@ impl Tracker {
                     let boundary = if open.kind != kind {
                         // An excluded app counted as input until it was last seen in front (W22).
                         let lo = if idle_excluded(open.app.as_ref(), &self.cfg.idle_excluded_apps) { open.end_ms } else { floor.unwrap_or(open.start_ms) };
-                        last_input.clamp(lo, s.wall_ms)
+                        // Back from a locked screen: active from this sample, never before the unlock.
+                        if was_locked { now } else { last_input.clamp(lo.min(now), now) }
                     } else if let (false, Some(prev)) = (split, prev_wall) {
-                        ((prev + s.wall_ms) / 2).clamp(open.start_ms, s.wall_ms)
+                        ((prev + now) / 2).clamp(open.start_ms.min(now), now)
                     } else {
-                        s.wall_ms
+                        now
                     };
                     open.end_ms = boundary;
                     push(&mut closed, open);
-                    self.open = Some(new_interval(kind, app, boundary, s.wall_ms));
+                    self.open = Some(new_interval(kind, app, boundary, now));
                 }
             }
         }
@@ -208,9 +226,65 @@ impl Tracker {
         out
     }
 
+    /// A sample with the screen locked: IDLE up to `wall_ms`. A lock first seen here (no lock event)
+    /// happened at an unknown moment since the previous sample: activity ends at that sample, and
+    /// held intervals stand as they are (the idle threshold was not reached before the lock).
+    fn locked_sample(&mut self, mut out: Vec<Interval>, wall_ms: i64) -> Vec<Interval> {
+        self.was_locked = true;
+        out.append(&mut self.held);
+        match self.open.take() {
+            Some(mut open) if open.kind == Kind::Idle => {
+                if wall_ms - open.start_ms >= self.cfg.max_interval_ms {
+                    open.end_ms = wall_ms;
+                    push(&mut out, open);
+                    open = new_interval(Kind::Idle, None, wall_ms, wall_ms);
+                } else {
+                    open.end_ms = wall_ms;
+                }
+                self.open = Some(open);
+            }
+            open => {
+                let start = open.as_ref().map_or(wall_ms, |o| o.end_ms);
+                out.extend(open.filter(|o| o.end_ms > o.start_ms));
+                self.open = Some(new_interval(Kind::Idle, None, start, wall_ms));
+            }
+        }
+        out
+    }
+
+    /// The OS reported a screen lock at `at_ms`: activity ends there (bounded like `interrupt`) and
+    /// IDLE runs from there until unlock. Nothing happens while already unobserved (asleep, another
+    /// user in front): the next locked sample starts the idle interval instead.
+    pub fn lock(&mut self, at_ms: i64) -> Vec<Interval> {
+        let mut out = Vec::new();
+        let Some((last_wall, _, last_input)) = self.last else { return out };
+        if self.unobserved_from.is_some() {
+            return out;
+        }
+        let mut end = at_ms.clamp(last_wall, last_wall + self.cfg.sample_ms);
+        out.append(&mut self.held);
+        match self.open.take() {
+            Some(mut open) if open.kind == Kind::Idle => {
+                open.end_ms = open.end_ms.max(end);
+                self.open = Some(open);
+            }
+            open => {
+                if let Some(mut open) = open {
+                    end = end.min(last_input + self.cfg.idle_threshold_ms).max(open.end_ms);
+                    open.end_ms = end;
+                    push(&mut out, open);
+                }
+                self.open = Some(new_interval(Kind::Idle, None, end, end));
+            }
+        }
+        self.was_locked = true;
+        out
+    }
+
     /// Unobserved time follows: held intervals stand as they are (the threshold was never reached
     /// while observed) and the open one ends at `end_ms`.
     fn release_all(&mut self, out: &mut Vec<Interval>, end_ms: i64) {
+        self.was_locked = false;
         out.append(&mut self.held);
         if let Some(mut open) = self.open.take() {
             open.end_ms = open.end_ms.min(end_ms);
@@ -218,7 +292,7 @@ impl Tracker {
         }
     }
 
-    /// The OS reported a lock, sleep or session switch at `at_ms`: unobserved from then on, without
+    /// The OS reported sleep or a session switch at `at_ms`: unobserved from then on, without
     /// waiting for the next sample. The open interval runs to the transition (at most one sample
     /// period past the last sample, and an active one never past the idle threshold); held ones
     /// stand as they are. The next observable sample starts afresh and reports the gap.
@@ -286,7 +360,13 @@ pub mod platform {
         }
         const ON_SCREEN_ONLY: u32 = 1 << 0;
         const EXCLUDE_DESKTOP_ELEMENTS: u32 = 1 << 4;
-        const COMBINED_SESSION_STATE: i32 = 0;
+        // kCGEventSourceStateHIDSystemState (1): input from hardware devices only. The combined
+        // session state (0) also counts events that applications post (CGEventPost: software mouse
+        // jigglers, automation scripts), which must not look like the employee's own input.
+        // Tradeoff: someone working on this Mac through a remote-desktop tool that injects its input
+        // as posted events reads as idle here, and a hardware jiggler (a real HID device) still passes;
+        // neither can be told apart from this counter.
+        const HID_SYSTEM_STATE: i32 = 1;
         const ANY_INPUT_EVENT: u32 = u32::MAX;
 
         type Dict = NSDictionary<NSString, AnyObject>;
@@ -313,7 +393,7 @@ pub mod platform {
         }
 
         pub fn idle_ms() -> i64 {
-            let secs = unsafe { CGEventSourceSecondsSinceLastEventType(COMBINED_SESSION_STATE, ANY_INPUT_EVENT) };
+            let secs = unsafe { CGEventSourceSecondsSinceLastEventType(HID_SYSTEM_STATE, ANY_INPUT_EVENT) };
             // Invalid readings are negative (unobserved), never 0, which would look like fresh input.
             if secs.is_finite() && secs >= 0.0 { (secs * 1000.0) as i64 } else { -1 }
         }
@@ -380,7 +460,7 @@ mod tests {
     }
     /// A sample at t seconds (wall == monotonic unless shifted).
     fn at(t: i64, a: &str, idle_s: i64) -> Sample {
-        Sample { wall_ms: t * 1000, mono_ms: t * 1000, app: app(a), idle_ms: idle_s * 1000, locked: false }
+        Sample { wall_ms: t * 1000, mono_ms: t * 1000, app: app(a), idle_ms: idle_s * 1000, locked: false, away: false }
     }
     fn run(t: &mut Tracker, samples: &[Sample]) -> Vec<Interval> {
         samples.iter().flat_map(|s| t.sample(s)).collect()
@@ -432,18 +512,50 @@ mod tests {
     }
 
     #[test]
-    fn screen_lock_seen_only_by_polling_is_unobserved_and_unlock_resumes() {
+    fn screen_lock_seen_only_by_polling_is_idle_and_unlock_resumes() {
+        // A locked screen is IDLE: the employee notice says so ("Idle time: no keyboard or mouse
+        // input for the idle threshold, or the screen is locked", packages/shared/src/activity.ts).
         let mut t = tracker();
         let mut locked = at(30, "Code", 10);
         locked.locked = true;
         let mut still = at(45, "Code", 25);
         still.locked = true;
         let closed = run(&mut t, &[at(0, "Code", 0), at(15, "Code", 0), locked, still]);
-        assert_eq!(summary(&closed), vec![(Kind::Active, Some("Code".into()), 0, 15)], "ends at the last observable sample");
-        assert_eq!(t.last_gap, Some((15_000, 45_000)), "shown as not recorded while it lasts");
-        assert!(run(&mut t, &[at(60, "Code", 0)]).is_empty());
+        assert_eq!(summary(&closed), vec![(Kind::Active, Some("Code".into()), 0, 15)], "ends at the last unlocked sample");
+        assert_eq!(t.open.as_ref().map(|o| (o.kind, o.start_ms, o.end_ms)), Some((Kind::Idle, 15_000, 45_000)), "idle well before the 300 s threshold");
+        assert_eq!(t.last_gap, None, "locked is observed (idle), not a gap");
+        let closed = run(&mut t, &[at(60, "Code", 0)]);
+        assert_eq!(summary(&closed), vec![(Kind::Idle, None, 15, 60)]);
         assert_eq!(t.open.as_ref().map(|o| (o.kind, o.start_ms)), Some((Kind::Active, 60_000)));
-        assert_eq!(t.last_gap, Some((15_000, 60_000)), "neither active nor idle while locked");
+    }
+
+    #[test]
+    fn unlocking_without_input_never_makes_the_locked_time_active() {
+        // Face or fingerprint unlock: the idle counter still points before the lock (10 s).
+        let mut t = tracker();
+        run(&mut t, &[at(0, "Code", 0), at(15, "Code", 5)]);
+        let mut closed = t.lock(20_000);
+        closed.extend(run(&mut t, &(30..=120).step_by(15).map(|s| Sample { locked: true, ..at(s, "LockApp", s - 10) }).collect::<Vec<_>>()));
+        closed.extend(run(&mut t, &[at(125, "Code", 115)]));
+        assert_eq!(summary(&closed), vec![(Kind::Active, Some("Code".into()), 0, 20), (Kind::Idle, None, 20, 125)]);
+        assert_eq!(t.open.as_ref().map(|o| (o.kind, o.start_ms)), Some((Kind::Active, 125_000)), "from the first unlocked sample, not the last input");
+    }
+
+    #[test]
+    fn long_idle_and_long_locks_are_split_so_they_upload_as_they_go() {
+        // No input from 0 s for 40 min, input again at 2 400 s.
+        let mut t = tracker();
+        let mut samples: Vec<_> = (0..=2_385).step_by(15).map(|s| at(s, "Code", s)).collect();
+        samples.push(at(2_400, "Code", 0));
+        let closed = run(&mut t, &samples);
+        assert_eq!(summary(&closed), vec![(Kind::Idle, None, 0, 900), (Kind::Idle, None, 900, 1_800), (Kind::Idle, None, 1_800, 2_400)]);
+        // Locked for 31 min from a lock event at 20 s.
+        let mut t = tracker();
+        run(&mut t, &[at(0, "Code", 0), at(15, "Code", 0)]);
+        let mut closed = t.lock(20_000);
+        closed.extend(run(&mut t, &(30..=1_890).step_by(15).map(|s| Sample { locked: true, ..at(s, "LockApp", 0) }).collect::<Vec<_>>()));
+        assert_eq!(summary(&closed), vec![(Kind::Active, Some("Code".into()), 0, 20), (Kind::Idle, None, 20, 930), (Kind::Idle, None, 930, 1_830)]);
+        assert!(closed.windows(2).all(|w| w[1].start_ms == w[0].end_ms));
     }
 
     #[test]
@@ -520,7 +632,8 @@ mod tests {
         }
         samples.push(at(135, "Code", 0));
         let closed = run(&mut t, &samples);
-        assert_eq!(summary(&closed), vec![(Kind::Active, Some("Code".into()), 0, 15)]);
+        // Idle while locked, as the employee notice says; typing at the lock screen changes nothing.
+        assert_eq!(summary(&closed), vec![(Kind::Active, Some("Code".into()), 0, 15), (Kind::Idle, None, 15, 135)]);
         assert!(t.open.as_ref().is_some_and(|o| o.start_ms == 135_000 && o.app == app("Code")), "never loginwindow");
     }
 
@@ -530,14 +643,16 @@ mod tests {
     fn lock_event_closes_at_the_lock_not_the_next_sample_and_unlock_resumes() {
         let mut t = tracker();
         run(&mut t, &[at(0, "Code", 0), at(15, "Code", 0)]);
-        let closed = t.interrupt(22_000); // locked 7 s after the last sample
+        let closed = t.lock(22_000); // locked 7 s after the last sample
         assert_eq!(closed.iter().map(|i| (i.kind, i.start_ms, i.end_ms)).collect::<Vec<_>>(), [(Kind::Active, 0, 22_000)]);
         let mut locked = at(30, "loginwindow", 0); // typing the password: input, but locked
         locked.locked = true;
-        assert!(run(&mut t, &[locked]).is_empty() && t.open.is_none());
-        assert!(run(&mut t, &[at(31, "Code", 0)]).is_empty(), "unlock: sampled right away");
+        assert!(run(&mut t, &[locked]).is_empty());
+        assert_eq!(t.open.as_ref().map(|o| (o.kind, o.start_ms)), Some((Kind::Idle, 22_000)), "idle from the lock (employee notice)");
+        let closed = run(&mut t, &[at(31, "Code", 0)]); // unlock: sampled right away
+        assert_eq!(summary(&closed), vec![(Kind::Idle, None, 22, 31)]);
         assert_eq!(t.open.as_ref().map(|o| (o.kind, o.start_ms)), Some((Kind::Active, 31_000)));
-        assert_eq!(t.last_gap, Some((22_000, 31_000)), "the locked stretch is neither active nor idle");
+        assert_eq!(t.last_gap, None, "the locked stretch is idle, not a gap");
     }
 
     #[test]
@@ -570,8 +685,11 @@ mod tests {
         wake.locked = true;
         let mut unlocked = at(3_650, "Code", 1);
         unlocked.mono_ms = 50_000;
-        assert!(run(&mut t, &[wake, unlocked]).is_empty());
-        assert_eq!(t.last_gap, Some((20_000, 3_650_000)));
+        assert!(t.lock(3_619_000).is_empty(), "a lock event while unobserved (at wake) starts nothing by itself");
+        let closed = run(&mut t, &[wake, unlocked]);
+        // The sleep is unobserved; the locked screen after wake is idle until the unlock.
+        assert_eq!(summary(&closed), vec![(Kind::Idle, None, 3_620, 3_650)]);
+        assert_eq!(t.last_gap, Some((20_000, 3_620_000)));
         assert_eq!(t.open.as_ref().map(|o| o.start_ms), Some(3_650_000));
     }
 
@@ -582,7 +700,7 @@ mod tests {
         let closed = t.interrupt(16_000); // SessionResigned: another user switched in
         assert_eq!(closed[0].end_ms, 16_000);
         // The other user types: the idle counter is fresh, the CGSession is off console.
-        let away: Vec<_> = (30..=600).step_by(15).map(|s| Sample { locked: true, ..at(s, "Safari", 0) }).collect();
+        let away: Vec<_> = (30..=600).step_by(15).map(|s| Sample { away: true, ..at(s, "Safari", 0) }).collect();
         assert!(run(&mut t, &away).is_empty() && t.open.is_none() && t.held.is_empty());
         assert!(run(&mut t, &[at(615, "Code", 2)]).is_empty());
         assert_eq!(t.last_gap, Some((16_000, 615_000)));
@@ -593,13 +711,13 @@ mod tests {
         let mut t = tracker();
         let mut closed = run(&mut t, &[at(0, "Code", 0), at(15, "Code", 0)]);
         for k in 0..20 {
-            closed.extend(t.interrupt(15_000 + k * 100)); // lock … unlock … lock within a second
-            closed.extend(t.interrupt(15_050 + k * 100));
+            closed.extend(t.lock(15_000 + k * 100)); // lock … unlock … lock within a second
+            closed.extend(t.lock(15_050 + k * 100));
         }
         closed.extend(run(&mut t, &[at(18, "Code", 0), at(33, "Code", 0)]));
-        closed.extend(t.interrupt(34_000));
-        closed.extend(t.interrupt(34_000));
-        assert_eq!(summary(&closed), vec![(Kind::Active, Some("Code".into()), 0, 15), (Kind::Active, Some("Code".into()), 18, 34)]);
+        closed.extend(t.lock(34_000));
+        closed.extend(t.lock(34_000));
+        assert_eq!(summary(&closed), vec![(Kind::Active, Some("Code".into()), 0, 15), (Kind::Idle, None, 15, 18), (Kind::Active, Some("Code".into()), 18, 34)]);
         assert!(closed.windows(2).all(|w| w[1].start_ms >= w[0].end_ms));
     }
 
@@ -682,7 +800,7 @@ mod tests {
     fn e_threshold_boundary_with_jitter_splits_exactly_at_the_last_input() {
         for (last, after) in [(299_900, 315_100), (299_999, 300_000)] {
             let mut t = tracker();
-            let s = |ms: i64, app: &str| Sample { wall_ms: ms, mono_ms: ms, app: app_named(app), idle_ms: (ms - 90_000).max(0), locked: false };
+            let s = |ms: i64, app: &str| Sample { wall_ms: ms, mono_ms: ms, app: app_named(app), idle_ms: (ms - 90_000).max(0), locked: false, away: false };
             let mut samples: Vec<_> = (0..=7).map(|i| s(i * 15_000 - 100 * (i % 3), "Code")).collect(); // jittered, input through 90 s
             for ms in (120_000..90_000 + last).step_by(15_000) {
                 samples.push(s(ms, "Code"));
@@ -786,7 +904,7 @@ mod tests {
             } else if rng.next(15) == 0 {
                 front = rng.next(4) as usize; // an app comes to the front by itself
             }
-            let s = |app: usize| Sample { wall_ms: wall, mono_ms: mono, app: app_named(apps[app]), idle_ms: wall - last_input, locked };
+            let s = |app: usize| Sample { wall_ms: wall, mono_ms: mono, app: app_named(apps[app]), idle_ms: wall - last_input, locked, away: false };
             a.extend(with.sample(&s(front)));
             b.extend(without.sample(&s(if wall - last_input < step { front } else { used })));
         }
@@ -837,7 +955,7 @@ mod tests {
             if rng.next(10) < 7 {
                 last_input = wall - rng.next(step as u64) as i64;
             }
-            let s = Sample { wall_ms: wall, mono_ms: mono, app: app_named(apps[app]), idle_ms: wall - last_input, locked };
+            let s = Sample { wall_ms: wall, mono_ms: mono, app: app_named(apps[app]), idle_ms: wall - last_input, locked, away: false };
             closed.extend(t.sample(&s));
         }
         closed.extend(t.stop(wall));
@@ -892,5 +1010,188 @@ mod tests {
         let mut w = run(&mut plain, &samples);
         w.extend(plain.stop(1_500_000));
         assert!(summary(&w).iter().all(|(k, a, _, e)| *k == Kind::Idle || a.as_deref() != Some("Zoom") || *e <= 300));
+    }
+}
+
+
+// ---- QA round 2 adversarial tests (scratch harness; the code above is copied verbatim from activity.rs) ----
+#[cfg(test)]
+#[allow(clippy::collapsible_if)] // QA's tests are kept as written
+mod qa {
+    use super::*;
+    const S: i64 = 15_000; // sample period
+    const TH: i64 = 300_000; // idle threshold
+    fn tracker() -> Tracker { Tracker::new(Config::new(15, 300)) }
+    fn app(n: &str) -> Option<App> { Some(App { id: None, name: n.into() }) }
+    fn smp(wall: i64, mono: i64, a: &str, idle: i64, locked: bool, away: bool) -> Sample {
+        Sample { wall_ms: wall, mono_ms: mono, app: app(a), idle_ms: idle, locked, away }
+    }
+    fn ok(wall: i64, a: &str, idle: i64) -> Sample { smp(wall, wall, a, idle, false, false) }
+    fn lk(wall: i64, idle: i64) -> Sample { smp(wall, wall, "loginwindow", idle, true, false) }
+    fn overlaps(v: &[Interval]) -> Vec<String> {
+        let mut s: Vec<&Interval> = v.iter().collect();
+        s.sort_by_key(|i| (i.start_ms, i.end_ms));
+        let mut bad = Vec::new();
+        for w in s.windows(2) {
+            if w[0].end_ms > w[1].start_ms { bad.push(format!("{:?}[{}..{}] overlaps {:?}[{}..{}]", w[0].kind, w[0].start_ms, w[0].end_ms, w[1].kind, w[1].start_ms, w[1].end_ms)); }
+        }
+        for i in v { if i.end_ms <= i.start_ms { bad.push(format!("empty/negative {:?}[{}..{}]", i.kind, i.start_ms, i.end_ms)); } }
+        bad
+    }
+    fn sum(v: &[Interval], k: Kind, from: i64, to: i64) -> i64 {
+        v.iter().filter(|i| i.kind == k).map(|i| (i.end_ms.min(to) - i.start_ms.max(from)).max(0)).sum()
+    }
+
+    #[test]
+    fn lock_event_and_locked_samples_together_count_the_locked_time_once_as_idle() {
+        let mut t = tracker();
+        let mut out = Vec::new();
+        for k in 0..4 { out.extend(t.sample(&ok(k * S, "Code", 1_000))); }
+        out.extend(t.lock(3 * S + 4_000)); // event
+        out.extend(t.lock(3 * S + 4_000)); // delivered twice
+        for k in 4..44 { out.extend(t.sample(&lk(k * S, if k % 2 == 0 { 500 } else { 9_000 }))); } // typing at the lock screen
+        out.extend(t.lock(20 * S)); // a stale lock event while already locked
+        out.extend(t.sample(&ok(44 * S, "Code", 2_000))); // unlocked, input 2 s ago
+        out.extend(t.sample(&ok(45 * S, "Code", 1_000)));
+        out.extend(t.stop(45 * S));
+        assert_eq!(overlaps(&out), Vec::<String>::new());
+        let (lock, last_locked) = (3 * S + 4_000, 43 * S);
+        assert_eq!(sum(&out, Kind::Active, lock, last_locked), 0, "no ACTIVE while locked: {out:?}");
+        assert_eq!(sum(&out, Kind::Idle, lock, last_locked), last_locked - lock, "locked time is IDLE exactly once");
+        assert_eq!(sum(&out, Kind::Active, 0, i64::MAX) + sum(&out, Kind::Idle, 0, i64::MAX), 45 * S, "every ms attributed once");
+        assert!(out.iter().filter(|i| i.kind == Kind::Idle).all(|i| i.end_ms - i.start_ms <= 15 * 60_000 + S), "idle is split: {out:?}");
+    }
+
+    #[test]
+    fn idle_never_spans_a_sleep_and_nothing_is_attributed_while_away() {
+        let mut t = tracker();
+        let mut out = Vec::new();
+        out.extend(t.sample(&ok(0, "Code", 0)));
+        out.extend(t.sample(&lk(S, 0)));
+        out.extend(t.sample(&lk(2 * S, 0)));
+        // Lid closed with no event: the wall clock jumps an hour, the monotonic clock does not.
+        let wake = 2 * S + 3_600_000;
+        out.extend(t.sample(&smp(wake, 3 * S, "loginwindow", 0, true, false)));
+        out.extend(t.sample(&smp(wake + S, 4 * S, "loginwindow", 0, true, false)));
+        // WillSleep event this time, then wake still locked.
+        out.extend(t.interrupt(wake + S + 2_000));
+        let wake2 = wake + 2 * 3_600_000;
+        out.extend(t.sample(&smp(wake2, 5 * S, "loginwindow", 0, true, true))); // locked AND away: away wins
+        out.extend(t.sample(&smp(wake2 + S, 6 * S, "loginwindow", 0, true, false)));
+        out.extend(t.sample(&smp(wake2 + 2 * S, 7 * S, "Code", 1_000, false, false)));
+        out.extend(t.stop(wake2 + 2 * S));
+        assert_eq!(overlaps(&out), Vec::<String>::new());
+        assert_eq!(sum(&out, Kind::Idle, 2 * S + 1, wake - 1) + sum(&out, Kind::Active, 2 * S + 1, wake - 1), 0, "first sleep: {out:?}");
+        assert_eq!(sum(&out, Kind::Idle, wake + S + 2_001, wake2 + S - 1) + sum(&out, Kind::Active, wake + S + 2_001, wake2 + S - 1), 0, "second sleep and the away sample: {out:?}");
+        assert!(out.iter().all(|i| i.end_ms - i.start_ms < 3_600_000), "{out:?}");
+    }
+
+    #[test]
+    fn the_idle_split_never_lets_a_later_boundary_reach_into_an_emitted_row() {
+        let mut t = tracker();
+        let mut emitted: Vec<Interval> = Vec::new();
+        emitted.extend(t.sample(&ok(0, "Code", 0)));
+        // No input for 50 minutes (threshold 5): idle from t=0, split every 15 minutes, uploaded as it goes.
+        for k in 1..=200 { emitted.extend(t.sample(&ok(k * S, "Code", k * S))); }
+        let snapshot = emitted.clone();
+        assert!(snapshot.iter().filter(|i| i.kind == Kind::Idle).count() >= 3, "{snapshot:?}");
+        // Input resumes; the idle counter (wrongly) claims the last input was long ago inside an emitted row.
+        emitted.extend(t.sample(&ok(201 * S, "Mail", 40 * 60_000)));
+        emitted.extend(t.sample(&ok(202 * S, "Mail", 100)));
+        emitted.extend(t.sample(&ok(203 * S, "Code", 100)));
+        emitted.extend(t.sample(&lk(204 * S, 0)));
+        emitted.extend(t.sample(&ok(205 * S, "Code", 30 * 60_000))); // unlock without input; counter points far back
+        emitted.extend(t.stop(206 * S));
+        assert_eq!(overlaps(&emitted), Vec::<String>::new());
+        assert_eq!(&emitted[..snapshot.len()], &snapshot[..], "rows already emitted are never changed");
+        let last_emitted_end = snapshot.iter().map(|i| i.end_ms).max().unwrap();
+        assert!(emitted[snapshot.len()..].iter().all(|i| i.start_ms >= last_emitted_end), "later rows start after every emitted row: {:?}", &emitted[snapshot.len()..]);
+        assert_eq!(sum(&emitted, Kind::Active, 204 * S, 205 * S), 0, "never active while it was last seen locked");
+    }
+
+    /// Deterministic fuzz: random samples (active / idle / locked / away / invalid idle reading / app
+    /// switches / sleep jumps) and lock / sleep events at random moments. Whatever the order:
+    /// no overlap, no empty row, no row across an unobservable moment, no ACTIVE between two locked samples.
+    #[test]
+    fn fuzz_no_overlap_no_active_while_locked_no_time_across_unobserved() {
+        let mut seed: u64 = 0x5eed_1234_abcd_0001;
+        let mut rnd = move |n: u64| { seed ^= seed << 13; seed ^= seed >> 7; seed ^= seed << 17; seed % n };
+        for round in 0..3_000 {
+            let mut t = tracker();
+            let (mut wall, mut mono) = (1_000_000_i64, 0_i64);
+            let mut out: Vec<Interval> = Vec::new();
+            let mut locked_spans: Vec<(i64, i64)> = Vec::new(); // between consecutive locked samples with no gap
+            let mut dark: Vec<i64> = Vec::new(); // moments that were certainly unobservable
+            let mut prev_locked_at: Option<i64> = None;
+            let mut last_input = wall;
+            for _ in 0..(20 + rnd(120)) {
+                let step = S + rnd(2_000) as i64 - 1_000;
+                match rnd(40) {
+                    0 => { // asleep: wall moves, mono does not
+                        dark.push(wall + step);
+                        wall += 600_000 + rnd(7_200_000) as i64;
+                        prev_locked_at = None;
+                    }
+                    1 => { out.extend(t.lock(wall + rnd(step as u64) as i64)); wall += step; mono += step; }
+                    2 => { let at = wall + rnd(step as u64) as i64; out.extend(t.interrupt(at)); dark.push(at + 1); wall += step; mono += step; prev_locked_at = None; }
+                    _ => { wall += step; mono += step; }
+                }
+                let state = rnd(10);
+                let (locked, away) = (state == 0 || state == 1 || state == 2, state == 3);
+                if rnd(3) > 0 { last_input = wall - rnd(S as u64) as i64; }
+                let idle = if rnd(25) == 0 { -1 } else { wall - last_input };
+                let name = ["Code", "Mail", "Zoom"][rnd(3) as usize];
+                let s = Sample { wall_ms: wall, mono_ms: mono, app: if rnd(15) == 0 { None } else { app(name) }, idle_ms: idle, locked, away };
+                out.extend(t.sample(&s));
+                if away || (!locked && idle < 0) { dark.push(wall); }
+                if locked && !away {
+                    if let Some(p) = prev_locked_at { if wall - p <= S + 1_000 { locked_spans.push((p, wall)); } }
+                    prev_locked_at = Some(wall);
+                } else { prev_locked_at = None; }
+            }
+            out.extend(t.stop(wall + rnd(S as u64) as i64));
+            let bad = overlaps(&out);
+            assert!(bad.is_empty(), "round {round}: {bad:?}");
+            for (a, b) in &locked_spans {
+                assert_eq!(sum(&out, Kind::Active, *a, *b), 0, "round {round}: ACTIVE between locked samples {a}..{b}: {out:?}");
+            }
+            for d in &dark {
+                assert!(out.iter().all(|i| !(i.start_ms < *d && *d < i.end_ms)), "round {round}: a row spans the unobservable moment {d}: {out:?}");
+            }
+            assert!(out.iter().filter(|i| i.kind == Kind::Active).all(|i| i.end_ms - i.start_ms <= 15 * 60_000 + TH + 2 * S), "round {round}: over-long ACTIVE: {out:?}");
+        }
+    }
+
+    /// Residual inaccuracy, bounded by one sample period: input typed at the lock screen after the last
+    /// locked sample (the password) starts ACTIVE before the unlock. The tracker has no `unlock(at)`.
+    #[test]
+    fn password_typed_before_the_unlock_is_not_counted_as_active() {
+        let mut t = tracker();
+        let mut out = Vec::new();
+        out.extend(t.sample(&ok(0, "Code", 0)));
+        out.extend(t.lock(5_000));
+        out.extend(t.sample(&lk(S, 0)));
+        out.extend(t.sample(&lk(2 * S, 0)));
+        // Password typed at 2S+6 s, unlocked at 2S+8 s (the Unlocked event triggers this sample).
+        let unlock = 2 * S + 8_000;
+        out.extend(t.sample(&ok(unlock, "Code", 2_000)));
+        out.extend(t.sample(&ok(unlock + S, "Code", 0)));
+        out.extend(t.stop(unlock + S));
+        assert_eq!(sum(&out, Kind::Active, 5_000, unlock), 0, "ACTIVE while still locked: {out:?}");
+    }
+
+    /// A sample whose timestamp is (slightly) before a lock already applied: must not panic.
+    #[test]
+    fn a_sample_stamped_just_before_an_applied_lock_does_not_panic() {
+        let r = std::panic::catch_unwind(|| {
+            let mut t = tracker();
+            t.sample(&ok(0, "Code", 0));
+            t.sample(&ok(S, "Code", 0));
+            t.lock(S + 10_000); // open IDLE starts at S+10 s
+            t.sample(&ok(S + 4_000, "Code", 0)); // taken 4 s after the last sample, applied after the lock
+            t.sample(&ok(2 * S, "Code", 0));
+            t.stop(2 * S)
+        });
+        assert!(r.is_ok(), "Tracker::sample panicked (i64::clamp with min > max)");
     }
 }

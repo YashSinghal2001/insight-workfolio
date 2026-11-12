@@ -4,7 +4,7 @@ import type { AttendanceCurrent } from "@workfolio/shared";
 import { appNapText, collectorStateText, decideMonitoring, type MonitoringInputs } from "../src/monitoring.ts";
 import { project, type QueuedEvent } from "../src/sync.ts";
 
-const OUT: AttendanceCurrent = { state: "CLOCKED_OUT", session: null, serverTime: "2026-10-12T08:00:00.000Z" };
+const OUT: AttendanceCurrent = { state: "CLOCKED_OUT", session: null, serverTime: "2026-10-12T08:00:00.000Z", missingClockOut: false };
 const ev = (type: QueuedEvent["type"], id = type): QueuedEvent => ({ id, userId: "u", deviceId: "d", type, occurredAt: "2026-10-12T09:00:00.000Z", status: "PENDING" });
 const base: MonitoringInputs = {
   signedIn: true, supported: true, deviceStatus: "ACTIVE", enabled: true, consented: true,
@@ -12,7 +12,7 @@ const base: MonitoringInputs = {
 };
 const mode = (patch: Partial<MonitoringInputs>) => decideMonitoring({ ...base, ...patch }).mode;
 const server = (state: AttendanceCurrent["state"]): AttendanceCurrent => ({
-  state, serverTime: OUT.serverTime,
+  state, serverTime: OUT.serverTime, missingClockOut: false,
   session: state === "CLOCKED_OUT" ? null : { id: "s", clockInAt: "2026-10-12T08:00:00.000Z", clockOutAt: null, status: "OPEN", corrected: false, clockInSource: "ONLINE", breaks: state === "ON_BREAK" ? [{ id: "b", startedAt: "2026-10-12T09:00:00.000Z", endedAt: null }] : [] },
 });
 
@@ -52,7 +52,7 @@ test("employee-facing collector states: locked, asleep, session inactive, idle, 
   const on = { collecting: true, currentApp: { name: "Code" }, idle: false, idleSinceMs: null, locked: false };
   assert.equal(collectorStateText(on, true, clock), "Code");
   assert.equal(collectorStateText(on, false, clock), "—", "nothing shown while not recording");
-  assert.match(collectorStateText({ ...on, locked: true }, true, clock), /^Screen locked\. Nothing is recorded/);
+  assert.match(collectorStateText({ ...on, locked: true }, true, clock), /^Screen locked\. This time counts as idle/);
   assert.match(collectorStateText({ ...on, asleep: true }, true, clock), /^Mac asleep/);
   assert.equal(collectorStateText({ ...on, locked: true, sessionInactive: true }, true, clock), "Session inactive (another user or logged out). Nothing is recorded.");
   assert.equal(collectorStateText({ ...on, idle: true }, true, clock), "Idle since 09:30 (no keyboard or mouse input)");

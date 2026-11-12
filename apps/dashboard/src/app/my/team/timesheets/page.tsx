@@ -50,7 +50,7 @@ export default function TeamTimesheetsPage() {
             <EmptyState title="Your team has no members yet." />
           ) : (
             <DataTable label="Team timesheets" head={["Member", "Shifts", "Worked", "Breaks", "Overtime", "Needs attention"]} minWidth={720}>
-              {page.items.map(({ employee, totals, openShift, pendingCorrections }) => (
+              {page.items.map(({ employee, totals, openShift, missingClockOut, pendingCorrections }) => (
                 <tr key={employee.id}>
                   <td>
                     <span className="font-medium">{employee.fullName}</span>
@@ -61,7 +61,7 @@ export default function TeamTimesheetsPage() {
                   <td className="tabular-nums">{formatDuration(totals.breakMs)}</td>
                   <td className="tabular-nums">{totals.overtimeMs ? formatDuration(totals.overtimeMs) : "—"}</td>
                   <td className="text-xs">
-                    {[openShift && "Shift open now", totals.incompleteDays > 0 && `${totals.incompleteDays} incomplete day(s)`, pendingCorrections > 0 && `${pendingCorrections} pending correction(s)`]
+                    {[openShift && (missingClockOut ? "Forgot to clock out (shift open since an earlier day)" : "Shift open now"), totals.incompleteDays > 0 && `${totals.incompleteDays} incomplete day(s)`, pendingCorrections > 0 && `${pendingCorrections} pending correction(s)`]
                       .filter(Boolean)
                       .join(" · ") || <span className="text-muted">—</span>}
                   </td>

@@ -1,7 +1,8 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { addDays, AUDIT_RANGE_MAX_DAYS, AUDIT_SOURCES, localDate, type AuditEvent, type AuditSource, type Paginated, type RoleUser } from "@workfolio/shared";
+import { addDays, can, AUDIT_RANGE_MAX_DAYS, AUDIT_SOURCES, localDate, type AuditEvent, type AuditSource, type Paginated, type RoleUser } from "@workfolio/shared";
+import { useAuth } from "@/components/auth-provider";
 import { DataTable, EmptyState, ErrorState, PageHeader, Pagination, SkeletonRows } from "@/components/kit";
 import { RangePicker, type Range } from "@/components/range-picker";
 import { Card, Field, formatInZone, inputClass, Notice, secondaryButtonClass } from "@/components/ui";
@@ -24,6 +25,13 @@ const ACTION_LABEL: Record<string, string> = {
   APP_CATEGORY_RULE_ADDED: "Application label added",
   APP_CATEGORY_RULE_CHANGED: "Application label changed",
   APP_CATEGORY_RULE_REMOVED: "Application label removed",
+  SCREENSHOT_DELETED_BY_RETENTION: "Screenshot deleted by scheduled retention",
+  EMPLOYEE_ACTIVITY_SUMMARY_VIEWED: "Employee activity summary viewed",
+  EMPLOYEE_ATTENDANCE_VIEWED: "Employee attendance viewed",
+  EMPLOYEE_ATTENDANCE_EXPORTED: "Employee attendance exported",
+  EMPLOYEE_SCREENSHOTS_VIEWED: "Employee screenshots viewed",
+  EMPLOYEE_ACTIVITY_TIMELINE_VIEWED: "Employee activity timeline viewed",
+  EMPLOYEE_ATTENDANCE_TIMELINE_VIEWED: "Employee attendance timeline viewed",
 };
 const SOURCE_TONE: Record<AuditSource, string> = {
   ACCOUNT: "bg-blue-500/15 text-blue-700 dark:text-blue-300",
@@ -57,9 +65,12 @@ export default function AuditPage() {
   const [retry, setRetry] = useState(0);
   const tz = zone();
 
+  // The account list is /roles/users, which only a Super Admin may read; others get no Actor/Target filter.
+  const { auth } = useAuth();
+  const canListAccounts = auth.status === "authenticated" && can(auth.me.user, "roles:manage");
   useEffect(() => {
-    api<RoleUser[]>("/roles/users").then(setUsers, (e) => (setUsers([]), setUsersError(errorMessage(e))));
-  }, []);
+    if (canListAccounts) api<RoleUser[]>("/roles/users").then(setUsers, (e) => (setUsers([]), setUsersError(errorMessage(e))));
+  }, [canListAccounts]);
 
   useEffect(() => {
     const params = new URLSearchParams({ from: range.from, to: range.to, timeZone: tz, page: String(page), pageSize: String(PAGE_SIZE) });
@@ -88,7 +99,7 @@ export default function AuditPage() {
   const pages = data ? Math.max(1, Math.ceil(data.total / data.pageSize)) : 1;
   const userSelect = (label: string, value: string, onChange: (v: string) => void) => (
     <Field label={label}>
-      <select value={value} className={inputClass} disabled={!!usersError} onChange={(e) => onChange(e.target.value)}>
+      <select value={value} className={inputClass} disabled={!!usersError || !canListAccounts} onChange={(e) => onChange(e.target.value)}>
         <option value="">Anyone</option>
         {users.map((u) => <option key={u.id} value={u.id}>{u.email}</option>)}
       </select>
@@ -112,6 +123,7 @@ export default function AuditPage() {
       <Card title="Filters">
         <div className="flex flex-col gap-4">
           <RangePicker value={range} onChange={filter(setRange)} maxDays={AUDIT_RANGE_MAX_DAYS} timeZone={tz} />
+          {!canListAccounts && <p className="text-xs text-muted">The Actor and Target filters need the account list, which only a Super Admin can read. The other filters work as usual.</p>}
           {usersError && <Notice tone="warning">The account list could not be loaded ({usersError}), so the Actor and Target filters are unavailable.</Notice>}
           <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
             <Field label="Source">
@@ -147,7 +159,7 @@ export default function AuditPage() {
                   {ACTION_LABEL[e.action] && <span className="block">{ACTION_LABEL[e.action]}</span>}
                   <span className="font-mono">{e.action}</span>
                 </td>
-                <td>{e.actor ? e.actor.email : <span className="text-muted">System</span>}</td>
+                <td>{e.actor ? e.actor.email : <span className="text-muted">{e.action === "SCREENSHOT_DELETED_BY_RETENTION" ? "System (retention)" : "System"}</span>}</td>
                 <td>{e.target?.email ?? <span className="text-muted">—</span>}</td>
                 <td className="text-xs">{e.resource ? <>{e.resource.type}{e.resource.id && <span className="block font-mono text-muted break-all">{e.resource.id}</span>}</> : "—"}</td>
                 <td>{e.reason ?? <span className="text-muted">—</span>}</td>

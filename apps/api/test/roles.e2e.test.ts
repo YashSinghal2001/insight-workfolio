@@ -71,7 +71,7 @@ describe("roles", () => {
     }
   });
 
-  test("Super Admin and Admin have exactly the same access; employees get none of it (server-side)", async () => {
+  test("Super Admin and Admin have the same access except the Super Admin-only routes (role management); employees get none of it (server-side)", async () => {
     const [s, a, e] = [await user("SUPER_ADMIN"), await user("ADMIN"), await user("EMPLOYEE")];
     const routes = [
       "/employees", "/roles/users", "/roles/history", "/websites/policy", "/websites/categories", "/websites/audit", "/websites/notifications",
@@ -80,7 +80,9 @@ describe("roles", () => {
     ];
     for (const path of routes) {
       const [rs, ra, re] = [await api(path, { cookie: s.cookie }), await api(path, { cookie: a.cookie }), await api(path, { cookie: e.cookie, headers: { "x-role": "ADMIN", "x-platform-role": "SUPER_ADMIN" } })];
-      assert.equal(rs.status, ra.status, `${path}: Super Admin ${rs.status} vs Admin ${ra.status}`);
+      // SUPER_ADMIN_ONLY (packages/shared/src/roles.ts): an Admin (IT) is refused; everything else is identical.
+      const superOnly = path.startsWith("/roles/");
+      assert.equal(ra.status, superOnly ? 403 : rs.status, `${path}: Super Admin ${rs.status} vs Admin ${ra.status}`);
       assert.ok(rs.status < 400, `${path}: ${rs.status} ${rs.text.slice(0, 80)}`);
       assert.ok(re.status === 403 || (path === "/leave" && re.status === 200), `${path}: employee ${re.status}`);
     }
@@ -91,14 +93,17 @@ describe("roles", () => {
   test("role changes: promotion is immediate and recorded; only a Super Admin manages the Super Admin role; no self-change", async () => {
     const [s, a, e] = [await user("SUPER_ADMIN"), await user("ADMIN"), await user("EMPLOYEE")];
     assert.equal((await api("/employees", { cookie: e.cookie })).status, 403);
-    const up = await change(a, e.id, "ADMIN", "Joined the IT team");
+    assert.equal((await change(a, e.id, "ADMIN", "Joined the IT team")).status, 403, "an Admin (IT) cannot manage roles");
+    assert.equal((await api("/employees", { cookie: e.cookie })).status, 403, "nothing changed");
+    const up = await change(s, e.id, "ADMIN", "Joined the IT team");
     assert.equal(up.status, 200, up.text);
     assert.equal(up.body.platformRole, "ADMIN");
     assert.equal((await api("/employees", { cookie: e.cookie })).status, 200, "the existing session now has admin access (role read from the database)");
     assert.equal((await change(a, e.id, "SUPER_ADMIN")).status, 403, "an Admin cannot grant Super Admin");
     assert.equal((await change(a, s.id, "ADMIN")).status, 403, "an Admin cannot remove a Super Admin");
     assert.equal((await change(s, e.id, "SUPER_ADMIN", "Acting CEO")).status, 200, "a Super Admin can");
-    for (const who of [s, a]) assert.match((await change(who, who.id, "EMPLOYEE")).body.message, /your own role/);
+    assert.match((await change(s, s.id, "EMPLOYEE")).body.message, /your own role/);
+    assert.equal((await change(a, a.id, "EMPLOYEE")).status, 403);
     assert.equal((await change(a, s.id, "EMPLOYEE")).status, 403);
     assert.equal((await change(s, a.id, "EMPLOYEE")).status, 400, "an admin without an employee profile cannot become an employee");
     assert.equal((await change(s, e.id, "SUPER_ADMIN")).status, 400, "already has it");
@@ -110,30 +115,35 @@ describe("roles", () => {
     assert.equal((await change(emp, emp.id, "ADMIN")).status, 403, "employees cannot reach role management");
     assert.equal((await change(emp, e.id, "EMPLOYEE")).status, 403);
     assert.equal((await api(`/employees/${emp.employeeId}`, { method: "PATCH", cookie: s.cookie, body: { role: "ADMIN" } })).status, 400, "no role field on employee updates");
-    const history = (await api("/roles/history", { cookie: a.cookie })).body;
+    assert.equal((await api("/roles/history", { cookie: a.cookie })).status, 403);
+    const history = (await api("/roles/history", { cookie: s.cookie })).body;
     const mine = history.filter((h: { target: { id: string } }) => h.target.id === e.id).map((h: { from: string; to: string; by: { email: string }; reason: string }) => `${h.from}>${h.to} by ${h.by.email}: ${h.reason}`);
-    assert.deepEqual(mine, [`ADMIN>SUPER_ADMIN by ${s.email}: Acting CEO`, `EMPLOYEE>ADMIN by ${a.email}: Joined the IT team`]);
+    assert.deepEqual(mine, [`ADMIN>SUPER_ADMIN by ${s.email}: Acting CEO`, `EMPLOYEE>ADMIN by ${s.email}: Joined the IT team`]);
   });
 
   test("never zero administrators or Super Admins, even when two demote each other at the same moment", async () => {
     await db.execute("UPDATE users SET status = 'DISABLED' WHERE role = 'ADMIN'"); // only the two below are active admins now
     const [a1, a2] = [await user("ADMIN", true), await user("ADMIN", true)];
-    const both = await Promise.all([change(a1, a2.id, "EMPLOYEE"), change(a2, a1.id, "EMPLOYEE")]);
-    // The loser is refused either at sign-in check (already demoted: 403) or by the guard inside the UPDATE (409).
-    assert.equal(both.filter((r) => r.status === 200).length, 1, JSON.stringify(both.map((r) => r.body)));
-    assert.ok(both.some((r) => r.status === 403 || r.status === 409));
-    assert.equal(Number((await db.execute("SELECT count(*) AS n FROM users WHERE role = 'ADMIN' AND status = 'ACTIVE'")).rows[0]!.n), 1);
-    // The in-statement guard itself: an actor authenticated just before being demoted (stale context).
+    // Role management is Super Admin-only: over HTTP two Admins cannot demote anyone.
+    const refused = await Promise.all([change(a1, a2.id, "EMPLOYEE"), change(a2, a1.id, "EMPLOYEE")]);
+    assert.deepEqual(refused.map((r) => r.status), [403, 403]);
+    assert.equal(Number((await db.execute("SELECT count(*) AS n FROM users WHERE role = 'ADMIN' AND status = 'ACTIVE'")).rows[0]!.n), 2);
+    // The in-statement guard itself (in the service, below the route permission): two demotions at the same moment.
     const roles = app.get(RolesService);
-    const [winner, loser] = both[0]!.status === 200 ? [a1, a2] : [a2, a1];
-    await assert.rejects(roles.change({ id: loser.id, email: loser.email, role: "ADMIN", platformRole: "ADMIN", sessionId: "x" }, winner.id, "EMPLOYEE", "stale context"), /last active administrator/);
+    const ctx = (u: typeof a1) => ({ id: u.id, email: u.email, role: "ADMIN" as const, platformRole: "ADMIN" as const, sessionId: "x", client: null });
+    const both = await Promise.allSettled([roles.change(ctx(a1), a2.id, "EMPLOYEE", "same moment"), roles.change(ctx(a2), a1.id, "EMPLOYEE", "same moment")]);
+    assert.equal(both.filter((r) => r.status === "fulfilled").length, 1, JSON.stringify(both));
+    assert.equal(Number((await db.execute("SELECT count(*) AS n FROM users WHERE role = 'ADMIN' AND status = 'ACTIVE'")).rows[0]!.n), 1);
+    // An actor authenticated just before being demoted (stale context).
+    const [winner, loser] = both[0]!.status === "fulfilled" ? [a1, a2] : [a2, a1];
+    await assert.rejects(roles.change(ctx(loser), winner.id, "EMPLOYEE", "stale context"), /last active administrator/);
     await db.execute("UPDATE users SET status = 'DISABLED' WHERE role = 'ADMIN'");
     const [s1, s2] = [await user("SUPER_ADMIN", true), await user("SUPER_ADMIN", true)];
     const supers = await Promise.all([change(s1, s2.id, "ADMIN"), change(s2, s1.id, "ADMIN")]);
     assert.equal(supers.filter((r) => r.status === 200).length, 1, JSON.stringify(supers.map((r) => r.body)));
     assert.equal(Number((await db.execute("SELECT count(*) AS n FROM users WHERE admin_title = 'SUPER_ADMIN' AND role = 'ADMIN' AND status = 'ACTIVE'")).rows[0]!.n), 1);
     const [sw, sl] = supers[0]!.status === 200 ? [s1, s2] : [s2, s1];
-    await assert.rejects(roles.change({ id: sl.id, email: sl.email, role: "ADMIN", platformRole: "SUPER_ADMIN", sessionId: "x" }, sw.id, "ADMIN", "stale context"), /last active Super Admin/);
+    await assert.rejects(roles.change({ id: sl.id, email: sl.email, role: "ADMIN", platformRole: "SUPER_ADMIN", sessionId: "x", client: null }, sw.id, "ADMIN", "stale context"), /last active Super Admin/);
   });
 
   test("disabling accounts: never yourself, never the last administrator", async () => {

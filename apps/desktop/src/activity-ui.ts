@@ -10,11 +10,15 @@ import {
   formatDurationShort as formatDuration,
   todayIn,
   zonedToUtc,
+  type ActivityCurrent,
   type ActivityStatusResponse,
+  type ActivitySyncRequest,
   type ActivitySyncResponse,
   type AttendanceCurrent,
 } from "@workfolio/shared";
+import { liveState, nextReport, reportDue, retryDelayMs, type Reported } from "./live-state.ts";
 import { appNapText, collectorStateText, decideMonitoring, type MonitoringDecision, type MonitoringMode } from "./monitoring.ts";
+import { currentScreenshotReport } from "./screenshot-ui.ts";
 import { HttpError, type ApiClient, type CachedProfile } from "./session.ts";
 import { project, SyncEngine, type QueuedEvent, type SyncPhase } from "./sync.ts";
 
@@ -113,6 +117,43 @@ export function initActivity(ctx: ActivityContext) {
   };
   const policy = () => ({ ...DEFAULT_MONITORING_POLICY, ...status?.policy });
 
+  // ---- Live state (ACTIVE / IDLE / UNOBSERVED) for the dashboards ------------------------
+  let reported: Reported | null = null;
+  let reportFailures = 0;
+  let reportRetryAt = 0;
+  const upload = (body: ActivitySyncRequest) =>
+    ctx.client.request<ActivitySyncResponse>("POST", "/activity/sync", body, { [DEVICE_HEADER]: ctx.state().installationId });
+  /** Null when nothing may be reported: not monitoring, offline, or attendance still waiting to sync (the server needs the clock-in first). */
+  const live = () => {
+    const s = ctx.state();
+    return liveState(collector, decision.mode === "ACTIVE", s.online && !s.queued.some((e) => (e.status ?? "PENDING") === "PENDING"));
+  };
+  /** The live state to attach to an upload going out now; it then counts as reported. */
+  function currentNow(): ActivityCurrent | undefined {
+    const state = live();
+    reported = state && nextReport(reported, state, collector.idleSinceMs, Date.now());
+    return reported ? { state: reported.state, since: new Date(reported.sinceMs).toISOString(), screenshot: currentScreenshotReport() } : undefined;
+  }
+  /** An upload with no intervals when the state changed or the keepalive is due; otherwise no request. */
+  async function reportLive() {
+    const state = live();
+    if (!state) return void (reported = null); // the next report after resuming goes out at once
+    if (!reportDue(reported, state, Date.now()) || Date.now() < reportRetryAt) return;
+    const before = reported;
+    const current = currentNow();
+    const mine = reported;
+    if (!current) return;
+    try {
+      await upload({ sentAt: new Date().toISOString(), platform: ctx.state().platform, intervals: [], current });
+      reportFailures = 0;
+    } catch {
+      // Not sent: due again at the next poll, after the same backoff as the upload queue. Unless an
+      // interval upload carried the state meanwhile (then `reported` is no longer this attempt's).
+      if (reported === mine) reported = before;
+      reportRetryAt = Date.now() + retryDelayMs(++reportFailures);
+    }
+  }
+
   /** Loads policy/consent/totals from the server, or the cached copy when offline. */
   async function loadStatus() {
     const s = ctx.state();
@@ -191,23 +232,19 @@ export function initActivity(ctx: ActivityContext) {
         reject: (id, reason) => call("activity_reject", { id, reason }, undefined),
       },
       ({ sentAt, items }) =>
-        ctx.client.request<ActivitySyncResponse>(
-          "POST",
-          "/activity/sync",
-          {
-            sentAt,
-            platform: ctx.state().platform,
-            intervals: items.map((r) => ({
-              id: r.id,
-              kind: r.kind,
-              applicationIdentifier: r.kind === "ACTIVE" ? r.appId : null,
-              applicationName: r.kind === "ACTIVE" ? r.appName : null,
-              startedAt: new Date(r.startMs).toISOString(),
-              endedAt: new Date(r.endMs).toISOString(),
-            })),
-          },
-          { [DEVICE_HEADER]: ctx.state().installationId },
-        ),
+        upload({
+          sentAt,
+          platform: ctx.state().platform,
+          intervals: items.map((r) => ({
+            id: r.id,
+            kind: r.kind,
+            applicationIdentifier: r.kind === "ACTIVE" ? r.appId : null,
+            applicationName: r.kind === "ACTIVE" ? r.appName : null,
+            startedAt: new Date(r.startMs).toISOString(),
+            endedAt: new Date(r.endMs).toISOString(),
+          })),
+          current: currentNow(),
+        }),
       {
         batchSize: ACTIVITY_BATCH_MAX,
         onStatus: () => render(),
@@ -230,6 +267,7 @@ export function initActivity(ctx: ActivityContext) {
     }
     await apply();
     render();
+    await reportLive();
   }
 
   function render() {
@@ -249,6 +287,9 @@ export function initActivity(ctx: ActivityContext) {
     const nap = decision.mode === "ACTIVE" ? appNapText(collector) : null;
     $("#mon-reason").textContent = nap ? `${decision.reason} ${nap}` : decision.reason;
     $("#mon-app").textContent = collectorStateText(collector, decision.mode === "ACTIVE", clock);
+    // The threshold in force in the collector while recording, otherwise the organization's policy.
+    const idleAfter = (collector.collecting && collector.idleThresholdSeconds) || policy().idleThresholdSeconds;
+    $("#mon-idle-after").textContent = `${idleAfter % 60 ? `${idleAfter} s` : `${idleAfter / 60} min`} without keyboard or mouse input, or as soon as the screen is locked`;
 
     const today = status && status.today.date === todayIn(s.profile!.timezone) ? status.today : { activeMs: 0, idleMs: 0 };
     $("#mon-today-active").textContent = formatDuration(today.activeMs + unsynced.activeMs);
@@ -363,6 +404,7 @@ export function initActivity(ctx: ActivityContext) {
       engine?.stop();
       engine = null;
       engineScope = "";
+      reported = null;
       status = null;
       decision = { mode: "STOPPED", reason: "Signed out. Nothing is recorded.", pendingConfirmation: false };
       collector = await call<CollectorStatus>("activity_configure", { mode: "STOPPED", userId: null, deviceId: null, sampleSeconds: 15, idleThresholdSeconds: 300 }, OFF);

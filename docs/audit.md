@@ -8,12 +8,12 @@ backfilled: an event is shown only if its row exists. Admins (Super Admin and Ad
 
 | Source | Table | Action names | Actor / target | Resource | Details |
 |---|---|---|---|---|---|
-| `ACCOUNT` | `account_audit` (0015) | as stored: `ACCOUNT_CREATED`, `ACCOUNT_UPDATED`, `ACCOUNT_DISABLED`, `ACCOUNT_ENABLED`, `SETUP_LINK_ISSUED`, `PASSWORD_SET`, `SESSION_REVOKED`, `SESSIONS_REVOKED_OTHERS`, `SESSIONS_REVOKED_ALL`, `SESSION_REUSE_DETECTED`, `DEVICE_REGISTERED`, `DEVICE_REVOKED` | `actor_user_id` (null = System) / `target_user_id` | `resource_type`, `resource_id` | `metadata` (sanitized, see below) |
+| `ACCOUNT` | `account_audit` (0015) | as stored: `ACCOUNT_CREATED`, `ACCOUNT_UPDATED`, `ACCOUNT_DISABLED`, `ACCOUNT_ENABLED`, `SETUP_LINK_ISSUED`, `PASSWORD_SET`, `SESSION_REVOKED`, `SESSIONS_REVOKED_OTHERS`, `SESSIONS_REVOKED_ALL`, `SESSION_REUSE_DETECTED`, `DEVICE_REGISTERED`, `DEVICE_REVOKED`; reads of ANOTHER employee's records by an admin or team head (one row per served request, target = that employee's account): `EMPLOYEE_SCREENSHOTS_VIEWED` (list, gallery filtered to one employee, screenshot detail), `EMPLOYEE_ACTIVITY_TIMELINE_VIEWED`, `EMPLOYEE_ACTIVITY_SUMMARY_VIEWED`, `EMPLOYEE_ATTENDANCE_TIMELINE_VIEWED`, `EMPLOYEE_ATTENDANCE_VIEWED` (history, timesheet), `EMPLOYEE_ATTENDANCE_EXPORTED` | `actor_user_id` (null = System) / `target_user_id` | `resource_type`, `resource_id` | `metadata` (sanitized, see below) |
 | `ROLE` | `role_changes` | `ROLE_CHANGED` | `actor_id` (null = bootstrap tool) / `target_user_id` | `USER`, target id | `{from, to}` |
 | `WEBSITE` | `website_audit` | as stored: `RULE_ADDED`, `RULE_CHANGED`, `RULE_REMOVED`, `RETENTION_RUN` | `actor_id` (null = retention scheduler) / none | `WEBSITE_CATEGORY_RULE` + rule id, or `WEBSITE_DATA` | `details` (rule id, domain, match, category; or cutoff, retentionDays, deleted) |
 | `PROJECT` | `project_audit` | as stored: `PROJECT_CREATED`, `PROJECT_UPDATED`, `PROJECT_ARCHIVED`, `PROJECT_RESTORED`, `EMPLOYEE_ASSIGNED`, `EMPLOYEE_UNASSIGNED`, `TASK_CREATED`, `TASK_UPDATED`, `TASK_CLOSED`, `TASK_REOPENED` | `actor_id` / the assigned employee's user (when `details.employeeId` is set) | `PROJECT`, project id | `details` (code, name, status, taskId, title, employeeId...; `description` dropped) |
-| `SCREENSHOT_ACCESS` | `screenshot_access_log` | as stored: `VIEW`, `THUMBNAIL` | viewer / the screenshot's employee's user | `SCREENSHOT`, id | `{screenshotId, employeeId, capturedAt}` |
-| `SCREENSHOT_DELETION` | `screenshots` rows with `deleted_by` set | `SCREENSHOT_DELETED` (at `deleted_at`) | `deleted_by` / the screenshot's employee's user | `SCREENSHOT`, id | `{screenshotId, employeeId, capturedAt}`. Covers `DELETE /screenshots/:id` and retention runs started by an admin (the row cannot tell them apart); scheduled retention (`deleted_by` NULL) is not listed. The delete reason is required by the API but not stored (no column). |
+| `SCREENSHOT_ACCESS` | `screenshot_access_log` | `VIEW` (new rows; `variant=thumbnail` serves the full image and is logged as `VIEW`; older rows may say `THUMBNAIL`) | viewer / the screenshot's employee's user | `SCREENSHOT`, id | `{screenshotId, employeeId, capturedAt}` |
+| `SCREENSHOT_DELETION` | `screenshots` rows with `upload_status = 'DELETED'` | `SCREENSHOT_DELETED` (`deleted_by` set: a Super Admin's delete or a purge a Super Admin started) or `SCREENSHOT_DELETED_BY_RETENTION` (`deleted_by` NULL: the scheduled purge), at `deleted_at` | `deleted_by` (none for the scheduled purge) / the screenshot's employee's user | `SCREENSHOT`, id | `{screenshotId, employeeId, capturedAt}` (`by: SCHEDULED_RETENTION` for the scheduled purge). The reason given to `DELETE /screenshots/:id` is stored (`screenshots.deleted_reason`, migration 0029) and shown as the event's reason; purges have none. |
 | `TIMELAPSE_ACCESS` | `timelapse_access_log` | as stored: `CREATE`, `VIEW`, `DOWNLOAD`, `CANCEL`, `DELETE` | user / the timelapse's employee's user | `TIMELAPSE`, id | `{timelapseId, employeeId, attendanceSessionId}` |
 | `SETTINGS` | `monitoring_policies` | `MONITORING_POLICY_CHANGED` | `changed_by` | `MONITORING_POLICY`, seq | `{version, enabled, sampleSeconds, idleThresholdSeconds, retentionDays, retentionApproved, noticeVersion}` |
 | `SETTINGS` | `screenshot_policies` | `SCREENSHOT_POLICY_CHANGED` | `changed_by` | `SCREENSHOT_POLICY`, seq | `{version, enabled, intervalSeconds, retentionDays, retentionApproved, employeeSelfView, maskCount, blur, noticeVersion}` |
@@ -43,9 +43,12 @@ refuses such keys for account rows.
 
 - Account auditing starts with migration 0015. Earlier account changes (creation, disable,
   password setup, session revocation) were not recorded and are not shown.
-- Screenshot deletions are in `screenshots.deleted_at/deleted_by` (a mutable row, not an event
-  log) and retention runs are in `activity_retention_runs` / `screenshot_retention_runs`; these are
-  not in the view yet (website retention runs are, via `website_audit`).
+- Screenshot deletions are read from `screenshots.deleted_at/deleted_by/deleted_reason` (the row, not an
+  event log). Retention run summaries in `activity_retention_runs` / `screenshot_retention_runs` are not in
+  the view (website retention runs are, via `website_audit`).
+- Not audited: the all-employees screenshot gallery page (each image opened is in `screenshot_access_log`),
+  the organisation overviews (attendance, activity, timesheets), website reports and leave reads.
+- A read is audited only when the reader is not the employee. Own reads are never recorded.
 - Leave decisions, attendance corrections and report schedules keep their own state/history and
   are not in this view.
 
@@ -91,6 +94,7 @@ Deep pages use `OFFSET`, bounded by
 `/audit` in the admin dashboard: date range (default the last 7 days in the viewer's zone), source,
 exact action, actor and target (from `/roles/users`), a table (`aria-label="Audit events"`) with
 time in the viewer's zone, a colored source badge, action, actor (or "System"), target, resource,
-reason and details, and Previous/Next server-side pagination. It has no edit or delete controls.
+reason and details, and Previous/Next server-side pagination. It has no edit or delete controls. The actor and
+target pickers load `/roles/users`, which is Super Admin-only: an Admin (IT) sees the page without those two filters.
 
-Tests: `apps/api/test/audit.e2e.test.ts`.
+Tests: `apps/api/test/audit.e2e.test.ts`, `role-separation-live-status.e2e.test.ts`, `qa-round2-security.e2e.test.ts`, `qa-round3-fixes.e2e.test.ts`.

@@ -41,3 +41,17 @@ export function accountAudit(
     args: [randomUUID(), entry.actorUserId, entry.targetUserId ?? null, entry.action, entry.resourceType, entry.resourceId ?? null, entry.reason ?? null, JSON.stringify(metadata), ...(opts.whenArgs ?? [])],
   };
 }
+
+/**
+ * The audit row for a read of ANOTHER employee's records by an admin or team head; null when the
+ * caller reads their own (not audited). One row per request, naming the employee's account.
+ */
+export function employeeReadAudit(
+  caller: { id: string },
+  employee: { id: string; userId: string },
+  action: Extract<AccountAuditAction, `EMPLOYEE_${string}`>,
+  metadata: Record<string, string | number | null> = {},
+): InStatement | null {
+  if (caller.id === employee.userId) return null;
+  return accountAudit({ actorUserId: caller.id, targetUserId: employee.userId, action, resourceType: "ACCOUNT", resourceId: employee.userId, metadata: { employeeId: employee.id, ...metadata } });
+}

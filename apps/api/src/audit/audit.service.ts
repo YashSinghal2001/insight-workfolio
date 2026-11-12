@@ -38,12 +38,17 @@ const BRANCHES: Record<AuditSource, string[]> = {
      WHERE l.accessed_at >= ? AND l.accessed_at < ?`,
   ],
   // Screenshots deleted by a person (deleted_by set): admin deletes and admin-triggered retention runs alike
-  // (the row cannot tell them apart). Scheduled retention (deleted_by NULL) is not listed. No reason column.
+  // (only the former has a reason).
   SCREENSHOT_DELETION: [
-    `SELECT 'SCREENSHOT_DELETION', s.id, s.deleted_at, 'SCREENSHOT_DELETED', s.deleted_by, p.user_id, 'SCREENSHOT', s.id, NULL,
+    `SELECT 'SCREENSHOT_DELETION', s.id, s.deleted_at, 'SCREENSHOT_DELETED', s.deleted_by, p.user_id, 'SCREENSHOT', s.id, s.deleted_reason,
        json_object('screenshotId', s.id, 'employeeId', p.id, 'capturedAt', s.captured_at)
      FROM screenshots s JOIN employee_profiles p ON p.id = s.employee_id
      WHERE s.upload_status = 'DELETED' AND s.deleted_by IS NOT NULL AND s.deleted_at >= ? AND s.deleted_at < ?`,
+    // The scheduled purge (deleted_by NULL): no person acted, so no actor; its own action name says who did.
+    `SELECT 'SCREENSHOT_DELETION', s.id, s.deleted_at, 'SCREENSHOT_DELETED_BY_RETENTION', NULL, p.user_id, 'SCREENSHOT', s.id, NULL,
+       json_object('screenshotId', s.id, 'employeeId', p.id, 'capturedAt', s.captured_at, 'by', 'SCHEDULED_RETENTION')
+     FROM screenshots s JOIN employee_profiles p ON p.id = s.employee_id
+     WHERE s.upload_status = 'DELETED' AND s.deleted_by IS NULL AND s.deleted_at >= ? AND s.deleted_at < ?`,
   ],
   TIMELAPSE_ACCESS: [
     `SELECT 'TIMELAPSE_ACCESS', l.id, l.accessed_at, l.action, l.user_id, p.user_id, 'TIMELAPSE', t.id, NULL,

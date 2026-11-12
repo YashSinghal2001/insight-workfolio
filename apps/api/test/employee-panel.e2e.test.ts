@@ -329,7 +329,8 @@ describe("employee web panel: admin-only routes", () => {
     for (const cookie of [admin, superAdmin]) {
       for (const [method, path] of ADMIN_ROUTES()) {
         const r = await api(path, { method, cookie });
-        assert.equal(r.status, 200, `${method} ${path}: ${r.text.slice(0, 120)}`);
+        // Role management is Super Admin-only (SUPER_ADMIN_ONLY); every other admin route is shared.
+        assert.equal(r.status, path.startsWith("/roles/") && cookie === admin ? 403 : 200, `${method} ${path}: ${r.text.slice(0, 120)}`);
       }
       assert.equal((await api(`/screenshots/${bShot}`, { cookie })).status, 200);
       assert.equal((await api(`/activity/summary?${RANGE}&employeeId=${b.id}`, { cookie })).status, 200);

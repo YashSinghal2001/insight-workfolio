@@ -21,7 +21,7 @@ function Row({ label, children }: { label: string; children: React.ReactNode }) 
   );
 }
 
-function NoticeStatus({ label, version, draft, acknowledgedAt, enabled, tz, where, todo }: { label: string; version: string; draft?: boolean; acknowledgedAt: string | null; enabled: boolean; tz: string; where: React.ReactNode; todo: React.ReactNode }) {
+function NoticeStatus({ label, version, draft, text, acknowledgedAt, enabled, tz, where, todo }: { label: string; version: string; draft?: boolean; text?: { title: string; points: string[] } | null; acknowledgedAt: string | null; enabled: boolean; tz: string; where: React.ReactNode; todo: React.ReactNode }) {
   return (
     <div className="flex flex-col gap-1 border-b border-border py-3 last:border-0">
       <div className="flex flex-wrap items-center gap-2">
@@ -33,6 +33,12 @@ function NoticeStatus({ label, version, draft, acknowledgedAt, enabled, tz, wher
         Notice {version}{draft ? " (draft)" : ""}{acknowledgedAt ? ` · acknowledged ${formatInZone(acknowledgedAt, tz)}` : ""} · {where}
       </p>
       {enabled && !acknowledgedAt && <p className="text-xs">{todo}</p>}
+      {text && (
+        <details className="text-xs">
+          <summary className="cursor-pointer font-medium text-brand">Read the notice: {text.title}</summary>
+          <ul className="mt-1 list-disc pl-5">{text.points.map((p) => <li key={p}>{p}</li>)}</ul>
+        </details>
+      )}
     </div>
   );
 }
@@ -103,10 +109,10 @@ export default function MyProfilePage() {
       <Card title="Monitoring notices">
         <div className="flex flex-col text-sm">
           <Loaded load={activity.load} reload={activity.reload} label="the activity notice">
-            {(a) => <NoticeStatus label="Activity" version={a.consent.noticeVersion} draft={a.notice.draft} acknowledgedAt={a.consent.acknowledgedAt} enabled={a.policy.enabled} tz={tz} where={desktop} todo={inDesktop} />}
+            {(a) => <NoticeStatus label="Activity" version={a.consent.noticeVersion} draft={a.notice.draft} text={a.notice} acknowledgedAt={a.consent.acknowledgedAt} enabled={a.policy.enabled} tz={tz} where={desktop} todo={inDesktop} />}
           </Loaded>
           <Loaded load={screenshots.load} reload={screenshots.reload} label="the screenshot notice">
-            {(s) => <NoticeStatus label="Screenshots" version={s.consent.noticeVersion} draft={s.notice.draft} acknowledgedAt={s.consent.acknowledgedAt} enabled={s.policy.enabled} tz={tz} where={desktop} todo={inDesktop} />}
+            {(s) => <NoticeStatus label="Screenshots" version={s.consent.noticeVersion} draft={s.notice.draft} text={s.notice} acknowledgedAt={s.consent.acknowledgedAt} enabled={s.policy.enabled} tz={tz} where={desktop} todo={inDesktop} />}
           </Loaded>
           <Loaded load={websites.load} reload={websites.reload} label="the website notice">
             {(w) => (
@@ -114,6 +120,7 @@ export default function MyProfilePage() {
                 label="Websites"
                 version={w.policy.noticeVersion}
                 draft={w.notice?.draft}
+                text={w.notice}
                 acknowledgedAt={w.acknowledgedAt}
                 enabled={w.policy.enabled}
                 tz={tz}

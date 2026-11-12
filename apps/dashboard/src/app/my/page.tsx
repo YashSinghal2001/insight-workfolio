@@ -7,6 +7,7 @@ import {
   attendanceTotals,
   formatDuration,
   todayIn,
+  type ActivityStatusResponse,
   type CategorizedActivitySummary,
   type AttendanceCurrent,
   type LeaveRequest,
@@ -19,11 +20,12 @@ import {
   type WebsiteUsageResponse,
 } from "@workfolio/shared";
 import { apiBlob } from "@/lib/api";
-import { Card } from "@/components/ui";
+import { Card, Notice } from "@/components/ui";
 import { EmptyState, PageHeader, StatCard } from "@/components/kit";
 import { UpdatedAt, dayLabel, timeIn, useApi, useMe } from "@/components/my-ui";
 import { CategoryTotals } from "./_components/categories";
 import { DesktopDownloads } from "./_components/desktop-downloads";
+import { LiveStatusLine } from "./_components/live-status";
 import { Loaded } from "./_components/states";
 
 const STATE_LABEL: Record<AttendanceCurrent["state"], string> = { CLOCKED_IN: "Clocked in", ON_BREAK: "On a break", CLOCKED_OUT: "Clocked out" };
@@ -35,6 +37,7 @@ export default function MyDashboard() {
   const today = todayIn(me.timezone);
   const day = `from=${today}&to=${today}`;
   const current = useApi<AttendanceCurrent>("/attendance/current");
+  const status = useApi<ActivityStatusResponse>("/activity/me");
   const sheet = useApi<TimesheetResponse>(`/attendance/timesheet?${day}`);
   const activity = useApi<CategorizedActivitySummary>(`/activity/summary?${day}`);
   const websites = useApi<WebsiteUsageResponse>(`/websites/me/usage?${day}`);
@@ -47,9 +50,20 @@ export default function MyDashboard() {
     <>
       <PageHeader
         title="My dashboard"
-        description={`Welcome, ${me.fullName}. ${dayLabel(today)} (${me.timezone}). Records come from the desktop app; nothing here can change them.`}
+        description={`Welcome, ${me.fullName}. ${dayLabel(today)} (${me.timezone}). You clock in and out in the desktop app; records come from it and nothing here can change them.`}
         actions={current.load.state === "ready" ? <UpdatedAt at={current.load.at} /> : undefined}
       />
+
+      <section aria-label="Status now" className="mb-4 flex flex-col gap-2">
+        <Loaded load={status.load} reload={status.reload} label="your status" rows={1}>
+          {(s) => <LiveStatusLine status={s} tz={me.timezone} />}
+        </Loaded>
+        {current.load.state === "ready" && current.load.data.missingClockOut && (
+          <Notice tone="warning">
+            Your shift from an earlier day is still open: it looks like you forgot to clock out. <Link href="/my/attendance#request-correction" className="underline">Request a correction</Link> to add the clock-out time.
+          </Notice>
+        )}
+      </section>
 
       <section aria-label="Today" className="mb-6 grid grid-cols-2 gap-3 md:grid-cols-4">
         <Loaded load={current.load} reload={current.reload} label="attendance">

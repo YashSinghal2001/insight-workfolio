@@ -1,6 +1,8 @@
 "use client";
 
+import { can } from "@workfolio/shared";
 import { ShellNav, type NavProps, type NavSection } from "@/components/app-shell";
+import { useAuth } from "@/components/auth-provider";
 
 /** Admin navigation, grouped. Labels and hrefs are asserted by browser suites (`nav a` text). */
 export const ADMIN_NAV: readonly NavSection[] = [
@@ -40,5 +42,9 @@ export const ADMIN_NAV: readonly NavSection[] = [
 
 /** The admin sidebar (`nav#admin-nav[aria-label="Main"]`). Without props it is the desktop sidebar only. */
 export function Sidebar(props: NavProps = {}) {
-  return <ShellNav id="admin-nav" label="Main" title="Admin" sections={ADMIN_NAV} root="/" {...props} />;
+  const { auth } = useAuth();
+  // Roles is Super Admin only (the API refuses everyone else); do not offer the link.
+  const roles = auth.status === "authenticated" && can(auth.me.user, "roles:manage");
+  const sections = roles ? ADMIN_NAV : ADMIN_NAV.map((s) => ({ ...s, items: s.items.filter((i) => i.href !== "/roles") }));
+  return <ShellNav id="admin-nav" label="Main" title="Admin" sections={sections} root="/" {...props} />;
 }

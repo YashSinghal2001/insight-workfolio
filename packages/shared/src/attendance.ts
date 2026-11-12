@@ -1,4 +1,5 @@
 import { z } from "zod";
+import type { AttendanceSession, Paginated } from "./api.js";
 
 // ---- State machine ----------------------------------------------------------
 // Single source of truth for the API (authoritative) and the desktop (offline preview).
@@ -153,4 +154,88 @@ export interface AttendanceSummary {
   /** STORED screenshots captured in the day (any storage provider, any employee). */
   screenshotsStoredToday: number;
   generatedAt: string;
+}
+
+// ---- Live status ------------------------------------------------------------
+// What an employee is doing right now. Attendance (clock-in/out, breaks) is authoritative and comes
+// from stored records; ACTIVE/IDLE is the desktop's last report (POST /activity/sync `current`) and is
+// only believed while it is fresh. Input never implies clocked in.
+
+/** What the desktop reports about now. UNOBSERVED: it cannot tell (monitoring paused, screen locked state unknown, …). */
+export const DEVICE_ACTIVITY_STATES = ["ACTIVE", "IDLE", "UNOBSERVED"] as const;
+export type DeviceActivityState = (typeof DEVICE_ACTIVITY_STATES)[number];
+
+export const LIVE_STATUSES = ["NOT_CLOCKED_IN", "ON_BREAK", "ACTIVE", "IDLE", "UNKNOWN"] as const;
+export type LiveStatus = (typeof LIVE_STATUSES)[number];
+
+/** A device report older than this is not believed (the desktop reports every minute while running). */
+export const LIVE_STATUS_STALE_MS = 3 * 60_000;
+
+export interface DeviceActivityReport {
+  state: DeviceActivityState;
+  /** Since when the device has been in that state (server clock, skew-corrected). */
+  since: string;
+  /** When the server received the report (server clock). */
+  reportedAt: string;
+}
+
+export interface LiveStatusInfo {
+  liveStatus: LiveStatus;
+  /** Since when: the clock-out, the break start, or the start of the active/idle stretch. Null when UNKNOWN or never clocked in. */
+  liveSince: string | null;
+}
+
+/**
+ * The employee's status now, from their latest attendance session and their device's last report.
+ * Attendance wins: not clocked in or on a break whatever the device says. Clocked in: the report, if it
+ * was received during this session and within LIVE_STATUS_STALE_MS; otherwise UNKNOWN (never guessed).
+ */
+export function deriveLiveStatus(
+  session: Pick<AttendanceSession, "clockInAt" | "clockOutAt" | "breaks"> | null,
+  report: DeviceActivityReport | null,
+  now = Date.now(),
+): LiveStatusInfo {
+  if (!session || session.clockOutAt) return { liveStatus: "NOT_CLOCKED_IN", liveSince: session?.clockOutAt ?? null };
+  const openBreak = session.breaks.find((b) => !b.endedAt);
+  if (openBreak) return { liveStatus: "ON_BREAK", liveSince: openBreak.startedAt };
+  // The current working stretch started at clock-in or when the last break ended.
+  const stretch = Math.max(Date.parse(session.clockInAt), ...session.breaks.map((b) => Date.parse(b.endedAt!)));
+  const reportedAt = report ? Date.parse(report.reportedAt) : NaN;
+  if (!report || report.state === "UNOBSERVED" || !(reportedAt >= stretch) || now - reportedAt > LIVE_STATUS_STALE_MS) {
+    return { liveStatus: "UNKNOWN", liveSince: null };
+  }
+  return { liveStatus: report.state, liveSince: new Date(Math.max(stretch, Date.parse(report.since))).toISOString() };
+}
+
+// ---- Timeline -----------------------------------------------------------------
+
+/** One local day (employee's time zone; omitted = their today) and, for admins and team heads, an employee. */
+export const attendanceTimelineQuerySchema = z.strictObject({
+  date: z.iso.date().optional(),
+  employeeId: z.uuid().optional(),
+  page: z.coerce.number().int().min(1).max(10_000).default(1),
+  pageSize: z.coerce.number().int().min(1).max(200).default(100),
+});
+export type AttendanceTimelineQuery = z.infer<typeof attendanceTimelineQuerySchema>;
+
+export const ATTENDANCE_TIMELINE_TYPES = ["CLOCK_IN", "CLOCK_OUT", "BREAK", "ACTIVE", "IDLE"] as const;
+export type AttendanceTimelineType = (typeof ATTENDANCE_TIMELINE_TYPES)[number];
+
+/** A stored record, never a computed gap. CLOCK_IN/CLOCK_OUT are instants (endAt null); a running break has endAt null. */
+export interface AttendanceTimelineItem {
+  /** `${type}:${record id}`: unique within the timeline. */
+  id: string;
+  type: AttendanceTimelineType;
+  at: string;
+  endAt: string | null;
+  /** ACTIVE only: the foreground application. */
+  applicationName: string | null;
+}
+
+/** GET /attendance/timeline: chronological; periods that started before the day but reach into it are included. */
+export interface AttendanceTimelineResponse extends Paginated<AttendanceTimelineItem> {
+  employee: { id: string; fullName: string; employeeCode: string };
+  date: string;
+  /** The employee's IANA zone: the day's bounds, and what times should be shown in. */
+  timezone: string;
 }

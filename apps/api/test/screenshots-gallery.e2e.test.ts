@@ -127,7 +127,7 @@ before(async () => {
   base = (await app.getUrl()).replace("[::1]", "localhost");
   db = app.get(DATABASE);
   adminId = randomUUID();
-  await db.execute({ sql: "INSERT INTO users (id, email, role, password_hash) VALUES (?, 'admin@example.com', 'ADMIN', ?)", args: [adminId, await hashPassword(PASSWORD)] });
+  await db.execute({ sql: "INSERT INTO users (id, email, role, admin_title, password_hash) VALUES (?, 'admin@example.com', 'ADMIN', 'SUPER_ADMIN', ?)", args: [adminId, await hashPassword(PASSWORD)] });
   const r = await api("/auth/login", { method: "POST", body: { email: "admin@example.com", password: PASSWORD } });
   admin = r.res.headers.getSetCookie().map((c) => c.split(";")[0]).join("; ");
   await backdatedPolicy(db);
@@ -213,7 +213,7 @@ describe("screenshot authorization and delivery", () => {
     const detail = await api(`/screenshots/${id}`, { cookie: admin });
     assert.deepEqual(
       detail.body.accessLog.map((l: { action: string; viewer: { id: string } }) => [l.action, l.viewer.id === adminId]).sort(),
-      [["THUMBNAIL", true], ["VIEW", false], ["VIEW", true]],
+      [["VIEW", false], ["VIEW", true], ["VIEW", true]], // variant=thumbnail serves the full image and is logged as such
       "viewer, action and time recorded for each successful access; refused attempts are not",
     );
     assert.ok(detail.body.accessLog.every((l: { accessedAt: string }) => !Number.isNaN(Date.parse(l.accessedAt))));

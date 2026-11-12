@@ -25,6 +25,7 @@ import {
   zonedToUtc,
   type AttendancePolicy,
   type AuthUser,
+  screenshotFeatureState,
   type EmployeeRef,
   type Paginated,
   SCREENSHOT_LIMITS,
@@ -45,7 +46,8 @@ import {
   type ScreenshotUploadStatus,
   sameMasks,
 } from "@workfolio/shared";
-import { clockedInSegments, iso, str } from "../attendance/sessions.js";
+import { clockedInSegments, iso, screenshotReport, str } from "../attendance/sessions.js";
+import { employeeReadAudit } from "../audit/account-audit.js";
 import { RateLimiter } from "../auth/crypto.js";
 import type { AuthContext } from "../auth/auth.service.js";
 import { EmployeeLocks } from "../common/employee-locks.js";
@@ -142,21 +144,24 @@ export class ScreenshotsService implements OnModuleInit, OnModuleDestroy {
   async status(employee: EmployeeRef): Promise<ScreenshotStatusResponse> {
     const [s, overrides, selfView] = await Promise.all([this.settings.current(), this.settings.blurOverrides(employee.id), this.monitoring.screenshotSelfView(employee.id)]);
     const blur = overrides.at(-1)?.blur ?? s.blur; // overrides take effect when recorded (never in the future)
-    const [notice, [consent, last]] = await Promise.all([
+    const [notice, [consent, last, device]] = await Promise.all([
       this.monitoring.notice(s.noticeVersion),
       this.db.batch(
         [
           { sql: "SELECT acknowledged_at FROM monitoring_consents WHERE employee_id = ? AND notice_version = ?", args: [employee.id, s.noticeVersion] },
           { sql: "SELECT max(stored_at) AS at FROM screenshots WHERE employee_id = ?", args: [employee.id] },
+          { sql: "SELECT screenshot_state, screenshot_state_at FROM devices WHERE employee_id = ? AND revoked_at IS NULL", args: [employee.id] },
         ],
         "read",
       ),
     ]);
+    const acknowledgedAt = str(consent!.rows[0]?.acknowledged_at);
     return {
+      state: screenshotFeatureState({ enabled: s.enabled, consented: !!acknowledgedAt, report: screenshotReport(device!.rows[0]) }),
       policy: { enabled: s.enabled, intervalSeconds: s.intervalSeconds, webpQuality: s.webpQuality, maxDimension: s.maxDimension, captureScope: s.captureScope, maskRegions: s.maskRegions, blur },
       retentionDays: s.retentionDays,
       notice,
-      consent: { noticeVersion: s.noticeVersion, acknowledgedAt: str(consent!.rows[0]?.acknowledged_at) },
+      consent: { noticeVersion: s.noticeVersion, acknowledgedAt },
       lastStoredAt: str(last!.rows[0]?.at),
       storageProvider: this.storage.provider,
       employeeSelfView: selfView ?? s.employeeSelfView, // F08: the per-person override wins
@@ -295,6 +300,7 @@ export class ScreenshotsService implements OnModuleInit, OnModuleDestroy {
   /** The caller's (or, for admins, any employee's) screenshot metadata. Employees only if self-view is allowed. */
   async list(caller: AuthContext, employee: EmployeeRef & { userId: string }, q: ScreenshotQuery): Promise<Paginated<ScreenshotItem>> {
     await this.assertSelfView(caller, employee.userId, employee.id);
+    await this.auditRead(caller, employee, { from: q.from ?? null, to: q.to ?? null });
     const today = todayIn(employee.timezone);
     const from = zonedToUtc(`${q.from ?? addDays(today, -30)}T00:00`, employee.timezone);
     const to = zonedToUtc(`${addDays(q.to ?? today, 1)}T00:00`, employee.timezone);
@@ -312,6 +318,13 @@ export class ScreenshotsService implements OnModuleInit, OnModuleDestroy {
   /** Admin gallery: newest first, all employees or one, dates in the viewer's time zone. Metadata only. */
   async gallery(q: ScreenshotGalleryQuery, caller: AuthContext): Promise<Paginated<ScreenshotGalleryItem>> {
     const { where, args } = this.galleryFilter(q, caller);
+    // ponytail: only a gallery filtered to one employee is audited here. The all-employees page is not (a row
+    // per page per employee would drown the audit); each image actually opened is logged in screenshot_access_log.
+    if (q.employeeId) {
+      const scope = scopeSql(caller, "screenshots:read", "p.id");
+      const { rows } = await this.db.execute({ sql: `SELECT p.id, p.user_id FROM employee_profiles p WHERE p.id = ?${scope.sql}`, args: [q.employeeId, ...scope.args] });
+      if (rows[0]) await this.auditRead(caller, { id: String(rows[0].id), userId: String(rows[0].user_id) }, { from: q.from, to: q.to });
+    }
     const [rows, count] = await this.db.batch(
       [
         {
@@ -329,6 +342,7 @@ export class ScreenshotsService implements OnModuleInit, OnModuleDestroy {
   /** Real server-side counts for the gallery header (same filters). */
   async overview(q: ScreenshotGalleryQuery, caller: AuthContext): Promise<ScreenshotOverview> {
     const { where, args } = this.galleryFilter(q, caller);
+    // Retention status is organisation-wide (counts, who ran purges): not for team heads.
     const [{ rows }, retention] = await Promise.all([
       this.db.execute({
         sql: `SELECT count(*) AS total,
@@ -340,18 +354,19 @@ export class ScreenshotsService implements OnModuleInit, OnModuleDestroy {
               FROM screenshots s WHERE ${where}`,
         args: [iso(Date.now() - STALLED_MS), ...args],
       }),
-      this.retentionPreview(),
+      hasPermission(caller.role, "settings:manage") ? this.retentionPreview() : undefined,
     ]);
     const r = rows[0]!;
     return {
       total: Number(r.total), stored: Number(r.stored), awaitingUpload: Number(r.awaiting), stalled: Number(r.stalled), deleted: Number(r.deleted),
-      latestCapturedAt: str(r.latest_captured), latestStoredAt: str(r.latest_stored), retention,
+      latestCapturedAt: str(r.latest_captured), latestStoredAt: str(r.latest_stored), ...(retention && { retention }),
     };
   }
 
   /** One screenshot's metadata: admins (with its access log) or the owner when self-view is allowed. */
   async detail(caller: AuthContext, id: string): Promise<ScreenshotDetail> {
     const r = await this.readable(caller, id);
+    await this.auditRead(caller, { id: String(r.employee_id), userId: String(r.user_id) }, { screenshotId: id });
     const base = toGalleryItem(r);
     const inForce = ScreenshotSettingsService.at(await this.settings.periods(), Date.parse(base.capturedAt)).maskRegions;
     const item: ScreenshotDetail = { ...base, masks: inForce.length === base.maskCount ? inForce : null };
@@ -379,7 +394,9 @@ export class ScreenshotsService implements OnModuleInit, OnModuleDestroy {
     if (r.storage_provider !== this.storage.provider) {
       throw new ConflictException(`This screenshot is stored with ${String(r.storage_provider)}, not the storage this server uses (${this.storage.provider})`);
     }
-    const action = variant === "thumbnail" ? "THUMBNAIL" : "VIEW";
+    // No resized variant exists: `variant=thumbnail` serves the full image, so it is logged as what it is.
+    void variant;
+    const action = "VIEW";
     await this.db.execute({ sql: "INSERT INTO screenshot_access_log (id, screenshot_id, user_id, action) VALUES (?, ?, ?, ?)", args: [randomUUID(), id, caller.id, action] });
     this.logger.log({ userId: caller.id, screenshotId: id, action }, "Screenshot accessed");
     let bytes: Uint8Array;
@@ -405,8 +422,8 @@ export class ScreenshotsService implements OnModuleInit, OnModuleDestroy {
    * failure leaves the row unchanged (502). A row stored with another provider is refused (409),
    * never marked DELETED while its file still exists elsewhere. Already deleted: 200, unchanged.
    * Timelapses that may contain it are expired by the timelapse sweep, run right after.
-   * The reason is required but NOT stored: there is no column for it (only its length is logged,
-   * since free text may contain personal data).
+   * The reason is stored with the row (deleted_reason) and shown in the audit view; the application log
+   * gets only its length, since free text may contain personal data.
    */
   async remove(admin: AuthContext, id: string, reason: string): Promise<ScreenshotDeleteResponse> {
     const row = async () => {
@@ -437,8 +454,8 @@ export class ScreenshotsService implements OnModuleInit, OnModuleDestroy {
       }
       const at = new Date().toISOString();
       await this.db.execute({
-        sql: "UPDATE screenshots SET upload_status = 'DELETED', deleted_at = ?, deleted_by = ?, updated_at = ? WHERE id = ? AND upload_status != 'DELETED'",
-        args: [at, admin.id, at, id],
+        sql: "UPDATE screenshots SET upload_status = 'DELETED', deleted_at = ?, deleted_by = ?, deleted_reason = ?, updated_at = ? WHERE id = ? AND upload_status != 'DELETED'",
+        args: [at, admin.id, reason, at, id],
       });
       this.logger.log({ adminId: admin.id, screenshotId: id, was: r.upload_status, reasonLength: reason.length }, "Screenshot deleted by an admin");
       const fresh = (await row())!;
@@ -579,6 +596,12 @@ export class ScreenshotsService implements OnModuleInit, OnModuleDestroy {
     const [own, org] = await Promise.all([this.monitoring.screenshotSelfView(employeeId), this.settings.current()]);
     if (own === false) throw new ForbiddenException("Your administrator has turned off viewing your own screenshots");
     if (own === null && !org.employeeSelfView) throw new ForbiddenException("Your organization does not allow employees to view screenshots");
+  }
+
+  /** Audit row for a read of someone else's screenshot list (none for the caller's own). */
+  private async auditRead(caller: AuthContext, employee: { id: string; userId: string }, what: Record<string, string | null>) {
+    const audit = employeeReadAudit(caller, employee, "EMPLOYEE_SCREENSHOTS_VIEWED", what);
+    if (audit) await this.db.execute(audit);
   }
 
   /** The row if the caller may read it; 404 for anyone else (same as a missing id). */

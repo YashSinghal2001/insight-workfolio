@@ -1,5 +1,7 @@
 import { z } from "zod";
 import type { ActivityPeriodTotals, ActivityReportDay, ActivitySummaryResponse, ActivityTimelineItem, EmployeeRef, Paginated } from "./api.js";
+import { DEVICE_ACTIVITY_STATES } from "./attendance.js";
+import { DEVICE_SCREENSHOT_STATES } from "./screenshots.js";
 import { addDays, localDate, zonedToUtc } from "./timesheet.js";
 
 // ---- Policy -------------------------------------------------------------------------
@@ -137,14 +139,32 @@ export const activityIntervalSchema = z
   });
 export type ActivityIntervalInput = z.infer<typeof activityIntervalSchema>;
 
+/**
+ * What the device is doing at `sentAt` (the still-open interval is not uploaded, so this is the only
+ * way the server learns "idle right now"). Sent with the regular upload; no separate request.
+ */
+export const activityCurrentSchema = z
+  .object({
+    state: z.enum(DEVICE_ACTIVITY_STATES),
+    /** Device clock when that state began. */
+    since: instant,
+    /** How screenshot capture is going on the device, when it has something to report. */
+    screenshot: z.enum(DEVICE_SCREENSHOT_STATES).optional(),
+  })
+  .strict();
+export type ActivityCurrent = z.infer<typeof activityCurrentSchema>;
+
 export const activitySyncSchema = z
   .object({
     /** Device clock at upload; used to correct clock skew like attendance sync. */
     sentAt: instant,
     platform: z.enum(["macos", "windows"]),
-    intervals: z.array(activityIntervalSchema).min(1).max(ACTIVITY_BATCH_MAX),
+    /** May be empty when `current` is sent (nothing closed since the last upload). */
+    intervals: z.array(activityIntervalSchema).max(ACTIVITY_BATCH_MAX),
+    current: activityCurrentSchema.optional(),
   })
-  .strict();
+  .strict()
+  .refine((v) => v.intervals.length > 0 || !!v.current, { message: "Send at least one interval or the current state", path: ["intervals"] });
 export type ActivitySyncRequest = z.infer<typeof activitySyncSchema>;
 
 export const consentSchema = z.object({ noticeVersion: z.string().min(1).max(64) }).strict();

@@ -120,7 +120,7 @@ before(async () => {
     await writeFile(out, Buffer.concat(parts));
   };
   adminId = randomUUID();
-  await db.execute({ sql: "INSERT INTO users (id, email, role, password_hash) VALUES (?, 'admin@example.com', 'ADMIN', ?)", args: [adminId, await hashPassword(PASSWORD)] });
+  await db.execute({ sql: "INSERT INTO users (id, email, role, admin_title, password_hash) VALUES (?, 'admin@example.com', 'ADMIN', 'SUPER_ADMIN', ?)", args: [adminId, await hashPassword(PASSWORD)] });
   const res = await fetch(`${base}/api/v1/auth/login`, { method: "POST", headers: { origin: ORIGIN, "content-type": "application/json" }, body: JSON.stringify({ email: "admin@example.com", password: PASSWORD }) });
   admin = res.headers.getSetCookie().map((c) => c.split(";")[0]).join("; ");
   await db.execute({
@@ -252,7 +252,7 @@ describe("DELETE /screenshots/:id (admin)", () => {
     assert.equal((await api(`/timelapses/${job.id}/content`, { cookie: admin })).status, 410);
   });
 
-  test("the unified audit view lists the deletion (actor, target, resource); no reason column exists, so none is shown", async () => {
+  test("the unified audit view lists the deletion (actor, target, resource) with the stored reason", async () => {
     const e = await employee();
     const s = await shot(e, 50);
     assert.equal((await remove(s.id)).status, 200);
@@ -264,13 +264,17 @@ describe("DELETE /screenshots/:id (admin)", () => {
     assert.equal(ev.action, "SCREENSHOT_DELETED");
     assert.equal(ev.actor.id, adminId);
     assert.equal(ev.target.userId, e.userId);
-    assert.equal(ev.reason, null);
+    assert.equal(ev.reason, "Captured a private document");
+    assert.equal((await db.execute({ sql: "SELECT deleted_reason FROM screenshots WHERE id = ?", args: [s.id] })).rows[0]!.deleted_reason, "Captured a private document");
     assert.deepEqual(Object.keys(ev.details).sort(), ["capturedAt", "employeeId", "screenshotId"]);
     assert.ok(!JSON.stringify(ev).includes(s.key));
-    // Scheduled retention (deleted_by NULL) is not presented as a person's deletion.
+    // Scheduled retention (deleted_by NULL) is listed too, never as a person's deletion: no actor, its own action.
     const other = await shot(e, 40);
     await db.execute({ sql: "UPDATE screenshots SET upload_status = 'DELETED', deleted_at = ? WHERE id = ?", args: [iso(Date.now()), other.id] });
     const again = await api(`/audit?from=${today}&to=${today}&source=SCREENSHOT_DELETION&pageSize=200`, { cookie: admin });
-    assert.ok(!again.body.items.some((x: { resource: { id: string } }) => x.resource.id === other.id));
+    const purged = again.body.items.filter((x: { resource: { id: string } }) => x.resource.id === other.id);
+    assert.deepEqual(purged.map((x: { action: string; actor: unknown; reason: unknown; target: { userId: string }; details: { by: string } }) => [x.action, x.actor, x.reason, x.target.userId, x.details.by]),
+      [["SCREENSHOT_DELETED_BY_RETENTION", null, null, e.userId, "SCHEDULED_RETENTION"]]);
+    assert.equal(again.body.items.find((x: { resource: { id: string } }) => x.resource.id === s.id).action, "SCREENSHOT_DELETED", "the person's deletion is unchanged");
   });
 });

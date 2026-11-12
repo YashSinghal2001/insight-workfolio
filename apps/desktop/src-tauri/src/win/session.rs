@@ -13,6 +13,7 @@ pub const WM_WTSSESSION_CHANGE: u32 = 0x02B1;
 pub const PBT_APMSUSPEND: u32 = 4;
 pub const PBT_APMRESUMESUSPEND: u32 = 7;
 pub const PBT_APMRESUMEAUTOMATIC: u32 = 18;
+pub const PBT_POWERSETTINGCHANGE: u32 = 0x8013;
 pub const WTS_CONSOLE_CONNECT: u32 = 1;
 pub const WTS_CONSOLE_DISCONNECT: u32 = 2;
 pub const WTS_REMOTE_CONNECT: u32 = 3;
@@ -37,6 +38,16 @@ pub fn event_for(msg: u32, wparam: usize) -> Option<Event> {
     }
 }
 
+/// `GUID_CONSOLE_DISPLAY_STATE` data: 0 = display off, 1 = on, 2 = dimmed (still showing).
+/// Anything else is unknown and changes nothing.
+pub fn display_event(state: u32) -> Option<Event> {
+    match state {
+        0 => Some(Event::ScreensSlept),
+        1 | 2 => Some(Event::ScreensWoke),
+        _ => None,
+    }
+}
+
 #[cfg(windows)]
 pub use imp::start;
 
@@ -47,7 +58,10 @@ mod imp {
     use std::thread::JoinHandle;
     use windows_sys::Win32::Foundation::{GetLastError, ERROR_CLASS_ALREADY_EXISTS, HWND, LPARAM, LRESULT, WPARAM};
     use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
-    use windows_sys::Win32::System::Power::{RegisterSuspendResumeNotification, UnregisterSuspendResumeNotification};
+    use windows_sys::Win32::System::Power::{
+        RegisterPowerSettingNotification, RegisterSuspendResumeNotification, UnregisterPowerSettingNotification, UnregisterSuspendResumeNotification, POWERBROADCAST_SETTING,
+    };
+    use windows_sys::Win32::System::SystemServices::GUID_CONSOLE_DISPLAY_STATE;
     use windows_sys::Win32::System::RemoteDesktop::{WTSRegisterSessionNotification, WTSUnRegisterSessionNotification, NOTIFY_FOR_THIS_SESSION};
     use windows_sys::Win32::System::Threading::GetCurrentThreadId;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
@@ -60,6 +74,20 @@ mod imp {
             publish(e);
         }
         if msg == WM_POWERBROADCAST {
+            if wparam == super::PBT_POWERSETTINGCHANGE as usize && lparam != 0 {
+                // SAFETY: for PBT_POWERSETTINGCHANGE lparam points to a POWERBROADCAST_SETTING valid
+                // for this call; the display state is a DWORD in Data (checked by DataLength).
+                let state = unsafe {
+                    let s = lparam as *const POWERBROADCAST_SETTING;
+                    let g = (&raw const (*s).PowerSetting).read_unaligned();
+                    let same = (g.data1, g.data2, g.data3, g.data4)
+                        == (GUID_CONSOLE_DISPLAY_STATE.data1, GUID_CONSOLE_DISPLAY_STATE.data2, GUID_CONSOLE_DISPLAY_STATE.data3, GUID_CONSOLE_DISPLAY_STATE.data4);
+                    (same && (&raw const (*s).DataLength).read_unaligned() >= 4).then(|| (&raw const (*s).Data).cast::<u32>().read_unaligned())
+                };
+                if let Some(e) = state.and_then(super::display_event) {
+                    publish(e);
+                }
+            }
             return 1; // TRUE: never deny a power request
         }
         // SAFETY: forwarding the unchanged arguments of a message for our own window.
@@ -126,6 +154,13 @@ mod imp {
             if power == 0 {
                 eprintln!("[session] RegisterSuspendResumeNotification failed: {}", GetLastError());
             }
+            // Display on/off (screenshots skip a dark display). Windows sends the current state
+            // right after registering. Without it the display counts as on: capture never stops
+            // because of a missing notification.
+            let display = RegisterPowerSettingNotification(hwnd, &GUID_CONSOLE_DISPLAY_STATE, DEVICE_NOTIFY_WINDOW_HANDLE);
+            if display == 0 {
+                eprintln!("[session] RegisterPowerSettingNotification failed: {}", GetLastError());
+            }
             let _ = ready.send(Ok(GetCurrentThreadId()));
             let mut msg: MSG = std::mem::zeroed();
             while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0 {
@@ -136,6 +171,9 @@ mod imp {
             }
             if power != 0 {
                 UnregisterSuspendResumeNotification(power);
+            }
+            if display != 0 {
+                UnregisterPowerSettingNotification(display);
             }
             DestroyWindow(hwnd);
             UnregisterClassW(class.as_ptr(), hinstance);
@@ -164,6 +202,9 @@ mod tests {
         assert_eq!(p(18), Some(Event::DidWake));
         assert_eq!(p(7), Some(Event::DidWake));
         assert_eq!(p(10), None, "power status change (battery/AC) is not a transition");
+        assert_eq!(p(PBT_POWERSETTINGCHANGE as usize), None, "display state is read from the setting data, not the message");
+        assert_eq!([display_event(0), display_event(1), display_event(2)], [Some(Event::ScreensSlept), Some(Event::ScreensWoke), Some(Event::ScreensWoke)], "off; on; dimmed is still showing");
+        assert_eq!(display_event(3), None, "unknown state changes nothing: never 'asleep' by default");
         assert_eq!(event_for(0x0010, 7), None, "other messages ignored");
         assert_eq!(event_for(WM_WTSSESSION_CHANGE, usize::MAX), None);
     }
@@ -173,8 +214,8 @@ mod tests {
     fn constants_match_windows_sys() {
         use windows_sys::Win32::UI::WindowsAndMessaging as w;
         assert_eq!(
-            [WM_POWERBROADCAST, WM_WTSSESSION_CHANGE, PBT_APMSUSPEND, PBT_APMRESUMESUSPEND, PBT_APMRESUMEAUTOMATIC],
-            [w::WM_POWERBROADCAST, w::WM_WTSSESSION_CHANGE, w::PBT_APMSUSPEND, w::PBT_APMRESUMESUSPEND, w::PBT_APMRESUMEAUTOMATIC]
+            [WM_POWERBROADCAST, WM_WTSSESSION_CHANGE, PBT_APMSUSPEND, PBT_APMRESUMESUSPEND, PBT_APMRESUMEAUTOMATIC, PBT_POWERSETTINGCHANGE],
+            [w::WM_POWERBROADCAST, w::WM_WTSSESSION_CHANGE, w::PBT_APMSUSPEND, w::PBT_APMRESUMESUSPEND, w::PBT_APMRESUMEAUTOMATIC, w::PBT_POWERSETTINGCHANGE]
         );
         assert_eq!(
             [WTS_CONSOLE_CONNECT, WTS_CONSOLE_DISCONNECT, WTS_REMOTE_CONNECT, WTS_REMOTE_DISCONNECT, WTS_SESSION_LOGON, WTS_SESSION_LOGOFF, WTS_SESSION_LOCK, WTS_SESSION_UNLOCK],

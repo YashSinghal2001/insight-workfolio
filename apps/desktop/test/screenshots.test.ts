@@ -1,14 +1,14 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { AttendanceCurrent } from "@workfolio/shared";
-import { decideScreenshots, type ScreenshotInputs } from "../src/monitoring.ts";
-import { policyBlur, privacyText, uploadScreenshots, type Outcome, type ShotDeps, type ShotRow } from "../src/screenshot-sync.ts";
+import { CAPTURE_FAILED, decideScreenshots, screenshotReport, type ScreenshotInputs } from "../src/monitoring.ts";
+import { POLICY_MAX_AGE_MS, policyBlur, policyFresh, privacyText, uploadScreenshots, type Outcome, type ShotDeps, type ShotRow } from "../src/screenshot-sync.ts";
 import { ApiClient, HttpError } from "../src/session.ts";
 import { project, type QueuedEvent } from "../src/sync.ts";
 
-const OUT: AttendanceCurrent = { state: "CLOCKED_OUT", session: null, serverTime: "2026-10-13T08:00:00.000Z" };
+const OUT: AttendanceCurrent = { state: "CLOCKED_OUT", session: null, serverTime: "2026-10-13T08:00:00.000Z", missingClockOut: false };
 const IN: AttendanceCurrent = {
-  state: "CLOCKED_IN", serverTime: OUT.serverTime,
+  state: "CLOCKED_IN", serverTime: OUT.serverTime, missingClockOut: false,
   session: { id: "s", clockInAt: "2026-10-13T08:00:00.000Z", clockOutAt: null, status: "OPEN", corrected: false, clockInSource: "ONLINE", breaks: [] },
 };
 const ev = (type: QueuedEvent["type"]): QueuedEvent => ({ id: type, userId: "u", deviceId: "d", type, occurredAt: "2026-10-13T09:00:00.000Z", status: "PENDING" });
@@ -23,7 +23,8 @@ test("screenshots: only while clocked in, not on break, after the screenshot not
   assert.equal(mode({ projection: project(OUT, []) }), "STOPPED", "before clock-in");
   assert.equal(mode({ projection: project(IN, [ev("BREAK_START")]) }), "PAUSED_BREAK", "break pauses at once, before sync");
   assert.equal(mode({ projection: project(IN, [ev("CLOCK_OUT")]) }), "STOPPED", "clock-out stops");
-  assert.equal(mode({ consented: false }), "STOPPED", "no capture before the screenshot notice");
+  assert.equal(mode({ consented: false }), "AWAITING_CONSENT", "no capture before the screenshot notice");
+  assert.equal(mode({ consented: false, enabled: false }), "STOPPED", "disabled wins: no notice to wait for");
   assert.equal(mode({ enabled: false }), "STOPPED");
   assert.equal(mode({ deviceStatus: "REVOKED" }), "STOPPED");
   assert.equal(mode({ unverified: true }), "PAUSED_OFFLINE_OR_UNVERIFIED");
@@ -33,6 +34,34 @@ test("screenshots: only while clocked in, not on break, after the screenshot not
   assert.equal(mode({ permission: false, projection: project(IN, [ev("BREAK_START")]) }), "PAUSED_BREAK", "attendance wins over the permission prompt");
   assert.equal(mode({ error: "Screenshot failed" }), "ERROR");
   assert.match(decideScreenshots({ ...base, pendingClockIn: true }).reason, /pending server confirmation/);
+});
+
+test("screenshots: feature states, and what the device reports about capture", () => {
+  // Disabled, Awaiting consent, Enabled, Permission denied are modes; Capture failed is ACTIVE + the worker's last skip.
+  assert.equal(screenshotReport(mode({}), null), "OK");
+  assert.equal(screenshotReport(mode({ permission: false }), null), "PERMISSION_DENIED");
+  assert.equal(screenshotReport(mode({}), `${CAPTURE_FAILED}timed out capturing the screen`), "CAPTURE_FAILED");
+  assert.equal(mode({ error: null }), "ACTIVE", "a failed capture is a skip, never an error: capture goes on and retries");
+  for (const skip of ["Not taken: the screen was locked.", "Not taken: the display was asleep.", "Paused: local screenshot storage is full."]) {
+    assert.equal(screenshotReport("ACTIVE", skip), "OK", skip);
+  }
+  for (const patch of [{ enabled: false }, { consented: false }, { projection: project(OUT, []) }, { projection: project(IN, [ev("BREAK_START")]) }, { projection: null }, { signedIn: false }, { error: "invalid masks" }]) {
+    assert.equal(screenshotReport(mode(patch), `${CAPTURE_FAILED}old`), undefined, JSON.stringify(Object.keys(patch)));
+  }
+});
+
+test("screenshots: a cached policy older than a day pauses capture until the server answers", () => {
+  const t = Date.parse("2026-10-13T09:00:00.000Z");
+  assert.equal(policyFresh(t, t + POLICY_MAX_AGE_MS), true);
+  assert.equal(policyFresh(t, t + POLICY_MAX_AGE_MS + 1), false);
+  assert.equal(policyFresh(null, t), false, "a cached copy of unknown age is not acted on");
+  assert.equal(policyFresh(t, t - 3_600_000), true, "a clock set back never makes it stale");
+  const stale = decideScreenshots({ ...base, policyStale: true });
+  assert.equal(stale.mode, "PAUSED_OFFLINE_OR_UNVERIFIED");
+  assert.match(stale.reason, /could not be checked with the server/);
+  assert.equal(screenshotReport(stale.mode, null), undefined);
+  assert.equal(mode({ policyStale: true, enabled: false }), "STOPPED", "a stale 'off' stays off");
+  assert.equal(mode({ policyStale: false }), "ACTIVE");
 });
 
 const row = (id: string, status: ShotRow["status"] = "PENDING"): ShotRow => ({

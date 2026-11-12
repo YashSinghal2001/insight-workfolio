@@ -1,13 +1,15 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { PLATFORM_ROLE_LABEL, PLATFORM_ROLES, type PlatformRole, type RoleChange, type RoleUser } from "@workfolio/shared";
+import { can, PLATFORM_ROLE_LABEL, PLATFORM_ROLES, type PlatformRole, type RoleChange, type RoleUser } from "@workfolio/shared";
 import { useAuth } from "@/components/auth-provider";
-import { DataTable, ErrorState, PageHeader, SkeletonRows, SuccessNotice } from "@/components/kit";
+import { DataTable, EmptyState, ErrorState, PageHeader, SkeletonRows, SuccessNotice } from "@/components/kit";
 import { Card, inputClass, secondaryButtonClass } from "@/components/ui";
 import { api, errorMessage } from "@/lib/api";
 
-/** Role identities: Super Admin and Admin have the same permissions; employees only their own data. */
+const TZ = Intl.DateTimeFormat().resolvedOptions().timeZone;
+
+/** Role identities. Super Admin only: the API refuses /roles/* to everyone else, so nothing is requested or offered. */
 export default function RolesPage() {
   const { auth } = useAuth();
   const [users, setUsers] = useState<RoleUser[] | null>(null);
@@ -17,10 +19,12 @@ export default function RolesPage() {
   const [message, setMessage] = useState<string | null>(null);
   const me = auth.status === "authenticated" ? auth.me.user : null;
   const superAdmin = me?.platformRole === "SUPER_ADMIN";
+  const allowed = !!me && can(me, "roles:manage");
   // Only a Super Admin may grant or remove Super Admin; the API enforces this too.
   const offered = PLATFORM_ROLES.filter((r) => superAdmin || r !== "SUPER_ADMIN");
 
   const load = useCallback(async () => {
+    if (!allowed) return;
     try {
       const [u, h] = await Promise.all([api<RoleUser[]>("/roles/users"), api<RoleChange[]>("/roles/history")]);
       setUsers(u);
@@ -28,7 +32,7 @@ export default function RolesPage() {
     } catch (err) {
       setError(errorMessage(err));
     }
-  }, []);
+  }, [allowed]);
 
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect -- fetch on mount
@@ -49,11 +53,20 @@ export default function RolesPage() {
     }
   }
 
+  if (!allowed) {
+    return (
+      <div className="mx-auto flex max-w-5xl flex-col gap-6">
+        <PageHeader title="Roles" />
+        <EmptyState title="Only a Super Admin can view or change roles." hint="Ask a Super Admin if an account's role needs to change." />
+      </div>
+    );
+  }
+
   return (
     <div className="mx-auto flex max-w-5xl flex-col gap-6">
       <PageHeader
         title="Roles"
-        description="Super Admin (CEO) and Admin (IT) have the same permissions. Only a Super Admin can grant or remove the Super Admin role. Nobody can change their own role, and the last active administrator or Super Admin cannot be removed. Every change needs a reason and is kept below."
+        description="Only a Super Admin can view or change roles. An Admin (IT) has the same monitoring access but cannot manage roles, delete screenshots or timelapses, run retention purges or connect storage. Nobody can change their own role, and the last active administrator or Super Admin cannot be removed. Every change needs a reason and is kept below."
       />
       {error && <ErrorState message={error} onRetry={() => (setError(null), void load())} />}
       <SuccessNotice message={message} onDismiss={() => setMessage(null)} />
@@ -98,7 +111,7 @@ export default function RolesPage() {
       <Card title="Role history">
         <ol className="text-xs" aria-label="Role history">
           {history.length === 0 && <li className="text-muted">No role changes yet.</li>}
-          {history.map((h, i) => <li key={i}>{new Date(h.at).toLocaleString("en-GB")} · {h.by.email} changed {h.target.email}: {PLATFORM_ROLE_LABEL[h.from]} → {PLATFORM_ROLE_LABEL[h.to]} ({h.reason})</li>)}
+          {history.map((h, i) => <li key={i}>{new Date(h.at).toLocaleString("en-GB")} ({TZ}) · {h.by.email} changed {h.target.email}: {PLATFORM_ROLE_LABEL[h.from]} → {PLATFORM_ROLE_LABEL[h.to]} ({h.reason})</li>)}
         </ol>
       </Card>
     </div>

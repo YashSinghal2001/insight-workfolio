@@ -165,7 +165,7 @@ export class GoogleDriveOAuthController {
   }
 
   @Get("start")
-  @RequirePermission("settings:manage")
+  @RequirePermission("storage:manage")
   start(@CurrentUser() user: AuthContext, @Res() res: Response): void {
     const { url, binding } = this.oauth.begin(user.id);
     res.cookie(BINDING_COOKIE, binding, { httpOnly: true, sameSite: "lax", secure: this.secure, path: GOOGLE_OAUTH_CALLBACK_PATH, maxAge: STATE_TTL_MS });

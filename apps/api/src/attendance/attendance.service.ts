@@ -3,7 +3,10 @@ import { BadRequestException, ConflictException, Inject, Injectable } from "@nes
 import { guardViolation, isUniqueViolation, type DatabaseClient, type InStatement } from "@workfolio/database";
 import {
   addDays,
+  deriveLiveStatus,
   invalidTransitionMessage,
+  missingClockOut,
+  screenshotFeatureState,
   todayIn,
   transition,
   uuidSchema,
@@ -15,6 +18,10 @@ import {
   type AttendanceSession,
   type AttendanceState,
   type AttendanceSummary,
+  type AttendanceTimelineItem,
+  type AttendanceTimelineQuery,
+  type AttendanceTimelineResponse,
+  type EmployeeRef,
   type ListEmployeesQuery,
   type Paginated,
   type SyncRequest,
@@ -28,7 +35,10 @@ import { scopeSql } from "../common/scope.js";
 import { DATABASE } from "../database/database.module.js";
 import type { DeviceContext } from "../devices/devices.service.js";
 import { EmployeesService } from "../employees/employees.service.js";
-import { ACTIVE_EMPLOYEE, iso, SESSION_COLUMNS, stateOf, str, withBreaks } from "./sessions.js";
+import { employeeReadAudit } from "../audit/account-audit.js";
+import { ScreenshotSettingsService } from "../screenshots/screenshot-settings.service.js";
+import { MonitoringSettingsService } from "../settings/monitoring-settings.service.js";
+import { ACTIVE_EMPLOYEE, activityReport, DEVICE_LIVE_COLUMNS, iso, screenshotReport, SESSION_COLUMNS, stateOf, str, withBreaks } from "./sessions.js";
 
 /** Device timestamps may lead the send time by this much (sub-second clock jitter, rounding). */
 const FUTURE_TOLERANCE_MS = 5_000;
@@ -64,6 +74,8 @@ export class AttendanceService {
     @Inject(POLICY) private readonly policy: AttendancePolicy,
     private readonly employees: EmployeesService,
     private readonly locks: EmployeeLocks,
+    private readonly screenshotSettings: ScreenshotSettingsService,
+    private readonly monitoring: MonitoringSettingsService,
   ) {}
 
   /** Online action from a direct endpoint: server time is authoritative. */
@@ -112,8 +124,57 @@ export class AttendanceService {
   }
 
   async current(employeeId: string): Promise<AttendanceCurrent> {
-    const { state, session } = await this.snapshot(employeeId);
-    return { state, session, serverTime: iso(Date.now()) };
+    const [{ state, session }, { rows }] = await Promise.all([
+      this.snapshot(employeeId),
+      this.db.execute({ sql: "SELECT timezone FROM employee_profiles WHERE id = ?", args: [employeeId] }),
+    ]);
+    const now = Date.now();
+    return { state, session, serverTime: iso(now), missingClockOut: missingClockOut(session, String(rows[0]?.timezone ?? "UTC"), now) };
+  }
+
+  /**
+   * One local day of an employee as stored: clock-in/out, breaks and activity intervals, oldest first.
+   * Real rows only (no computed gaps). Periods that began before the day but reach into it are included.
+   * Reading someone else's is audited (one row per request).
+   */
+  async timeline(caller: AuthContext, employee: EmployeeRef & { userId: string }, q: AttendanceTimelineQuery): Promise<AttendanceTimelineResponse> {
+    const date = q.date ?? todayIn(employee.timezone);
+    const start = zonedToUtc(`${date}T00:00`, employee.timezone);
+    const end = zonedToUtc(`${addDays(date, 1)}T00:00`, employee.timezone);
+    // ?1 employee, ?2 day start, ?3 day end. `rank` orders records sharing an instant: what ends (clock-out) before
+    // what starts (the next clock-in, then the periods beginning with it).
+    const union = `
+      SELECT 'CLOCK_IN:' || id AS id, 'CLOCK_IN' AS type, clock_in_at AS at, NULL AS end_at, NULL AS app, 1 AS rank
+        FROM attendance_sessions WHERE employee_id = ?1 AND clock_in_at >= ?2 AND clock_in_at < ?3
+      UNION ALL
+      SELECT 'CLOCK_OUT:' || id, 'CLOCK_OUT', clock_out_at, NULL, NULL, 0
+        FROM attendance_sessions WHERE employee_id = ?1 AND clock_out_at >= ?2 AND clock_out_at < ?3
+      UNION ALL
+      SELECT 'BREAK:' || b.id, 'BREAK', b.started_at, b.ended_at, NULL, 2
+        FROM break_sessions b JOIN attendance_sessions s ON s.id = b.attendance_session_id
+        WHERE s.employee_id = ?1 AND b.started_at < ?3 AND coalesce(b.ended_at, '9999') > ?2
+      UNION ALL
+      SELECT kind || ':' || id, kind, started_at, ended_at, application_name, 2
+        FROM activity_intervals WHERE employee_id = ?1 AND started_at < ?3 AND ended_at > ?2`;
+    const args = [employee.id, start, end];
+    const audit = employeeReadAudit(caller, employee, "EMPLOYEE_ATTENDANCE_TIMELINE_VIEWED", { date });
+    const [rows, count] = await this.db.batch(
+      [
+        { sql: `SELECT * FROM (${union}) ORDER BY at, rank, id LIMIT ?4 OFFSET ?5`, args: [...args, q.pageSize, (q.page - 1) * q.pageSize] },
+        { sql: `SELECT count(*) AS n FROM (${union})`, args },
+        ...(audit ? [audit] : []),
+      ],
+      audit ? "write" : "read",
+    );
+    return {
+      employee: { id: employee.id, fullName: employee.fullName, employeeCode: employee.employeeCode },
+      date,
+      timezone: employee.timezone,
+      items: rows!.rows.map((r): AttendanceTimelineItem => ({ id: String(r.id), type: r.type as AttendanceTimelineItem["type"], at: String(r.at), endAt: str(r.end_at), applicationName: str(r.app) })),
+      total: Number(count!.rows[0]!.n),
+      page: q.page,
+      pageSize: q.pageSize,
+    };
   }
 
   /** Sessions newest first, optionally limited to clock-in local dates [from, to] in `timeZone`. */
@@ -143,7 +204,8 @@ export class AttendanceService {
     const ids = page.items.map((e) => e.id);
     if (!ids.length) return { ...page, items: [] };
     const marks = ids.map(() => "?").join(", ");
-    const [sessions, events, devices] = await this.db.batch(
+    const [shots, mon] = await Promise.all([this.screenshotSettings.current(), this.monitoring.current()]);
+    const [sessions, events, devices, shotConsents] = await this.db.batch(
       [
         {
           sql: `SELECT ${SESSION_COLUMNS} FROM attendance_sessions s
@@ -157,8 +219,12 @@ export class AttendanceService {
           args: ids,
         },
         {
-          sql: `SELECT employee_id, last_seen_at FROM devices WHERE revoked_at IS NULL AND employee_id IN (${marks})`,
+          sql: `SELECT ${DEVICE_LIVE_COLUMNS} FROM devices WHERE revoked_at IS NULL AND employee_id IN (${marks})`,
           args: ids,
+        },
+        {
+          sql: `SELECT employee_id, notice_version FROM monitoring_consents WHERE notice_version IN (?, ?) AND employee_id IN (${marks})`,
+          args: [shots.noticeVersion, mon.noticeVersion, ...ids],
         },
       ],
       "read",
@@ -167,7 +233,12 @@ export class AttendanceService {
       (await withBreaks(this.db, sessions!.rows)).map((s, i) => [String(sessions!.rows[i]!.employee_id), s]),
     );
     const eventBy = new Map(events!.rows.map((r) => [String(r.employee_id), r]));
-    const seenBy = new Map(devices!.rows.map((r) => [String(r.employee_id), str(r.last_seen_at)]));
+    const deviceBy = new Map(devices!.rows.map((r) => [String(r.employee_id), r]));
+    const acked = (version: string) => new Set(shotConsents!.rows.filter((r) => r.notice_version === version).map((r) => String(r.employee_id)));
+    const consented = acked(shots.noticeVersion);
+    // ACTIVE/IDLE is activity monitoring: shown only while it is on and this employee acknowledged the notice in force.
+    const monitored = mon.enabled ? acked(mon.noticeVersion) : new Set<string>();
+    const now = Date.now();
     return {
       ...page,
       items: page.items.map((e) => {
@@ -188,7 +259,10 @@ export class AttendanceService {
                 outcome: ev.outcome as "ACCEPTED" | "REJECTED",
               }
             : null,
-          deviceLastSeenAt: seenBy.get(e.id) ?? null,
+          deviceLastSeenAt: str(deviceBy.get(e.id)?.last_seen_at),
+          ...deriveLiveStatus(session, monitored.has(e.id) ? activityReport(deviceBy.get(e.id)) : null, now),
+          missingClockOut: missingClockOut(session, e.timezone, now),
+          screenshotState: screenshotFeatureState({ enabled: shots.enabled, consented: consented.has(e.id), report: screenshotReport(deviceBy.get(e.id)) }, now),
         };
       }),
     };
@@ -363,10 +437,14 @@ export class AttendanceService {
           args: [at, iso(Date.now()), session.breaks.find((b) => !b.endedAt)!.id],
         }];
       case "CLOCK_OUT":
-        return [{
-          sql: "UPDATE attendance_sessions SET clock_out_at = ?, status = 'CLOSED', updated_at = ? WHERE id = ?",
-          args: [at, iso(Date.now()), session.id],
-        }];
+        return [
+          {
+            sql: "UPDATE attendance_sessions SET clock_out_at = ?, status = 'CLOSED', updated_at = ? WHERE id = ?",
+            args: [at, iso(Date.now()), session.id],
+          },
+          // The device's "active/idle right now" report ends with the session.
+          { sql: "UPDATE devices SET activity_state = NULL, activity_state_since = NULL, activity_state_at = NULL WHERE employee_id = ?", args: [device.employeeId] },
+        ];
     }
   }
 

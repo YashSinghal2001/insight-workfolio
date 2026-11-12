@@ -18,6 +18,14 @@ export const toDevice = (r: Row): Device => ({
   revokedAt: r.revoked_at === null ? null : String(r.revoked_at),
 });
 
+/**
+ * Devices are registered, and device-bound records written, only by a desktop sign-in: a browser
+ * (cookie) session cannot make up an installation id and clock in or upload from the web.
+ */
+function assertDesktop(caller: AuthContext) {
+  if (caller.client !== "DESKTOP") throw new ForbiddenException("This action is only available from the desktop app");
+}
+
 /** A device as validated for an attendance request. */
 export interface DeviceContext {
   employeeId: string;
@@ -42,6 +50,7 @@ export class DevicesService {
 
   /** Idempotent for the same installation. One active device per employee (MVP). */
   async register(caller: AuthContext, input: RegisterDeviceInput): Promise<Device> {
+    assertDesktop(caller);
     const employeeId = await this.employeeIdFor(caller);
     const ident = sha256(input.installationId);
     const now = new Date().toISOString();
@@ -106,6 +115,7 @@ export class DevicesService {
    * same statement. Unknown and revoked devices get the same 403 shape; GET /devices/me says which.
    */
   async require(caller: AuthContext, installationId: string | undefined): Promise<DeviceContext> {
+    assertDesktop(caller);
     const employeeId = await this.employeeIdFor(caller);
     const device = installationId ? await this.touch(caller, employeeId, sha256(installationId), new Date().toISOString()) : null;
     if (!device) throw new ForbiddenException("This device is not registered or has been revoked");

@@ -54,6 +54,14 @@ export const PERMISSIONS = {
   "activity:read-all": ["ADMIN"],
   "profile:read-own": ["ADMIN", "EMPLOYEE"],
   "screenshots:read": ["ADMIN"],
+  /**
+   * Destructive deletion of monitoring data: delete one screenshot or a timelapse, run a retention purge
+   * (screenshots, activity, website usage), or change a retention period / its approval (which makes the
+   * scheduled purge delete). Super Admin only (SUPER_ADMIN_ONLY).
+   */
+  "screenshots:delete": ["ADMIN"],
+  /** Connect or disconnect the organisation's storage account. Super Admin only (SUPER_ADMIN_ONLY). */
+  "storage:manage": ["ADMIN"],
   "settings:manage": ["ADMIN"],
   "timesheet:read-own": ["ADMIN", "EMPLOYEE"],
   "timesheet:clock": ["ADMIN", "EMPLOYEE"],
@@ -69,6 +77,22 @@ export const TEAM_HEAD_PERMISSIONS = ["employees:read", "screenshots:read", "att
 export type TeamHeadPermission = (typeof TEAM_HEAD_PERMISSIONS)[number];
 export const isTeamHeadPermission = (p: Permission): p is TeamHeadPermission => (TEAM_HEAD_PERMISSIONS as readonly Permission[]).includes(p);
 
+/** Role-level check only. For "may this user do X" use `can`, which also applies SUPER_ADMIN_ONLY. */
 export function hasPermission(role: Role, permission: Permission): boolean {
   return (PERMISSIONS[permission] as readonly Role[]).includes(role);
+}
+
+/**
+ * Permissions an Admin (IT) does not get: only the Super Admin identity holds them. Everything else is
+ * shared by both admin identities (docs/roles.md).
+ */
+export const SUPER_ADMIN_ONLY = ["screenshots:delete", "storage:manage", "roles:manage"] as const satisfies readonly Permission[];
+
+/**
+ * Whether this user may do `permission`: the role check plus the Super Admin-only list. The API guard
+ * enforces exactly this; clients may use it to hide UI, never to grant access. Team-head scoped reads
+ * (W41) are decided separately by the API.
+ */
+export function can(user: { role: Role; platformRole: PlatformRole }, permission: Permission): boolean {
+  return hasPermission(user.role, permission) && (user.platformRole === "SUPER_ADMIN" || !(SUPER_ADMIN_ONLY as readonly Permission[]).includes(permission));
 }

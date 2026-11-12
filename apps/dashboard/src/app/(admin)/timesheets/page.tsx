@@ -3,7 +3,7 @@
 import { useEffect, useState, type FormEvent } from "react";
 import Link from "next/link";
 import { formatDuration, orgTimesheetFilename, TIMESHEET_CSV_FORMAT, type ExportFormat, type Paginated, type TimesheetSummaryRow } from "@workfolio/shared";
-import { Button, DataTable, EmptyState, ErrorState, FilterBar, PageHeader, Pagination, SkeletonRows, SuccessNotice } from "@/components/kit";
+import { Button, DataTable, EmptyState, ErrorState, FilterBar, PageHeader, Pagination, SkeletonRows, StatusBadge, SuccessNotice } from "@/components/kit";
 import { RangePicker, weekRange, type Range } from "@/components/range-picker";
 import { inputClass, Notice, secondaryButtonClass } from "@/components/ui";
 import { api, errorMessage } from "@/lib/api";
@@ -93,7 +93,7 @@ export default function TimesheetsPage() {
       {data?.items.length === 0 && <EmptyState title="No employees found." hint={query.q ? "No employee matches this filter." : undefined} />}
       {data && data.items.length > 0 && (
         <DataTable label="Timesheets" head={["Employee", "Shifts", "Worked", "Breaks", "Overtime", "Needs attention"]} minWidth={760}>
-          {data.items.map(({ employee, totals, openShift, pendingCorrections }) => (
+          {data.items.map(({ employee, totals, openShift, missingClockOut, pendingCorrections }) => (
             <tr key={employee.id}>
               <td>
                 <Link href={`/timesheets/${employee.id}`} className="font-medium text-brand hover:underline">{employee.fullName}</Link>
@@ -106,11 +106,12 @@ export default function TimesheetsPage() {
                 {totals.overtimeMs ? <span className="text-amber-800 dark:text-amber-300">{formatDuration(totals.overtimeMs)}</span> : "—"}
               </td>
               <td className="text-xs">
+                {missingClockOut && <><StatusBadge tone="danger">Missing clock-out</StatusBadge>{" "}</>}
                 {[
-                  openShift && "Shift open now",
+                  openShift && !missingClockOut && "Shift open now",
                   totals.incompleteDays > 0 && `${totals.incompleteDays} incomplete day(s)`,
                   pendingCorrections > 0 && `${pendingCorrections} pending correction(s)`,
-                ].filter(Boolean).join(" · ") || <span className="text-muted">—</span>}
+                ].filter(Boolean).join(" · ") || (!missingClockOut && <span className="text-muted">—</span>)}
               </td>
             </tr>
           ))}

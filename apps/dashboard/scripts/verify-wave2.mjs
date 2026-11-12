@@ -409,7 +409,7 @@ try {
   await login(ben.email);
   check("employee sign-in lands on /my", (await js("location.pathname")).startsWith("/my"), await js("location.pathname"));
   {
-    await visit("/my/activity", has("Timeline"), "my activity");
+    await visit("/my/activity", has("Day timeline"), "my activity"); // the card was renamed from "Timeline" (QA round 3)
     await expect(`W24 /my/activity overlay: ${breakText}`, has(breakText), 40_000);
     await shot("w24-my-activity.png");
     await pageProblems("/my/activity");

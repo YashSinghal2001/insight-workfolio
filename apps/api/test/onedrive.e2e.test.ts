@@ -198,7 +198,7 @@ async function connect(code: string, grant = { account: "it@tffdigital.com", tid
 before(async () => {
   const boot = await NestFactory.create(AppModule, { logger: false });
   await boot.init();
-  await boot.get(DATABASE).execute({ sql: "INSERT INTO users (id, email, role, password_hash) VALUES (?, 'admin@example.com', 'ADMIN', ?)", args: [randomUUID(), await hashPassword(PASSWORD)] });
+  await boot.get(DATABASE).execute({ sql: "INSERT INTO users (id, email, role, admin_title, password_hash) VALUES (?, 'admin@example.com', 'ADMIN', 'SUPER_ADMIN', ?)", args: [randomUUID(), await hashPassword(PASSWORD)] });
   await boot.close();
   await start();
 });

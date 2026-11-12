@@ -132,6 +132,34 @@ export const screenshotSettingsSchema = z
   .strict();
 export type ScreenshotSettingsInput = z.infer<typeof screenshotSettingsSchema>;
 
+// ---- Feature state ----------------------------------------------------------------------
+
+/** What the desktop reports about capture on the device (POST /activity/sync `current.screenshot`). */
+export const DEVICE_SCREENSHOT_STATES = ["OK", "PERMISSION_DENIED", "CAPTURE_FAILED"] as const;
+export type DeviceScreenshotState = (typeof DEVICE_SCREENSHOT_STATES)[number];
+
+/** Per-screenshot "upload pending" / "uploaded" is ScreenshotItem.uploadStatus, not repeated here. */
+export const SCREENSHOT_FEATURE_STATES = ["DISABLED", "AWAITING_CONSENT", "ENABLED", "PERMISSION_DENIED", "CAPTURE_FAILED"] as const;
+export type ScreenshotFeatureState = (typeof SCREENSHOT_FEATURE_STATES)[number];
+
+/** A device problem report older than this is ignored (the desktop reports every minute while running). */
+export const SCREENSHOT_STATE_STALE_MS = 15 * 60_000;
+
+/**
+ * The screenshot feature for one employee: the organisation switch, then their acknowledgement of the
+ * current screenshot notice, then a fresh problem reported by their device. A stale or missing report
+ * never hides or invents a problem: the state is then ENABLED.
+ */
+export function screenshotFeatureState(
+  input: { enabled: boolean; consented: boolean; report: { state: DeviceScreenshotState; reportedAt: string } | null },
+  now = Date.now(),
+): ScreenshotFeatureState {
+  if (!input.enabled) return "DISABLED";
+  if (!input.consented) return "AWAITING_CONSENT";
+  const r = input.report;
+  return r && r.state !== "OK" && now - Date.parse(r.reportedAt) <= SCREENSHOT_STATE_STALE_MS ? r.state : "ENABLED";
+}
+
 // ---- Requests ---------------------------------------------------------------------------
 
 export const SCREENSHOT_MIME = "image/webp";
@@ -219,6 +247,8 @@ export interface ScreenshotStatusResponse {
   storageProvider: ScreenshotStorageProvider;
   /** Whether this employee may view their own screenshots. */
   employeeSelfView: boolean;
+  /** Policy, consent and the device's last reported capture problem, in one value. */
+  state: ScreenshotFeatureState;
 }
 
 export type ScreenshotStorageProvider = "LOCAL_DEV" | "MICROSOFT_GRAPH" | "GOOGLE_DRIVE";
@@ -271,7 +301,8 @@ export interface ScreenshotOverview {
   deleted: number;
   latestCapturedAt: string | null;
   latestStoredAt: string | null;
-  retention: ScreenshotRetentionPreview;
+  /** Organisation-wide retention status: only for callers with settings:manage (not team heads). */
+  retention?: ScreenshotRetentionPreview;
 }
 
 export interface ScreenshotSettingsVersion extends ScreenshotSettings {
@@ -306,7 +337,7 @@ export interface ScreenshotRetentionPreview {
 
 export type ScreenshotDeletionMode = "LOCAL_DEV" | "RECYCLE_BIN" | "PERMANENT";
 
-/** Admin deletion of one screenshot. The reason is required but not stored (no column; see docs/audit.md). */
+/** Super Admin deletion of one screenshot. The reason is stored with the row and shown in the audit view. */
 export const screenshotDeleteSchema = z.strictObject({ reason: z.string().trim().min(3).max(500) });
 export type ScreenshotDeleteRequest = z.infer<typeof screenshotDeleteSchema>;
 

@@ -3,6 +3,7 @@
 import { Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import {
+  can,
   SCREENSHOT_MASK_SCALE,
   SCREENSHOT_MIME,
   type Paginated,
@@ -10,8 +11,10 @@ import {
   type ScreenshotDetail,
   type ScreenshotGalleryItem,
   type ScreenshotOverview,
+  type ScreenshotSettingsResponse,
 } from "@workfolio/shared";
-import { Button, ConfirmDialog, EmptyState, ErrorState, PageHeader, SkeletonRows, SuccessNotice } from "@/components/kit";
+import { useAuth } from "@/components/auth-provider";
+import { Button, ConfirmDialog, EmptyState, ErrorState, PageHeader, SkeletonRows, StatusBadge, SuccessNotice } from "@/components/kit";
 import { RangePicker, weekRange, type Range } from "@/components/range-picker";
 import { TimelapsePanel } from "@/components/timelapse-panel";
 import { Badge, Card, secondaryButtonClass } from "@/components/ui";
@@ -89,7 +92,7 @@ function deleteError(err: unknown) {
   return errorMessage(err);
 }
 
-function Viewer({ item, onClose, onDeleted }: { item: ScreenshotGalleryItem; onClose: () => void; onDeleted: (r: ScreenshotDeleteResponse) => void }) {
+function Viewer({ item, canDelete, onClose, onDeleted }: { item: ScreenshotGalleryItem; canDelete: boolean; onClose: () => void; onDeleted: (r: ScreenshotDeleteResponse) => void }) {
   const zone = item.employee.timezone;
   const ref = useRef<HTMLDialogElement>(null);
   const { url, error } = useImage(item.id, "full");
@@ -106,7 +109,7 @@ function Viewer({ item, onClose, onDeleted }: { item: ScreenshotGalleryItem; onC
       <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border px-4 py-2 text-sm">
         <span><strong>{item.employee.fullName}</strong> · {captured(item.capturedAt, zone)} · {item.width}×{item.height}{item.blurred && <> <BlurredBadge /></>}</span>
         <span className="flex flex-wrap gap-2">
-          <Button variant="danger" onClick={() => setConfirming(true)}>Delete screenshot</Button>
+          {canDelete && <Button variant="danger" onClick={() => setConfirming(true)}>Delete screenshot</Button>}
           <button type="button" onClick={() => ref.current?.close()} className={secondaryButtonClass} autoFocus>Close</button>
         </span>
       </div>
@@ -129,7 +132,7 @@ function Viewer({ item, onClose, onDeleted }: { item: ScreenshotGalleryItem; onC
         )}
         {detail?.accessLog && (
           <details>
-            <summary className="cursor-pointer">Access log ({detail.accessLog.length})</summary>
+            <summary className="cursor-pointer">Access log ({detail.accessLog.length}), times in {TZ}</summary>
             <ul className="mt-1 max-h-32 overflow-auto">
               {detail.accessLog.map((a, i) => <li key={i} className="tabular-nums">{when(a.accessedAt)} · {a.viewer.email} · {a.action === "VIEW" ? "viewed" : "thumbnail"}</li>)}
             </ul>
@@ -144,10 +147,10 @@ function Viewer({ item, onClose, onDeleted }: { item: ScreenshotGalleryItem; onC
         description={
           <>
             The image is deleted from storage now and cannot be viewed again; its metadata stays, marked deleted, and the deletion is recorded
-            in the audit log with your account. Timelapse videos containing it are removed. A reason is required to confirm, but it is not stored.
+            in the audit log with your account and the reason you give. Timelapse videos containing it are removed.
           </>
         }
-        reason={{ label: "Reason (required to confirm; not stored)", minLength: 3, maxLength: 500 }}
+        reason={{ label: "Reason (required; kept in the audit log)", minLength: 3, maxLength: 500 }}
         onConfirm={async (reason) => {
           try {
             const r = await api<ScreenshotDeleteResponse>(`/screenshots/${item.id}`, { method: "DELETE", body: { reason } });
@@ -183,6 +186,11 @@ function Screenshots() {
   const [overview, setOverview] = useState<ScreenshotOverview | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [open, setOpen] = useState<ScreenshotGalleryItem | null>(null);
+  const { auth } = useAuth();
+  const canDelete = auth.status === "authenticated" && can(auth.me.user, "screenshots:delete");
+  // The organisation policy in force (on/off, interval). null = not loaded or not readable; then no state is claimed.
+  const [policy, setPolicy] = useState<ScreenshotSettingsResponse["effective"] | null>(null);
+  useEffect(() => void api<ScreenshotSettingsResponse>("/settings/screenshots").then((s) => setPolicy(s.effective), () => setPolicy(null)), []);
 
   useEffect(() => {
     let active = true;
@@ -229,11 +237,22 @@ function Screenshots() {
       {error && <ErrorState message={error} onRetry={() => setRetry((n) => n + 1)} />}
       {!gallery && !error && <SkeletonRows label="screenshots" />}
 
-      {overview && r && (
+      {policy && (
+        <p className="text-sm" data-testid="screenshot-policy">
+          Screenshot capture: <StatusBadge tone={policy.enabled ? "success" : "neutral"}>{policy.enabled ? "Enabled" : "Disabled"}</StatusBadge>{" "}
+          <span className="text-muted">
+            {policy.enabled
+              ? `One capture every ${policy.intervalSeconds} seconds while clocked in, after the employee acknowledged the notice. Per-employee state (awaiting consent, permission denied, capture failed) is on the live Attendance page.`
+              : "Nothing is captured and uploads are refused. Earlier screenshots stay viewable below."}
+          </span>
+        </p>
+      )}
+
+      {overview && (
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
           <Card title="Screenshots">
             <p className="text-2xl font-semibold tabular-nums">{overview.total}</p>
-            <p className="mt-1 text-xs text-muted">{overview.stored} stored · {overview.deleted} deleted by retention</p>
+            <p className="mt-1 text-xs text-muted">{overview.stored} stored · {overview.deleted} deleted (by an administrator or by retention)</p>
           </Card>
           <Card title="Awaiting upload">
             <p className="text-2xl font-semibold tabular-nums">{overview.awaitingUpload}</p>
@@ -245,11 +264,11 @@ function Screenshots() {
             <p className="text-sm">Captured: <span className="tabular-nums">{when(overview.latestCapturedAt)}</span></p>
             <p className="mt-1 text-sm">Stored: <span className="tabular-nums">{when(overview.latestStoredAt)}</span></p>
           </Card>
-          <Card title="Retention">
+          {r && <Card title="Retention">
             <p className="text-sm">{r.retentionDays} days · {r.approved ? <Badge ok>Approved</Badge> : <Badge ok={false}>Not approved: nothing deleted</Badge>}</p>
             <p className="mt-1 text-xs text-muted">{r.eligible} past the period now · last run {r.runs[0] ? `${when(r.runs[0].ranAt)} (${r.runs[0].deleted} deleted, ${r.runs[0].failed} failed)` : "never"}</p>
             <p className="mt-1 text-xs text-muted">{r.deletionMode === "RECYCLE_BIN" ? "Deletes go to the SharePoint recycle bin (recoverable for a while)." : r.deletionMode === "PERMANENT" ? "Permanent delete." : "Development storage."}</p>
-          </Card>
+          </Card>}
         </div>
       )}
 
@@ -279,6 +298,7 @@ function Screenshots() {
       {open && (
         <Viewer
           item={open}
+          canDelete={canDelete}
           onClose={() => setOpen(null)}
           onDeleted={(r) => {
             setOk(r.alreadyDeleted ? "This screenshot had already been deleted." : `Screenshot deleted ${when(r.deletedAt)}. Timelapse videos that contained it were removed.`);

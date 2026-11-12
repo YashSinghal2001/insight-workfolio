@@ -3,6 +3,7 @@ import { BadRequestException, ForbiddenException, Inject, Injectable, Logger } f
 import { guardViolation, isUniqueViolation, type DatabaseClient, type InStatement } from "@workfolio/database";
 import {
   addDays,
+  deriveLiveStatus,
   todayIn,
   weekStart,
   zonedToUtc,
@@ -26,7 +27,9 @@ import {
   type EmployeeRef,
   type Paginated,
 } from "@workfolio/shared";
-import { clockedInSegments, iso, str, type Segment } from "../attendance/sessions.js";
+import { activityReport, clockedInSegments, DEVICE_LIVE_COLUMNS, iso, SESSION_COLUMNS, str, withBreaks, type Segment } from "../attendance/sessions.js";
+import { employeeReadAudit } from "../audit/account-audit.js";
+import type { AuthContext } from "../auth/auth.service.js";
 import { EmployeeLocks } from "../common/employee-locks.js";
 import { POLICY } from "../common/policy.js";
 import { DATABASE } from "../database/database.module.js";
@@ -82,7 +85,7 @@ export class ActivityService {
   async status(employee: EmployeeRef): Promise<ActivityStatusResponse> {
     const settings = await this.settings.current();
     const today = todayIn(employee.timezone);
-    const [notice, [consent, session, last], totals, policy] = await Promise.all([
+    const [notice, [consent, session, last, latest, device], totals, policy] = await Promise.all([
       this.settings.notice(settings.noticeVersion),
       this.db.batch(
         [
@@ -100,6 +103,8 @@ export class ActivityService {
             args: [employee.id],
           },
           { sql: "SELECT max(received_at) AS at FROM activity_intervals WHERE employee_id = ?", args: [employee.id] },
+          { sql: `SELECT ${SESSION_COLUMNS} FROM attendance_sessions s WHERE s.employee_id = ? ORDER BY s.clock_in_at DESC LIMIT 1`, args: [employee.id] },
+          { sql: `SELECT ${DEVICE_LIVE_COLUMNS} FROM devices WHERE employee_id = ? AND revoked_at IS NULL`, args: [employee.id] },
         ],
         "read",
       ),
@@ -107,7 +112,10 @@ export class ActivityService {
       this.settings.policyFor(employee.id, settings), // effective for this employee (W21/W22)
     ]);
     const s = session!.rows[0];
+    const [latestSession = null] = await withBreaks(this.db, latest!.rows);
     return {
+      // Monitoring off or the notice in force not acknowledged: the device's last report is not shown.
+      ...deriveLiveStatus(latestSession, settings.enabled && consent!.rows[0] ? activityReport(device!.rows[0]) : null),
       policy,
       notice,
       consent: { noticeVersion: settings.noticeVersion, acknowledgedAt: str(consent!.rows[0]?.acknowledged_at) },
@@ -145,11 +153,12 @@ export class ActivityService {
       this.db.execute({ sql: "SELECT notice_version, acknowledged_at FROM monitoring_consents WHERE employee_id = ?", args: [device.employeeId] }),
       this.settings.periods(),
     ]);
-    if (!acks.length) throw new ForbiddenException("The monitoring notice has not been acknowledged");
-    const ackAt = new Map(acks.map((r) => [String(r.notice_version), Date.parse(String(r.acknowledged_at))]));
-
     const receivedAt = Date.now();
     const skew = receivedAt - Date.parse(req.sentAt); // same correction as attendance sync
+    const ackAt = new Map(acks.map((r) => [String(r.notice_version), Date.parse(String(r.acknowledged_at))]));
+    if (req.current) await this.recordCurrent(device, req.current, { skew, receivedAt, periods, ackAt });
+    if (!acks.length) throw new ForbiddenException("The monitoring notice has not been acknowledged");
+    if (!req.intervals.length) return { results: [] };
     // Processed chronologically; results go back in the caller's order (by position: ids may repeat).
     const order = req.intervals.map((_, k) => k).sort((a, b) => req.intervals[a]!.startedAt.localeCompare(req.intervals[b]!.startedAt));
     const intervals = req.intervals;
@@ -305,7 +314,10 @@ export class ActivityService {
     };
   }
 
-  async timeline(employee: EmployeeRef, q: { from: string; to: string; page: number; pageSize: number }): Promise<Paginated<CategorizedTimelineItem>> {
+  /** `caller` reading someone else's timeline is audited (one row per request). */
+  async timeline(employee: EmployeeRef & { userId: string }, q: { from: string; to: string; page: number; pageSize: number }, caller: AuthContext): Promise<Paginated<CategorizedTimelineItem>> {
+    const audit = employeeReadAudit(caller, employee, "EMPLOYEE_ACTIVITY_TIMELINE_VIEWED", { from: q.from, to: q.to });
+    if (audit) await this.db.execute(audit);
     const [start, end] = this.bounds(employee, q.from, q.to);
     const where = "employee_id = ? AND started_at < ? AND ended_at > ?";
     const [labels, [rows, count]] = await Promise.all([this.categories.labelsFor([employee.id]), this.db.batch(
@@ -463,7 +475,30 @@ export class ActivityService {
     };
   }
 
-  /** Clocked-in, non-break time of the employee overlapping [from, to); open sessions/breaks run to `openEnd`. */
+  /**
+   * Stores what the device says it is doing now. The activity state only when it could also be recorded
+   * as activity: monitoring on, the current notice acknowledged, and a session open (the UPDATE checks
+   * that itself); otherwise it is ignored, not an error. The screenshot capture state is about the device
+   * (permission, capture failures), so it is kept whenever reported.
+   */
+  private async recordCurrent(
+    device: DeviceContext,
+    current: NonNullable<ActivitySyncRequest["current"]>,
+    ctx: { skew: number; receivedAt: number; periods: PolicyPeriod[]; ackAt: Map<string, number> },
+  ) {
+    const at = iso(ctx.receivedAt);
+    const now = ctx.periods.at(-1)!;
+    const statements: InStatement[] = [];
+    if (current.screenshot) statements.push({ sql: "UPDATE devices SET screenshot_state = ?, screenshot_state_at = ? WHERE id = ?", args: [current.screenshot, at, device.deviceId] });
+    if (now.enabled && ctx.ackAt.has(now.noticeVersion)) {
+      statements.push({
+        sql: `UPDATE devices SET activity_state = ?, activity_state_since = ?, activity_state_at = ?
+              WHERE id = ? AND EXISTS (SELECT 1 FROM attendance_sessions WHERE employee_id = ? AND clock_out_at IS NULL)`,
+        args: [current.state, iso(Math.min(Date.parse(current.since) + ctx.skew, ctx.receivedAt)), at, device.deviceId, device.employeeId],
+      });
+    }
+    if (statements.length) await this.db.batch(statements, "write");
+  }
 
 
   /** Validates and trims one interval; returns its INSERT or the rejection. `taken` grows with accepted intervals. */

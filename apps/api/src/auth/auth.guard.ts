@@ -9,7 +9,7 @@ import {
 } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { Reflector } from "@nestjs/core";
-import { hasPermission, type Permission } from "@workfolio/shared";
+import { can, type Permission } from "@workfolio/shared";
 import type { Request, Response } from "express";
 import { apiRateLimitPerMinute, SessionRateLimit } from "../common/rate-limit.js";
 import { readScope } from "../common/scope.js";
@@ -110,7 +110,7 @@ export class AuthGuard implements CanActivate {
 
     const permission = this.reflector.getAllAndOverride<Permission | undefined>(PERMISSION, targets);
     const teamRead = permission && this.reflector.getAllAndOverride<boolean>(TEAM_SCOPED, targets) && readScope(req.user, permission) === "team";
-    if (permission && !hasPermission(req.user.role, permission) && !teamRead) throw new ForbiddenException("Your role does not allow this action");
+    if (permission && !can(req.user, permission) && !teamRead) throw new ForbiddenException("Your role does not allow this action");
     return true;
   }
 }

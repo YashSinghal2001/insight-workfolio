@@ -169,7 +169,7 @@ before(async () => {
   Object.assign(service, { encoderReason: null });
   encoder.encode = concatEncoder;
   const adminId = randomUUID();
-  await db.execute({ sql: "INSERT INTO users (id, email, role, password_hash) VALUES (?, 'admin@example.com', 'ADMIN', ?)", args: [adminId, await hashPassword(PASSWORD)] });
+  await db.execute({ sql: "INSERT INTO users (id, email, role, admin_title, password_hash) VALUES (?, 'admin@example.com', 'ADMIN', 'SUPER_ADMIN', ?)", args: [adminId, await hashPassword(PASSWORD)] });
   const r = await api("/auth/login", { method: "POST", body: { email: "admin@example.com", password: PASSWORD } });
   admin = r.res.headers.getSetCookie().map((c) => c.split(";")[0]).join("; ");
   await db.execute({

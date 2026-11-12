@@ -110,7 +110,7 @@ export class ScreenshotsController {
 
   @Post("retention/run")
   @HttpCode(200)
-  @RequirePermission("settings:manage")
+  @RequirePermission("screenshots:delete")
   retentionRun(@CurrentUser() user: AuthContext, @Body(new ZodPipe(retentionRunSchema)) _body: { confirm: true }) {
     return this.screenshots.retentionRun(user);
   }
@@ -122,9 +122,9 @@ export class ScreenshotsController {
     return this.screenshots.detail(user, id);
   }
 
-  /** Admin: deletes one screenshot (file, then the row is marked DELETED; the row is kept). Idempotent. */
+  /** Super Admin: deletes one screenshot (file, then the row is marked DELETED; the row is kept). Idempotent. */
   @Delete(":id")
-  @RequirePermission("settings:manage")
+  @RequirePermission("screenshots:delete")
   remove(@CurrentUser() user: AuthContext, @Param("id", ParseUUIDPipe) id: string, @Body(new ZodPipe(screenshotDeleteSchema)) body: ScreenshotDeleteRequest) {
     return this.screenshots.remove(user, id, body.reason);
   }

@@ -11,10 +11,10 @@ import {
   type ScreenshotStatusResponse,
   type ScreenshotStoredResponse,
 } from "@workfolio/shared";
-import { decideScreenshots, type ScreenshotDecision, type ScreenshotMode } from "./monitoring.ts";
+import { decideScreenshots, screenshotReport, type ScreenshotDecision, type ScreenshotMode, type ScreenshotReport } from "./monitoring.ts";
 import { uploadsFailing, type Notify } from "./notify.ts";
 import { words } from "./platform.ts";
-import { policyBlur, privacyText, storageLabel, uploadScreenshots, type ShotRow } from "./screenshot-sync.ts";
+import { policyBlur, policyFresh, privacyText, storageLabel, uploadScreenshots, type ShotRow } from "./screenshot-sync.ts";
 import { HttpError, type ApiClient, type CachedProfile } from "./session.ts";
 import { project, type QueuedEvent, type SyncPhase } from "./sync.ts";
 
@@ -70,6 +70,7 @@ const LABEL: Record<ScreenshotMode, [string, string]> = {
   PAUSED_BREAK: ["Paused (break)", "warn"],
   PAUSED_OFFLINE_OR_UNVERIFIED: ["Paused", "warn"],
   NEEDS_PERMISSION: ["Needs permission", "warn"],
+  AWAITING_CONSENT: ["Awaiting consent", "warn"],
   STOPPED: ["Off", "off"],
   ERROR: ["Error", "bad"],
 };
@@ -79,8 +80,18 @@ const mb = (bytes: number) => `${(bytes / 1024 / 1024).toFixed(bytes < 10 * 1024
 const list = (sel: string, items: readonly string[]) =>
   $(sel).replaceChildren(...items.map((text) => Object.assign(document.createElement("li"), { textContent: text })));
 
+let report: ScreenshotReport | undefined;
+/**
+ * How capture is going on this device, for the server (sent with the activity upload). A read of
+ * what the last render decided; undefined when screenshots are off, the notice is not acknowledged,
+ * capture is not meant to be running, or nothing is known yet.
+ */
+export const currentScreenshotReport = (): ScreenshotReport | undefined => report;
+
 export function initScreenshots(ctx: ScreenshotContext) {
   let status: ScreenshotStatusResponse | null = null;
+  /** When `status` last came from the server (ms); persisted beside the cached copy. */
+  let statusAtMs: number | null = null;
   let native: ShotStatus = OFF;
   let summary: Summary = EMPTY;
   let decision: ScreenshotDecision = { mode: "STOPPED", reason: "Signed out. No screenshots are taken." };
@@ -100,11 +111,20 @@ export function initScreenshots(ctx: ScreenshotContext) {
     const s = ctx.state();
     if (!s.profile) return;
     try {
-      status = await ctx.client.request<ScreenshotStatusResponse>("GET", "/screenshots/me");
-      await ctx.kvSet(`screenshots:${s.profile.userId}`, status);
+      await fromServer(await ctx.client.request<ScreenshotStatusResponse>("GET", "/screenshots/me"), s.profile.userId);
     } catch {
-      status ??= await ctx.kvGet<ScreenshotStatusResponse>(`screenshots:${s.profile.userId}`);
+      if (status) return; // keeps its age: the copy in memory is no fresher than when it was fetched
+      status = await ctx.kvGet<ScreenshotStatusResponse>(`screenshots:${s.profile.userId}`);
+      // A copy cached by an older app version has no age: treated as too old until the server answers.
+      statusAtMs = await ctx.kvGet<number>(`screenshots-at:${s.profile.userId}`);
     }
+  }
+
+  async function fromServer(fresh: ScreenshotStatusResponse, userId: string) {
+    status = fresh;
+    statusAtMs = Date.now();
+    await ctx.kvSet(`screenshots:${userId}`, status);
+    await ctx.kvSet(`screenshots-at:${userId}`, statusAtMs);
   }
 
   function decide(): ScreenshotDecision {
@@ -119,6 +139,7 @@ export function initScreenshots(ctx: ScreenshotContext) {
       enabled: !!status?.policy.enabled,
       consented: !!status?.consent.acknowledgedAt && status.consent.noticeVersion === status.notice.version,
       permission: native.permission,
+      policyStale: !!status && !policyFresh(statusAtMs, Date.now()),
       projection,
       pendingClockIn: !!projection?.session && pending.some((e) => e.type === "CLOCK_IN" && e.id === projection.session!.id),
       unverified: s.attendancePhase === "blocked" || (oldest !== null && Date.now() - oldest > DEFAULT_POLICY.maxOfflineAgeDays * 86_400_000),
@@ -191,6 +212,7 @@ export function initScreenshots(ctx: ScreenshotContext) {
     const s = ctx.state();
     const show = !!s.profile && s.deviceStatus === "ACTIVE";
     const p = policy();
+    report = screenshotReport(decision.mode, native.skipped);
     const needsConsent = show && native.supported && !!status?.policy.enabled && status.consent.noticeVersion === status.notice.version && !status.consent.acknowledgedAt;
     $("#screenshots").hidden = !show;
     $("#screenshot-consent").hidden = !needsConsent;
@@ -198,7 +220,7 @@ export function initScreenshots(ctx: ScreenshotContext) {
     $("#tracking-screenshots").textContent = decision.mode === "ACTIVE" ? `On now: main screen every ${minutes(p.intervalSeconds)}${policyBlur(p) ? ", blurred" : ""}` : LABEL[decision.mode][0];
     if (!show) return;
 
-    const [label, tone] = LABEL[decision.mode];
+    const [label, tone] = report === "CAPTURE_FAILED" ? ["Capture failed", "bad"] : LABEL[decision.mode];
     $("#shot-state").textContent = label;
     $("#shot-state").dataset.tone = tone;
     $("#shot-reason").textContent = decision.reason;
@@ -227,7 +249,7 @@ export function initScreenshots(ctx: ScreenshotContext) {
           : null;
     $("#shot-sync-detail").hidden = !detail;
     $("#shot-sync-detail").textContent = detail ?? "";
-    const warning = native.skipped ?? (used >= 0.8 ? `Local screenshot storage is ${Math.round(used * 100)}% full; capture pauses at 100% until screenshots upload.` : null);
+    const warning = native.skipped ?? (used >= 0.8 ? `Local screenshot storage is ${Math.round(used * 100)}% full; capture pauses at 100% until space is freed (waiting screenshots upload, or you dismiss ones that were not accepted).` : null);
     $("#shot-warning").hidden = !warning || decision.mode !== "ACTIVE";
     $("#shot-warning").textContent = warning ?? "";
     $("#shot-error").hidden = !native.error;
@@ -261,8 +283,7 @@ export function initScreenshots(ctx: ScreenshotContext) {
     $("#shot-consent-error").hidden = true;
     if (!status) return;
     try {
-      status = await ctx.client.request<ScreenshotStatusResponse>("POST", "/screenshots/consent", { noticeVersion: status.notice.version });
-      await ctx.kvSet(`screenshots:${ctx.state().profile!.userId}`, status);
+      await fromServer(await ctx.client.request<ScreenshotStatusResponse>("POST", "/screenshots/consent", { noticeVersion: status.notice.version }), ctx.state().profile!.userId);
       await poll();
     } catch (err) {
       $("#shot-consent-error").hidden = false;
@@ -300,6 +321,7 @@ export function initScreenshots(ctx: ScreenshotContext) {
     },
     async signOut() {
       status = null;
+      statusAtMs = null;
       decision = { mode: "STOPPED", reason: "Signed out. No screenshots are taken." };
       const p = DEFAULT_SCREENSHOT_SETTINGS;
       native = await call<ShotStatus>("screenshot_configure", { mode: "STOPPED", userId: null, deviceId: null, sessionId: null, intervalSeconds: p.intervalSeconds, quality: p.webpQuality, maxDimension: p.maxDimension, masks: [], blur: false }, OFF);

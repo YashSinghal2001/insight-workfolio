@@ -51,11 +51,25 @@ pub struct Config {
     pub blur: Option<bool>,
 }
 
+/// What the worker holds while nothing is captured (stopped, signed out, quitting). The values in
+/// force while capturing always come from the server policy via `screenshot_configure`; these mirror
+/// `DEFAULT_SCREENSHOT_SETTINGS` (packages/shared) only so the idle worker has a valid configuration.
+impl Default for Config {
+    fn default() -> Self {
+        Config { interval_ms: 300_000, quality: 70.0, max_dimension: 1920, masks: Vec::new(), blur: Some(false) }
+    }
+}
+
 /// Mask coordinates are fractions of the frame in units of 1/`MASK_SCALE` (server: `SCREENSHOT_MASK_SCALE`).
 pub const MASK_SCALE: u32 = 10_000;
 pub const MASK_MAX: usize = 20;
 const MASKS_INVALID: &str = "Screenshots paused: the privacy mask settings received from the server are invalid.";
 const BLUR_INVALID: &str = "Screenshots paused: the blur setting received from the server is invalid.";
+/// `ShotStatus::skipped` starts with this when a due capture was attempted and failed (capture,
+/// encoding or the local save). The UI tells it apart from "Not taken: …" (locked, asleep, no
+/// permission) and "Paused: …" (storage) by this prefix (CAPTURE_FAILED in monitoring.ts). Never
+/// latched: the next interval tries again.
+pub const CAPTURE_FAILED: &str = "Capture failed: ";
 
 /// A rectangle filled black on the captured pixels before the image is encoded: the covered
 /// pixels are never written to disk or uploaded. Reported to the server with each screenshot.
@@ -210,7 +224,9 @@ pub struct ShotStatus {
     /// Screen Recording permission (CGPreflightScreenCaptureAccess); checked on every status call.
     /// Always true on Windows, which has no screen-capture permission.
     pub permission: bool,
-    /// Why the last due capture did not happen (screen locked, no permission, storage full).
+    /// Why the last due capture did not happen or was not kept: "Not taken: …" (screen locked,
+    /// display asleep, no permission), "Paused: …" (storage) or "Capture failed: …" (`CAPTURE_FAILED`).
+    /// Cleared by the next saved capture; never stops the schedule.
     pub skipped: Option<String>,
     pub next_capture_ms: Option<i64>,
     /// Last screenshot saved on this computer (not yet a confirmed upload).
@@ -226,6 +242,32 @@ pub trait Os: Send + Sync {
     fn locked(&self) -> bool;
     fn free_bytes(&self, dir: &Path) -> Option<u64>;
     fn capture(&self, max_dimension: u32) -> Result<Frame, String>;
+    /// The captured display is asleep (dark): nothing to capture even when the screen is not locked.
+    fn display_asleep(&self) -> bool {
+        false
+    }
+}
+
+/// Lock, sleep and user-switch check for capture, on both OSes. Deliberately redundant: the level
+/// checks (lock screen up, session off console) are asked from the OS directly as well as through
+/// `session_events`, so capture stays off in those states however activity tracking chooses to
+/// classify them (a locked screen may count as idle time there; it is never captured).
+#[cfg_attr(not(any(target_os = "macos", windows)), allow(dead_code))]
+fn session_capturable() -> bool {
+    use crate::activity::platform::{on_console, screen_locked};
+    crate::session_events::observable_now() && !crate::session_events::current().asleep && !screen_locked() && on_console()
+}
+
+/// What the employee is told when the local cap is reached. Space comes back when waiting
+/// screenshots upload (their local copy is removed after the grace period) and when screenshots the
+/// server did not accept are dismissed; those never upload, so say so when they hold space.
+fn storage_full_reason(rejected: i64) -> String {
+    let base = "Paused: local screenshot storage is full.";
+    if rejected > 0 {
+        format!("{base} {rejected} screenshot(s) the server did not accept are still kept on this computer and will never upload: dismiss them below to free space. The rest is freed as waiting screenshots upload.")
+    } else {
+        format!("{base} Capture resumes as waiting screenshots upload and their local copies are removed (24 hours after upload).")
+    }
 }
 
 struct State {
@@ -252,7 +294,7 @@ impl Shooter {
             state: Mutex::new(State {
                 mode: "STOPPED".into(),
                 scope: None,
-                cfg: Config { interval_ms: 300_000, quality: 70.0, max_dimension: 1920, masks: Vec::new(), blur: Some(false) },
+                cfg: Config::default(),
                 last_tick: None,
                 last_cleanup_ms: 0,
                 status: ShotStatus {
@@ -307,9 +349,12 @@ impl Shooter {
         if os.locked() {
             return skip("Not taken: the screen was locked.");
         }
-        let used = db.lock().ok().and_then(|c| local_bytes(&c).ok()).unwrap_or(i64::MAX);
+        if os.display_asleep() {
+            return skip("Not taken: the display was asleep.");
+        }
+        let (used, rejected) = db.lock().ok().and_then(|c| Some((local_bytes(&c).ok()?, rejected_count(&c).ok()?))).unwrap_or((i64::MAX, 0));
         if used >= self.cap_bytes {
-            return skip("Paused: local screenshot storage is full. Capture resumes once screenshots upload.");
+            return skip(&storage_full_reason(rejected));
         }
         if os.free_bytes(&self.dir).is_some_and(|free| free < MIN_FREE_DISK_BYTES) {
             return skip("Paused: less than 1 GB free disk space on this computer.");
@@ -327,13 +372,14 @@ impl Shooter {
         let (width, height, webp, took, encode_took) = match result {
             Ok(r) => r,
             Err(e) => {
-                st.status.error = Some(format!("Screenshot failed: {e}"));
+                // Not `error`: the UI stops capture on an error, and nothing would ever clear it.
+                st.status.skipped = Some(format!("{CAPTURE_FAILED}{e}"));
                 return;
             }
         };
         // Held state lock: a break/clock-out (configure) cannot slip in between this check and the save.
-        if self.generation.load(Ordering::SeqCst) != generation || st.mode != "ACTIVE" || os.locked() {
-            st.status.skipped = Some("Not kept: capture was stopped or the screen locked while it was being taken.".into());
+        if self.generation.load(Ordering::SeqCst) != generation || st.mode != "ACTIVE" || os.locked() || os.display_asleep() {
+            st.status.skipped = Some("Not kept: capture was stopped, or the screen locked or went to sleep, while it was being taken.".into());
             return; // the frame is dropped; nothing was written
         }
         let saved = db.lock().map_err(|e| e.to_string()).and_then(|conn| save(&conn, &self.dir, &scope, wall, width, height, &webp, &cfg.masks, cfg.blur == Some(true)).map_err(|e| e.to_string()));
@@ -351,7 +397,7 @@ impl Shooter {
                 });
                 eprintln!("[screenshot] saved {}x{} {} bytes (capture {} ms, encode {} ms)", width, height, webp.len(), took.as_millis(), encode_took.as_millis());
             }
-            Err(e) => st.status.error = Some(format!("Could not save the screenshot on this computer: {e}")),
+            Err(e) => st.status.skipped = Some(format!("{CAPTURE_FAILED}could not save the screenshot on this computer: {e}")),
         }
     }
 
@@ -716,6 +762,11 @@ pub fn local_bytes(conn: &Connection) -> rusqlite::Result<i64> {
     conn.query_row("SELECT coalesce(sum(size_bytes), 0) FROM screenshots WHERE status != 'FAILED'", [], |r| r.get(0))
 }
 
+/// Screenshots the server refused, kept until the employee dismisses them (all users, like the cap).
+fn rejected_count(conn: &Connection) -> rusqlite::Result<i64> {
+    conn.query_row("SELECT count(*) FROM screenshots WHERE status = 'REJECTED'", [], |r| r.get(0))
+}
+
 #[derive(Serialize, Debug, Default, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Summary {
@@ -796,6 +847,12 @@ pub mod platform {
         pub const SUPPORTED: bool = true;
         const TIMEOUT: Duration = Duration::from_secs(15);
 
+        #[link(name = "CoreGraphics", kind = "framework")]
+        unsafe extern "C" {
+            // boolean_t. A level read from the window server: no permission, no notification to miss.
+            fn CGDisplayIsAsleep(display: u32) -> i32;
+        }
+
         /// Whether the user granted Screen Recording to this app. Never prompts.
         pub fn permission() -> bool {
             CGPreflightScreenCaptureAccess()
@@ -850,13 +907,19 @@ pub mod platform {
             /// Screen locked, Mac going to sleep, or another user's session in front (fast user
             /// switching, logout): session_events state plus the CGSession dictionary.
             fn locked(&self) -> bool {
-                !crate::session_events::observable_now()
+                !super::super::session_capturable()
             }
 
             fn free_bytes(&self, dir: &Path) -> Option<u64> {
                 let path = std::ffi::CString::new(dir.as_os_str().as_encoded_bytes()).ok()?;
                 let mut s: libc::statvfs = unsafe { std::mem::zeroed() };
                 (unsafe { libc::statvfs(path.as_ptr(), &mut s) } == 0).then(|| s.f_bavail as u64 * s.f_frsize)
+            }
+
+            /// Display sleep without a lock (no "require password", or inside its delay) would
+            /// otherwise capture a dark screen, or the desktop of an employee who has walked away.
+            fn display_asleep(&self) -> bool {
+                unsafe { CGDisplayIsAsleep(CGMainDisplayID()) != 0 }
             }
 
             /// The primary display only (CGMainDisplayID), scaled to `max_dimension`, without the cursor.
@@ -931,7 +994,13 @@ pub mod platform {
             /// Locked or secure desktop (UAC, Ctrl+Alt+Del), sleep, or this session not on the
             /// console: the same session_events rule as macOS.
             fn locked(&self) -> bool {
-                !crate::session_events::observable_now()
+                !super::super::session_capturable()
+            }
+
+            /// Display off without a lock (console display state from `win::session`). Unknown
+            /// (no notification received) counts as on, so it never stops capture by itself.
+            fn display_asleep(&self) -> bool {
+                crate::session_events::current().display_asleep
             }
 
             fn free_bytes(&self, dir: &Path) -> Option<u64> {
@@ -1002,6 +1071,7 @@ mod tests {
     struct FakeOs {
         permission: AtomicBool,
         locked: AtomicBool,
+        asleep: AtomicBool,
         fail: AtomicBool,
         captures: AtomicU64,
         free: u64,
@@ -1009,7 +1079,7 @@ mod tests {
     }
     impl FakeOs {
         fn new() -> FakeOs {
-            FakeOs { permission: AtomicBool::new(true), locked: AtomicBool::new(false), fail: AtomicBool::new(false), captures: AtomicU64::new(0), free: u64::MAX, on_capture: Mutex::new(None) }
+            FakeOs { permission: AtomicBool::new(true), locked: AtomicBool::new(false), asleep: AtomicBool::new(false), fail: AtomicBool::new(false), captures: AtomicU64::new(0), free: u64::MAX, on_capture: Mutex::new(None) }
         }
     }
     impl Os for FakeOs {
@@ -1018,6 +1088,9 @@ mod tests {
         }
         fn locked(&self) -> bool {
             self.locked.load(Ordering::SeqCst)
+        }
+        fn display_asleep(&self) -> bool {
+            self.asleep.load(Ordering::SeqCst)
         }
         fn free_bytes(&self, _: &Path) -> Option<u64> {
             Some(self.free)
@@ -1132,15 +1205,29 @@ mod tests {
         assert_eq!(s.status().skipped.as_deref(), Some("Not taken: the screen was locked."));
 
         os.locked.store(false, Ordering::SeqCst);
-        os.fail.store(true, Ordering::SeqCst); // e.g. permission revoked between the check and the capture
+        os.asleep.store(true, Ordering::SeqCst); // display asleep, screen not locked
         run(&s, &e, &os, 41 * MIN + 1000, 46 * MIN);
-        assert!(s.status().error.unwrap().contains("declined"));
+        assert_eq!(os.captures.load(Ordering::SeqCst), 0, "display asleep: not even attempted");
+        assert_eq!(s.status().skipped.as_deref(), Some("Not taken: the display was asleep."));
+
+        os.asleep.store(false, Ordering::SeqCst);
+        os.fail.store(true, Ordering::SeqCst); // e.g. permission revoked between the check and the capture
+        run(&s, &e, &os, 46 * MIN + 1000, 51 * MIN);
+        let failed = s.status();
+        assert!(failed.skipped.as_deref().is_some_and(|r| r.starts_with(CAPTURE_FAILED) && r.contains("declined")), "{:?}", failed.skipped);
+        assert_eq!(failed.error, None, "a failed capture is not an error state: the UI would stop capture for good");
+        assert!(failed.capturing && failed.next_capture_ms.is_some(), "the schedule goes on");
         assert!(e.rows().is_empty(), "nothing saved for a failed capture");
+        // Not latched: the next interval tries again and, once the cause is gone, saves and clears it.
+        run(&s, &e, &os, 51 * MIN + 1000, 56 * MIN);
+        assert_eq!(os.captures.load(Ordering::SeqCst), 2, "tried again while still failing");
+        os.fail.store(false, Ordering::SeqCst);
+        run(&s, &e, &os, 56 * MIN + 1000, 61 * MIN);
+        assert_eq!((e.rows().len(), s.status().skipped, s.status().error), (1, None, None), "recovered without a restart");
 
         s.configure("STOPPED".into(), None, CFG);
-        os.fail.store(false, Ordering::SeqCst);
-        run(&s, &e, &os, 46 * MIN + 1000, 90 * MIN);
-        assert!(e.rows().is_empty(), "clocked out: nothing");
+        run(&s, &e, &os, 61 * MIN + 1000, 90 * MIN);
+        assert_eq!(e.rows().len(), 1, "clocked out: nothing more");
     }
 
     #[test]
@@ -1163,6 +1250,13 @@ mod tests {
         run(&s, &e, &os, 5 * MIN + 1000, 10 * MIN + 1000);
         assert_eq!(os.captures.load(Ordering::SeqCst), 2);
         assert!(e.rows().is_empty(), "locked during the capture: dropped");
+
+        os.locked.store(false, Ordering::SeqCst);
+        let flag = os.clone();
+        *os.on_capture.lock().unwrap() = Some(Box::new(move || flag.asleep.store(true, Ordering::SeqCst)));
+        run(&s, &e, &os, 10 * MIN + 2000, 15 * MIN + 2000);
+        assert_eq!(os.captures.load(Ordering::SeqCst), 3);
+        assert!(e.rows().is_empty(), "display went to sleep during the capture: dropped");
     }
 
     #[test]
@@ -1195,8 +1289,16 @@ mod tests {
         s.configure("ACTIVE".into(), Some(scope()), CFG);
         run(&s, &e, &os, 0, 15 * MIN);
         assert_eq!(e.rows().len(), 1, "first capture fits, then capture pauses");
-        assert!(s.status().skipped.unwrap().contains("storage is full"));
+        let full = s.status().skipped.unwrap();
+        assert!(full.contains("storage is full") && full.contains("as waiting screenshots upload") && !full.contains("dismiss"), "{full}");
         assert_eq!(e.rows()[0].status, "PENDING", "the unsynced screenshot is kept");
+        // Held by a screenshot the server refused: uploading will never free it, and the message says so.
+        let id = e.rows()[0].id.clone();
+        mark(&e.db.lock().unwrap(), &id, "REJECTED", Some("Captured outside clocked-in time"), 0).unwrap();
+        run(&s, &e, &os, 15 * MIN + 1000, 21 * MIN);
+        let full = s.status().skipped.unwrap();
+        assert!(full.contains("storage is full") && full.contains("1 screenshot(s) the server did not accept") && full.contains("dismiss them"), "{full}");
+        assert_eq!(e.rows().len(), 1, "still nothing deleted to make room");
 
         let low = FakeOs { free: 100 * 1024 * 1024, ..FakeOs::new() };
         let s = Shooter::new(e.dir.clone(), LOCAL_CAP_BYTES);
@@ -1639,7 +1741,9 @@ mod tests {
         s.configure("ACTIVE".into(), Some(scope()), CFG);
         run(&s, &e, &os, 0, 10 * MIN);
         assert_eq!(os.captures.load(Ordering::SeqCst), 2, "tried again at the next interval");
-        assert!(s.status().error.unwrap().starts_with("Could not save the screenshot on this computer"));
+        let st = s.status();
+        assert!(st.skipped.as_deref().is_some_and(|r| r.starts_with(CAPTURE_FAILED) && r.contains("could not save the screenshot on this computer")), "{:?}", st.skipped);
+        assert_eq!(st.error, None, "not latched as an error");
         assert!(s.status().last_capture.is_none());
         assert_eq!(e.rows().len(), 1);
     }

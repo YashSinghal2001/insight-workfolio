@@ -80,7 +80,7 @@ export class ActivityController {
   /** Purges expired activity. Refused (409) until retention is approved in the settings. */
   @Post("retention/run")
   @HttpCode(200)
-  @RequirePermission("settings:manage")
+  @RequirePermission("screenshots:delete")
   retentionRun(@CurrentUser() user: AuthContext, @Body(new ZodPipe(retentionRunSchema)) _body: { confirm: true }) {
     return this.retention.run(user);
   }
@@ -114,13 +114,16 @@ export class ActivityController {
   @Get("summary")
   @RequirePermission("activity:read-own")
   async summary(@CurrentUser() user: AuthContext, @Query(new ZodPipe(activityQuerySchema)) q: ActivityQuery) {
-    return this.activity.summary(await this.target(user, q.employeeId), q.from, q.to);
+    const employee = await this.target(user, q.employeeId);
+    const summary = await this.activity.summary(employee, q.from, q.to);
+    await this.employees.auditRead(user, employee, "EMPLOYEE_ACTIVITY_SUMMARY_VIEWED", { from: q.from, to: q.to });
+    return summary;
   }
 
   @Get("timeline")
   @RequirePermission("activity:read-own")
   async timeline(@CurrentUser() user: AuthContext, @Query(new ZodPipe(activityQuerySchema)) q: ActivityQuery) {
-    return this.activity.timeline(await this.target(user, q.employeeId), q);
+    return this.activity.timeline(await this.target(user, q.employeeId), q, user);
   }
 
   /** Admin: per-employee range totals (each in the employee's own time zone), searchable and paginated; ≤ 31 days. */

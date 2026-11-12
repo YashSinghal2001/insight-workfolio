@@ -170,7 +170,7 @@ describe("websites", () => {
   });
 
   test("retention needs { confirm: true }", async () => {
-    const admin = await user("ADMIN");
+    const admin = await user("SUPER_ADMIN"); // purge runs are Super Admin-only
     for (const body of [undefined, {}, { confirm: false }, { confirm: true, extra: 1 }]) {
       assert.equal((await api("/websites/retention/run", { method: "POST", cookie: admin.cookie, body })).status, 400, JSON.stringify(body));
     }
@@ -254,8 +254,15 @@ describe("devices", () => {
   test("a device revoked while its request runs gets 403, not an empty 200", async () => {
     const e = await user("EMPLOYEE");
     const installationId = randomUUID();
-    const reg = await api("/devices/register", { method: "POST", cookie: e.cookie, body: { installationId, deviceName: "Mac", platform: "macos" } });
+    const device = { installationId, deviceName: "Mac", platform: "macos" };
+    // A browser (cookie) session cannot register a device or write device-bound records with a made-up installation id.
+    assert.equal((await api("/devices/register", { method: "POST", cookie: e.cookie, body: device })).status, 403);
+    assert.equal((await api("/attendance/clock-in", { method: "POST", cookie: e.cookie, headers: { "x-device-id": installationId, "idempotency-key": randomUUID() } })).status, 403);
+    assert.equal(await count("SELECT count(*) AS n FROM devices WHERE employee_id = ?", [e.employeeId]), 0);
+    const desktop = await api("/auth/login", { method: "POST", body: { email: e.email, password: PASSWORD, client: "desktop" } });
+    const reg = await api("/devices/register", { method: "POST", bearer: desktop.body.accessToken, body: device });
     assert.equal(reg.status, 201, reg.text);
+    assert.equal((await api("/attendance/clock-in", { method: "POST", cookie: e.cookie, headers: { "x-device-id": installationId, "idempotency-key": randomUUID() } })).status, 403, "still not from the browser, even with a real installation id");
     // The last-seen update runs in a batch with the session binding (API-08).
     const anyDb = db as unknown as { batch: (s: { sql: string }[], mode: string) => Promise<unknown> };
     const real = db.execute.bind(db);

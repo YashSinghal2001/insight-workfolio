@@ -292,7 +292,7 @@ try {
   // ================================ Employee (Ben) ===================================================
   await login(ben.email);
   {
-    await visit("/my/activity", has("Timeline"), "my activity");
+    await visit("/my/activity", has("Day timeline"), "my activity"); // the card was renamed from "Timeline" (QA round 3)
     await expect(`W24 /my/activity today: "Expected start 10:30"`, `${overlayRow(ymd(now))}.includes("Expected start 10:30")`);
     check("W24 /my/activity: the marker is drawn at 10:30", (await js(markerTitle(ymd(now)))).startsWith("Expected start 10:30"));
     await shot("w24-my-activity-expected.png");

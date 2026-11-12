@@ -74,7 +74,7 @@ test("monitoring texts follow the platform; default is macOS", () => {
 test("NEEDS_PERMISSION never mentions macOS on Windows (should not occur there)", () => {
   const i: ScreenshotInputs = {
     signedIn: true, supported: true, deviceStatus: "ACTIVE", enabled: true, consented: true, permission: false,
-    projection: project({ state: "CLOCKED_IN", serverTime: "2026-10-12T08:00:00.000Z", session: { id: "s", clockInAt: "2026-10-12T08:00:00.000Z", clockOutAt: null, status: "OPEN", corrected: false, clockInSource: "ONLINE", breaks: [] } }, []),
+    projection: project({ state: "CLOCKED_IN", missingClockOut: false, serverTime: "2026-10-12T08:00:00.000Z", session: { id: "s", clockInAt: "2026-10-12T08:00:00.000Z", clockOutAt: null, status: "OPEN", corrected: false, clockInSource: "ONLINE", breaks: [] } }, []),
     pendingClockIn: false, unverified: false, error: null,
   };
   assert.match(decideScreenshots(i).reason, /in macOS/);

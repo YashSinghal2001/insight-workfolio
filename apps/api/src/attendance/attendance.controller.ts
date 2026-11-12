@@ -1,6 +1,7 @@
 import { Body, Controller, Get, Headers, HttpCode, Post, Query, Res, StreamableFile } from "@nestjs/common";
 import {
   attendanceSummaryQuerySchema,
+  attendanceTimelineQuerySchema,
   DEVICE_HEADER,
   IDEMPOTENCY_HEADER,
   dateRangeSchema,
@@ -13,6 +14,7 @@ import {
   orgTimesheetFilename,
   timesheetFilename,
   type AttendanceEventType,
+  type AttendanceTimelineQuery,
   type ListEmployeesQuery,
   type SyncRequest,
 } from "@workfolio/shared";
@@ -101,14 +103,30 @@ export class AttendanceController {
   @Get("history")
   @RequirePermission("timesheet:read-own")
   async history(@CurrentUser() user: AuthContext, @Query(new ZodPipe(historyQuerySchema)) q: z.infer<typeof historyQuerySchema>) {
-    return this.attendance.history(await this.employees.attendanceTarget(user, q.employeeId), q);
+    const employee = await this.employees.attendanceTarget(user, q.employeeId);
+    const page = await this.attendance.history(employee, q);
+    await this.employees.auditRead(user, employee, "EMPLOYEE_ATTENDANCE_VIEWED", { from: q.from ?? null, to: q.to ?? null });
+    return page;
+  }
+
+  /**
+   * One local day as stored (clock-in/out, breaks, active and idle periods), chronological and paginated.
+   * Same target rule as history: self; team heads their teams; admins anyone; otherwise 404.
+   */
+  @Get("timeline")
+  @RequirePermission("timesheet:read-own")
+  async timeline(@CurrentUser() user: AuthContext, @Query(new ZodPipe(attendanceTimelineQuerySchema)) q: AttendanceTimelineQuery) {
+    return this.attendance.timeline(user, await this.employees.attendanceTarget(user, q.employeeId), q);
   }
 
   /** Daily + weekly totals for local dates [from, to] (≤ 92 days) in the employee's time zone. */
   @Get("timesheet")
   @RequirePermission("timesheet:read-own")
   async timesheet(@CurrentUser() user: AuthContext, @Query(new ZodPipe(timesheetQuerySchema)) q: z.infer<typeof timesheetQuerySchema>) {
-    return this.timesheets.forEmployee(await this.employees.attendanceTarget(user, q.employeeId), q.from, q.to);
+    const employee = await this.employees.attendanceTarget(user, q.employeeId);
+    const sheet = await this.timesheets.forEmployee(employee, q.from, q.to);
+    await this.employees.auditRead(user, employee, "EMPLOYEE_ATTENDANCE_VIEWED", { from: q.from, to: q.to });
+    return sheet;
   }
 
   /** Draft timesheet CSV for local dates [from, to] (≤ 92 days); same target rules as the timesheet. Not stored. */
@@ -121,6 +139,7 @@ export class AttendanceController {
   ) {
     const employee = await this.employees.attendanceTarget(user, q.employeeId);
     const { body, rows } = await this.timesheets.export(employee, q.from, q.to, q.format);
+    await this.employees.auditRead(user, employee, "EMPLOYEE_ATTENDANCE_EXPORTED", { from: q.from, to: q.to, format: q.format });
     res.setHeader("content-type", EXPORT_CONTENT_TYPES[q.format]);
     res.setHeader("x-export-rows", String(rows)); // shift count, so the app need not parse the file
     res.setHeader("content-disposition", `attachment; filename="${timesheetFilename(employee.employeeCode, q.from, q.to, q.format)}"`);

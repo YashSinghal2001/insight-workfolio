@@ -1,8 +1,8 @@
 import type { PlatformRole, Role } from "./roles.js";
 import type { ActivityAppTotal, ActivityKind, MonitoringNotice, MonitoringPolicy, MonitoringSettings } from "./activity.js";
-import type { AttendanceEventType, AttendanceState } from "./attendance.js";
+import type { AttendanceEventType, AttendanceState, LiveStatus } from "./attendance.js";
 import type { CorrectionStatus, CorrectionType } from "./corrections.js";
-import type { ScreenshotStorageProvider } from "./screenshots.js";
+import type { ScreenshotFeatureState, ScreenshotStorageProvider } from "./screenshots.js";
 import type { AccountStatus, EmploymentStatus } from "./schemas.js";
 import type { SessionSource, Timesheet, TimesheetTotals } from "./timesheet.js";
 
@@ -155,6 +155,8 @@ export interface AttendanceCurrent {
   /** The open session, or the most recent closed one (null if none yet). */
   session: AttendanceSession | null;
   serverTime: string;
+  /** The open session was clocked in on an earlier local date (forgotten clock-out). */
+  missingClockOut: boolean;
 }
 
 export type SyncResultStatus = "ACCEPTED" | "DUPLICATE" | "REJECTED";
@@ -186,6 +188,12 @@ export interface AttendanceOverviewRow {
     outcome: "ACCEPTED" | "REJECTED";
   } | null;
   deviceLastSeenAt: string | null;
+  /** Status now (deriveLiveStatus): attendance first, then the device's last fresh activity report. */
+  liveStatus: LiveStatus;
+  liveSince: string | null;
+  /** The open session was clocked in on an earlier local date (forgotten clock-out). */
+  missingClockOut: boolean;
+  screenshotState: ScreenshotFeatureState;
 }
 
 // ---- Timesheets & corrections ------------------------------------------------
@@ -208,6 +216,8 @@ export interface TimesheetSummaryRow {
   totals: TimesheetTotals;
   /** Open shift right now (not included in totals). */
   openShift: boolean;
+  /** The open shift was clocked in on an earlier local date (forgotten clock-out). */
+  missingClockOut: boolean;
   pendingCorrections: number;
 }
 
@@ -260,6 +270,9 @@ export interface ActivityStatusResponse {
   today: { date: string; activeMs: number; idleMs: number };
   currentSession: { sessionId: string; activeMs: number; idleMs: number } | null;
   lastReceivedAt: string | null;
+  /** The caller's status now (deriveLiveStatus). */
+  liveStatus: LiveStatus;
+  liveSince: string | null;
 }
 
 export interface ConsentRecord {

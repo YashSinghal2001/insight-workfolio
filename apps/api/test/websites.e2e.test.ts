@@ -84,7 +84,7 @@ before(async () => {
   await app.listen(0);
   base = (await app.getUrl()).replace("[::1]", "localhost");
   db = app.get(DATABASE);
-  await db.execute({ sql: "INSERT INTO users (id, email, role, password_hash) VALUES (?, 'admin@example.com', 'ADMIN', ?)", args: [randomUUID(), await hashPassword(PASSWORD)] });
+  await db.execute({ sql: "INSERT INTO users (id, email, role, admin_title, password_hash) VALUES (?, 'admin@example.com', 'ADMIN', 'SUPER_ADMIN', ?)", args: [randomUUID(), await hashPassword(PASSWORD)] });
   const login = await fetch(`${base}/api/v1/auth/login`, { method: "POST", headers: { origin: ORIGIN, "content-type": "application/json" }, body: JSON.stringify({ email: "admin@example.com", password: PASSWORD }) });
   admin = login.headers.getSetCookie().map((c) => c.split(";")[0]).join("; ");
 });

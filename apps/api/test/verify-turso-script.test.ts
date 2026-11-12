@@ -63,9 +63,9 @@ test("fully migrated: every check passes, nothing pending", async () => {
 });
 
 test("pending only after the latest applied: passes and reports them", async () => {
-  const { code, out } = await verify(await dbFile(["0028_auto_timelapse"]));
+  const { code, out } = await verify(await dbFile(["0029_device_live_state"]));
   assert.equal(code, 0, out);
-  assert.match(out, /pending 1 \(0028_auto_timelapse … 0028_auto_timelapse\), latest 0027_team_labels_self_view/);
+  assert.match(out, /pending 1 \(0029_device_live_state … 0029_device_live_state\), latest 0028_auto_timelapse/);
   assert.doesNotMatch(out, /FAIL|WARN/);
 });
 

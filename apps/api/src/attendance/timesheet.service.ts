@@ -4,6 +4,7 @@ import {
   addDays,
   buildTimesheet,
   localDate,
+  missingClockOut,
   TIMESHEET_CSV_COLUMNS,
   timesheetRows,
   toCsv,
@@ -157,7 +158,7 @@ export class TimesheetService {
                 WHERE s.employee_id IN (${marks}) AND s.clock_in_at >= ? AND s.clock_in_at < ?`,
           args: [...ids, `${addDays(query.from, -1)}T00:00:00.000Z`, `${addDays(query.to, 2)}T00:00:00.000Z`],
         },
-        { sql: `SELECT employee_id FROM attendance_sessions WHERE status = 'OPEN' AND employee_id IN (${marks})`, args: ids },
+        { sql: `SELECT employee_id, clock_in_at FROM attendance_sessions WHERE status = 'OPEN' AND employee_id IN (${marks})`, args: ids },
         {
           sql: `SELECT employee_id, count(*) AS n FROM correction_requests
                 WHERE status = 'PENDING' AND employee_id IN (${marks}) GROUP BY employee_id`,
@@ -168,7 +169,7 @@ export class TimesheetService {
     );
     const all = await withBreaks(this.db, sessions!.rows);
     const ownerOf = new Map(sessions!.rows.map((r) => [String(r.id), String(r.employee_id)]));
-    const openSet = new Set(open!.rows.map((r) => String(r.employee_id)));
+    const openAt = new Map(open!.rows.map((r) => [String(r.employee_id), String(r.clock_in_at)]));
     const pendingBy = new Map(pending!.rows.map((r) => [String(r.employee_id), Number(r.n)]));
     return {
       ...page,
@@ -176,7 +177,12 @@ export class TimesheetService {
         const employee = { id: e.id, fullName: e.fullName, employeeCode: e.employeeCode, timezone: e.timezone };
         const mine = all.filter((s) => ownerOf.get(s.id) === e.id);
         const { totals } = buildTimesheet(mine, { from: query.from, to: query.to, timeZone: e.timezone, policy: this.policy });
-        return { employee, totals, openShift: openSet.has(e.id), pendingCorrections: pendingBy.get(e.id) ?? 0 };
+        const clockInAt = openAt.get(e.id);
+        return {
+          employee, totals, openShift: !!clockInAt,
+          missingClockOut: missingClockOut(clockInAt ? { clockInAt, clockOutAt: null } : null, e.timezone),
+          pendingCorrections: pendingBy.get(e.id) ?? 0,
+        };
       }),
     };
   }

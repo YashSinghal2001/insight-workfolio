@@ -540,7 +540,7 @@ describe("OAuth flow and routes (MOCKED Google)", () => {
     base = (await app.getUrl()).replace("[::1]", "localhost");
     const db = app.get(DATABASE);
     const login = async (email: string, role: string) => {
-      await db.execute({ sql: "INSERT INTO users (id, email, role, password_hash) VALUES (?, ?, ?, ?)", args: [randomUUID(), email, role, await hashPassword("pass phrase 123")] });
+      await db.execute({ sql: "INSERT INTO users (id, email, role, admin_title, password_hash) VALUES (?, ?, ?, ?, ?)", args: [randomUUID(), email, role, role === "ADMIN" ? "SUPER_ADMIN" : null, await hashPassword("pass phrase 123")] }); // connecting storage is Super Admin-only
       const r = await fetch(`${base}/api/v1/auth/login`, { method: "POST", headers: { origin: "http://localhost:3000", "content-type": "application/json" }, body: JSON.stringify({ email, password: "pass phrase 123" }) });
       return r.headers.getSetCookie().map((c) => c.split(";")[0]).join("; ");
     };

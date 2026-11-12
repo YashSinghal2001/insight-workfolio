@@ -13,7 +13,9 @@ import {
   type DailyAttendanceResponse,
   type DailyAttendanceStatus,
   type LeavePortion,
+  type LiveStatus,
   type Paginated,
+  type ScreenshotFeatureState,
 } from "@workfolio/shared";
 import { DataTable, EmptyState, ErrorState, FilterBar, PageHeader, Pagination, SkeletonRows, StatusBadge, Tabs, type Tone } from "@/components/kit";
 import { formatInZone, inputClass, secondaryButtonClass } from "@/components/ui";
@@ -26,6 +28,22 @@ const STATE: Record<AttendanceOverviewRow["state"], { label: string; tone: Tone 
   CLOCKED_IN: { label: "Clocked in", tone: "success" },
   ON_BREAK: { label: "On break", tone: "warning" },
   CLOCKED_OUT: { label: "Clocked out", tone: "neutral" },
+};
+
+/** UNKNOWN (no fresh report from the desktop) is shown as unknown, never as active or idle. */
+const LIVE: Record<LiveStatus, { label: string; tone: Tone }> = {
+  ACTIVE: { label: "Active", tone: "success" },
+  IDLE: { label: "Idle", tone: "warning" },
+  ON_BREAK: { label: "On break", tone: "info" },
+  NOT_CLOCKED_IN: { label: "Not clocked in", tone: "neutral" },
+  UNKNOWN: { label: "Unknown", tone: "neutral" },
+};
+const SHOTS: Record<ScreenshotFeatureState, { label: string; tone: Tone }> = {
+  DISABLED: { label: "Disabled", tone: "neutral" },
+  AWAITING_CONSENT: { label: "Awaiting consent", tone: "info" },
+  ENABLED: { label: "Enabled", tone: "success" },
+  PERMISSION_DENIED: { label: "Permission denied", tone: "danger" },
+  CAPTURE_FAILED: { label: "Capture failed", tone: "danger" },
 };
 
 const totals = (s: AttendanceSession, now: number) =>
@@ -105,7 +123,7 @@ function Live() {
       {!data && !error && <SkeletonRows label="attendance" />}
       {data?.items.length === 0 && <EmptyState title={query.q ? "No employees match your search." : "No employees enrolled yet."} />}
       {data && data.items.length > 0 && (
-        <DataTable label="Live attendance" head={["Employee", "Status", "Clocked in", "Breaks", "Net working time", "Last sync"]} minWidth={860}>
+        <DataTable label="Live attendance" head={["Employee", "Status", "Activity", "Clocked in", "Breaks", "Net working time", "Screenshots", "Last sync"]} minWidth={1080}>
           {data.items.map((row) => <Row key={row.employeeId} row={row} now={now} />)}
         </DataTable>
       )}
@@ -217,6 +235,12 @@ function Row({ row, now }: { row: AttendanceOverviewRow; now: number }) {
       </td>
       <td>
         <StatusBadge tone={STATE[row.state].tone}>{STATE[row.state].label}</StatusBadge>
+        {row.missingClockOut && <div className="mt-1"><StatusBadge tone="danger">Missing clock-out</StatusBadge></div>}
+      </td>
+      <td>
+        <StatusBadge tone={LIVE[row.liveStatus].tone}>{LIVE[row.liveStatus].label}</StatusBadge>
+        {row.liveSince && <div className="text-xs text-muted">since {formatInZone(row.liveSince, row.timezone)}</div>}
+        {row.liveStatus === "UNKNOWN" && <div className="text-xs text-muted">No recent report from the desktop app</div>}
       </td>
       <td>{open ? formatInZone(s.clockInAt, row.timezone) : "—"}</td>
       <td>
@@ -225,6 +249,7 @@ function Row({ row, now }: { row: AttendanceOverviewRow; now: number }) {
       <td className="tabular-nums">
         {open && t ? formatDuration(t.netMs) : s && t ? <span className="text-muted">Last shift {formatDuration(t.netMs)}</span> : "—"}
       </td>
+      <td><StatusBadge tone={SHOTS[row.screenshotState].tone}>{SHOTS[row.screenshotState].label}</StatusBadge></td>
       <td>
         {!ev ? (
           <span className="text-muted">Never</span>

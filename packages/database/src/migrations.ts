@@ -1234,6 +1234,21 @@ export const MIGRATIONS: Migration[] = [
       "ALTER TABLE timelapses ADD COLUMN automatic INTEGER NOT NULL DEFAULT 0 CHECK (automatic IN (0, 1))",
     ],
   },
+  {
+    id: "0029_device_live_state",
+    statements: [
+      // What the desktop last reported about "now" (POST /activity/sync `current`): the open interval is
+      // not uploaded, so this is the only source for "idle right now". Overwritten in place (a live
+      // value, not history); *_at is the server's receive time, used for staleness. All NULL = no report.
+      "ALTER TABLE devices ADD COLUMN activity_state TEXT CHECK (activity_state IS NULL OR activity_state IN ('ACTIVE', 'IDLE', 'UNOBSERVED'))",
+      "ALTER TABLE devices ADD COLUMN activity_state_since TEXT",
+      "ALTER TABLE devices ADD COLUMN activity_state_at TEXT",
+      "ALTER TABLE devices ADD COLUMN screenshot_state TEXT CHECK (screenshot_state IS NULL OR screenshot_state IN ('OK', 'PERMISSION_DENIED', 'CAPTURE_FAILED'))",
+      "ALTER TABLE devices ADD COLUMN screenshot_state_at TEXT",
+      // Why a person deleted a screenshot (required by the API); NULL for retention and earlier deletes.
+      "ALTER TABLE screenshots ADD COLUMN deleted_reason TEXT CHECK (deleted_reason IS NULL OR length(deleted_reason) <= 500)",
+    ],
+  },
 ];
 
 const checksum = (m: Migration) => createHash("sha256").update(JSON.stringify(m.statements)).digest("hex");

@@ -116,7 +116,7 @@ before(async () => {
   await app.listen(0);
   base = (await app.getUrl()).replace("[::1]", "localhost");
   db = app.get(DATABASE);
-  await db.execute({ sql: "INSERT INTO users (id, email, role, password_hash) VALUES (?, 'admin@example.com', 'ADMIN', ?)", args: [randomUUID(), await hashPassword(PASSWORD)] });
+  await db.execute({ sql: "INSERT INTO users (id, email, role, admin_title, password_hash) VALUES (?, 'admin@example.com', 'ADMIN', 'SUPER_ADMIN', ?)", args: [randomUUID(), await hashPassword(PASSWORD)] });
   const r = await api("/auth/login", { method: "POST", body: { email: "admin@example.com", password: PASSWORD } });
   admin = r.res.headers.getSetCookie().map((c) => c.split(";")[0]).join("; ");
 });

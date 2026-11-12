@@ -7,6 +7,7 @@ const ids = MIGRATIONS.map((m) => m.id);
 const PENDING_AFTER_0016 = [
   "0017_work_schedule_and_app_categories", "0019_screenshot_blur_policy", "0021_leave_types", "0022_holidays", "0023_session_device",
   "0024_teams", "0025_person_overrides", "0026_alert_rules", "0027_team_labels_self_view", "0028_auto_timelapse",
+  "0029_device_live_state",
 ];
 
 /** A database migrated by a build that ended at 0016 (staging today). MIGRATIONS is restored afterwards. */
@@ -50,7 +51,7 @@ test("fresh database: everything pending and nothing is created", async () => {
   db.close();
 });
 
-test("database at 0016: exactly the 10 later ids are pending", async () => {
+test("database at 0016: exactly the 11 later ids are pending", async () => {
   const db = await at0016();
   const status = await migrationStatus(db);
   assert.deepEqual(status.applied, ids.slice(0, 16));
@@ -103,7 +104,7 @@ test("schema_migrations from before checksums (no checksum column): read, not ed
   db.close();
 });
 
-test("0016 with data -> migrate applies exactly the 10, re-run none; defaults, integrity, 51/65/91", async () => {
+test("0016 with data -> migrate applies exactly the 11, re-run none; defaults, integrity, 51/65/91", async () => {
   const db = await at0016();
   const q = (sql: string, args: (string | number)[] = []) => db.execute({ sql, args });
   const notice = String((await db.execute("SELECT version FROM monitoring_notices LIMIT 1")).rows[0]!.version);
@@ -133,6 +134,13 @@ test("0016 with data -> migrate applies exactly the 10, re-run none; defaults, i
   assert.deepEqual(await one("SELECT blur, auto_timelapse FROM screenshot_policies"), { blur: 0, auto_timelapse: 0 });
   assert.deepEqual(await one("SELECT blurred FROM screenshots"), { blurred: 0 });
   assert.deepEqual(await one("SELECT automatic FROM timelapses"), { automatic: 0 });
+  // 0029: no live report and no delete reason on existing rows; the new values are checked.
+  assert.deepEqual(await one("SELECT activity_state, activity_state_since, activity_state_at, screenshot_state, screenshot_state_at FROM devices"),
+    { activity_state: null, activity_state_since: null, activity_state_at: null, screenshot_state: null, screenshot_state_at: null });
+  assert.deepEqual(await one("SELECT deleted_reason FROM screenshots"), { deleted_reason: null });
+  await assert.rejects(q("UPDATE devices SET activity_state = 'TYPING'"), /CHECK/);
+  await assert.rejects(q("UPDATE devices SET screenshot_state = 'BROKEN'"), /CHECK/);
+  await q("UPDATE devices SET activity_state = 'IDLE', screenshot_state = 'PERMISSION_DENIED'");
   assert.deepEqual(await one("SELECT idle_excluded_apps FROM monitoring_policies"), { idle_excluded_apps: "[]" });
   assert.deepEqual(await one("SELECT device_id FROM sessions"), { device_id: null });
 

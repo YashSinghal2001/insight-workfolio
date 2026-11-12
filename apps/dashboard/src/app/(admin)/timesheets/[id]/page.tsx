@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useParams } from "next/navigation";
 import {
   formatDuration,
+  missingClockOut,
   timesheetFilename,
   TIMESHEET_CSV_FORMAT,
   type AttendanceSession,
@@ -15,7 +16,7 @@ import {
 } from "@workfolio/shared";
 import { useAuth } from "@/components/auth-provider";
 import { CorrectionCard } from "@/components/correction-card";
-import { Button, ErrorState, PageHeader, SkeletonRows, SuccessNotice } from "@/components/kit";
+import { Button, ErrorState, PageHeader, Pagination, SkeletonRows, StatusBadge, SuccessNotice } from "@/components/kit";
 import { RangePicker, weekRange, type Range } from "@/components/range-picker";
 import { Card, formatInZone, Notice } from "@/components/ui";
 import { api, ApiRequestError, errorMessage } from "@/lib/api";
@@ -45,6 +46,7 @@ function EmployeeTimesheet() {
   const { id } = useParams<{ id: string }>();
   const { auth } = useAuth();
   const [range, setRange] = useState<Range>(() => weekRange());
+  const [shiftPage, setShiftPage] = useState(1);
   const [sheet, setSheet] = useState<TimesheetResponse | null>(null);
   const [shifts, setShifts] = useState<Paginated<AttendanceSession> | null>(null);
   const [corrections, setCorrections] = useState<Paginated<CorrectionRequest> | null>(null);
@@ -58,7 +60,7 @@ function EmployeeTimesheet() {
       const q = `employeeId=${id}&from=${range.from}&to=${range.to}`;
       const [t, h, c] = await Promise.all([
         api<TimesheetResponse>(`/attendance/timesheet?${q}`),
-        api<Paginated<AttendanceSession>>(`/attendance/history?${q}&pageSize=${SHIFT_LIMIT}`),
+        api<Paginated<AttendanceSession>>(`/attendance/history?${q}&page=${shiftPage}&pageSize=${SHIFT_LIMIT}`),
         api<Paginated<CorrectionRequest>>(`/attendance/corrections?employeeId=${id}&pageSize=${CORRECTION_LIMIT}`),
       ]);
       setSheet(t);
@@ -68,7 +70,7 @@ function EmployeeTimesheet() {
     } catch (err) {
       setError({ status: err instanceof ApiRequestError ? err.status : undefined, message: errorMessage(err) });
     }
-  }, [id, range]);
+  }, [id, range, shiftPage]);
 
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect -- fetch on mount / range change
@@ -134,7 +136,7 @@ function EmployeeTimesheet() {
       {exportError && <Notice tone="error">{exportError}</Notice>}
       <SuccessNotice message={ok} onDismiss={() => setOk(null)} />
 
-      <RangePicker value={range} maxDays={92} timeZone={tz} onChange={(r) => (setSheet(null), setRange(r))} />
+      <RangePicker value={range} maxDays={92} timeZone={tz} onChange={(r) => (setSheet(null), setShiftPage(1), setRange(r))} />
 
       {sheet.totals.incompleteDays > 0 && (
         <Notice tone="warning">
@@ -203,9 +205,6 @@ function EmployeeTimesheet() {
       </Card>
 
       <Card title="Shifts and breaks">
-        {shifts.total > shifts.items.length && (
-          <p className="mb-2 text-xs text-muted">Showing the {shifts.items.length} most recent of {shifts.total} shifts in this range. Narrow the range to see the others.</p>
-        )}
         {shifts.items.length === 0 ? (
           <p className="text-sm text-muted">No shifts in this range.</p>
         ) : (
@@ -213,6 +212,7 @@ function EmployeeTimesheet() {
             {shifts.items.map((s) => (
               <li key={s.id} className="py-2">
                 <span className="font-medium">{formatInZone(s.clockInAt, tz)} → {s.clockOutAt ? time(s.clockOutAt, tz) : "open"}</span>
+                {missingClockOut(s, tz) && <>{" "}<StatusBadge tone="danger">Missing clock-out</StatusBadge></>}
                 {s.corrected && <Tag>corrected</Tag>}
                 {s.clockInSource === "OFFLINE_SYNC" && <Tag>offline sync</Tag>}
                 {s.clockInSource === "CORRECTION" && <Tag>added by correction</Tag>}
@@ -222,6 +222,9 @@ function EmployeeTimesheet() {
               </li>
             ))}
           </ul>
+        )}
+        {shifts.total > shifts.pageSize && (
+          <div className="mt-3"><Pagination label="Shift pages" page={shiftPage} pageCount={Math.ceil(shifts.total / shifts.pageSize)} onPage={setShiftPage} /></div>
         )}
       </Card>
 

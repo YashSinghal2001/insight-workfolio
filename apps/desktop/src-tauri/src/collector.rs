@@ -111,7 +111,7 @@ impl Collector {
                     for t in transitions.try_iter() {
                         worker.on_transition(&app.state::<Mutex<Connection>>(), t, session_events::current());
                     }
-                    let period = worker.state.lock().map(|s| s.tracker.cfg.sample_ms).unwrap_or(15_000);
+                    let period = worker.lock_state().tracker.cfg.sample_ms;
                     if worker.wake.swap(false, Ordering::SeqCst) || last.elapsed() >= Duration::from_millis(period as u64) {
                         last = Instant::now();
                         worker.tick(&app.state::<Mutex<Connection>>());
@@ -122,21 +122,35 @@ impl Collector {
         collector
     }
 
+    /// The state, even after a panic poisoned its lock: the tracker starts afresh (its open interval
+    /// ends at the last checkpoint, like after a crash) instead of recording nothing until restart.
+    // Release builds abort on panic, so this matters for debug builds and tests only.
+    fn lock_state(&self) -> std::sync::MutexGuard<'_, State> {
+        self.state.lock().unwrap_or_else(|poisoned| {
+            let mut st = poisoned.into_inner();
+            st.tracker = Tracker::new(st.tracker.cfg.clone());
+            self.state.clear_poison();
+            st
+        })
+    }
+
     fn take_sample(&self) -> Sample {
+        let (locked, away) = session_events::unobservable_now();
         Sample {
             wall_ms: now_ms(),
             mono_ms: self.started.elapsed().as_millis() as i64,
             app: platform::frontmost(),
             idle_ms: platform::idle_ms(),
-            locked: !session_events::observable_now(),
+            locked,
+            away,
         }
     }
 
-    /// A lock, sleep or session switch from macOS (session_events): attribution stops at the moment
+    /// A lock, sleep or session switch from the OS (session_events): attribution stops at the moment
     /// it happened, not at the next sample. Unlock, wake or the session coming back takes a sample
     /// right away (it is unobserved until the screen is actually unlocked and this session in front).
     fn on_transition(&self, db: &Mutex<Connection>, t: Transition, session: SessionState) {
-        let Ok(mut st) = self.state.lock() else { return };
+        let mut st = self.lock_state();
         st.status.locked = session.locked;
         st.status.asleep = session.asleep;
         st.status.session_inactive = session.session_inactive;
@@ -147,20 +161,22 @@ impl Collector {
             self.wake.store(true, Ordering::SeqCst);
             return;
         }
-        let closed = st.tracker.interrupt(t.at_ms);
+        // A locked screen is idle from the lock (the employee notice says so); sleep and a session
+        // switch are unobserved: everything closes and nothing stays open.
+        let closed = if t.event == session_events::Event::Locked { st.tracker.lock(t.at_ms) } else { st.tracker.interrupt(t.at_ms) };
         st.status.current_app = None;
-        st.status.idle = false;
-        st.status.idle_since_ms = None;
+        st.status.idle = st.tracker.open.as_ref().is_some_and(|o| o.kind == Kind::Idle);
+        st.status.idle_since_ms = st.tracker.open.as_ref().filter(|o| o.kind == Kind::Idle).map(|o| o.start_ms);
         if let (Some((user, device)), Ok(conn)) = (st.scope.clone(), db.lock()) {
-            // Everything is closed now: the open/held rows become uploadable, none stay open.
-            if let Err(e) = queue::activity_checkpoint(&conn, &user, &device, &closed, []) {
+            let st = &mut *st;
+            if let Err(e) = queue::activity_checkpoint(&conn, &user, &device, &closed, st.tracker.held.iter().chain(&st.tracker.open)) {
                 st.status.error = Some(format!("Could not save activity locally: {e}"));
             }
         }
     }
 
     fn tick(&self, db: &Mutex<Connection>) {
-        let Ok(mut st) = self.state.lock() else { return };
+        let mut st = self.lock_state();
         if st.mode != "ACTIVE" && st.status.error.is_some() {
             // The UI paused monitoring because of this error: clear it once the local queue is
             // writable and under the backlog limit again, so the UI can resume (no restart needed).
@@ -189,8 +205,9 @@ impl Collector {
     /// One sample into the tracker and the local queue (split from `tick` so tests feed samples).
     fn record(st: &mut State, db: &Mutex<Connection>, user: &str, device: &str, sample: Sample) {
         let closed = st.tracker.sample(&sample);
-        st.status.current_app = if sample.locked { None } else { sample.app.clone() };
-        st.status.idle_seconds = (sample.idle_ms >= 0 && !sample.locked).then_some(sample.idle_ms / 1000);
+        let hidden = sample.locked || sample.away;
+        st.status.current_app = if hidden { None } else { sample.app.clone() };
+        st.status.idle_seconds = (sample.idle_ms >= 0 && !hidden).then_some(sample.idle_ms / 1000);
         st.status.idle = st.tracker.open.as_ref().is_some_and(|o| o.kind == Kind::Idle);
         st.status.idle_since_ms = st.tracker.open.as_ref().filter(|o| o.kind == Kind::Idle).map(|o| o.start_ms);
         st.status.last_gap_ms = st.tracker.last_gap;
@@ -222,7 +239,7 @@ impl Collector {
 
     /// Sets the monitoring mode decided by the UI. Leaving ACTIVE closes the open interval.
     pub fn configure(&self, db: &Mutex<Connection>, mode: String, scope: Option<(String, String)>, cfg: Config) -> CollectorStatus {
-        let Ok(mut st) = self.state.lock() else { return self.status() };
+        let mut st = self.lock_state();
         let was_active = st.mode == "ACTIVE";
         let scope_changed = st.scope != scope;
         if was_active && (mode != "ACTIVE" || scope_changed) {
@@ -255,7 +272,7 @@ impl Collector {
     }
 
     pub fn status(&self) -> CollectorStatus {
-        self.state.lock().map(|s| s.status.clone()).unwrap_or_else(|_| CollectorStatus::new("ERROR", Some("Collector unavailable".into())))
+        self.lock_state().status.clone()
     }
 }
 
@@ -282,8 +299,29 @@ mod tests {
         crate::queue::tests::remove_db(&path);
     }
 
+    #[test]
+    fn a_panic_while_holding_the_state_does_not_stop_the_collector_for_good() {
+        let path = std::env::temp_dir().join(format!("wf-collector-test-{}.db", uuid::Uuid::new_v4()));
+        let db = Mutex::new(queue::open(&path).unwrap());
+        let c = Collector::new();
+        active(&c);
+        feed(&c, &db, sample(0, "Code", 0));
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _held = c.state.lock().unwrap();
+            panic!("simulated tracker panic");
+        }));
+        assert!(c.state.is_poisoned());
+        assert!(c.status().last_sample_ms.is_some(), "status still readable");
+        assert!(!c.state.is_poisoned() && c.lock_state().tracker.open.is_none(), "tracker reset to a clean state");
+        assert_eq!(c.lock_state().mode, "ACTIVE", "still monitoring");
+        feed(&c, &db, sample(15, "Code", 0));
+        feed(&c, &db, sample(30, "Code", 0));
+        assert_eq!(rows(&db, "OPEN"), vec![("ACTIVE".into(), Some("Code".into()), 15, 30)], "recording again");
+        crate::queue::tests::remove_db(&path);
+    }
+
     fn sample(t: i64, app: &str, idle_s: i64) -> Sample {
-        Sample { wall_ms: t * 1000, mono_ms: t * 1000, app: Some(App { id: None, name: app.into() }), idle_ms: idle_s * 1000, locked: false }
+        Sample { wall_ms: t * 1000, mono_ms: t * 1000, app: Some(App { id: None, name: app.into() }), idle_ms: idle_s * 1000, locked: false, away: false }
     }
     fn rows(db: &Mutex<Connection>, status: &str) -> Vec<(String, Option<String>, i64, i64)> {
         let conn = db.lock().unwrap();
@@ -349,9 +387,15 @@ mod tests {
     fn locked(t: i64) -> Sample {
         Sample { locked: true, ..sample(t, "loginwindow", 0) }
     }
+    fn away(t: i64) -> Sample {
+        Sample { away: true, ..sample(t, "loginwindow", 0) }
+    }
 
+    /// A locked screen is IDLE from the lock to the unlock, as the employee notice says ("Idle
+    /// time: … or the screen is locked", packages/shared/src/activity.ts); sleep and another
+    /// user's session record nothing.
     #[test]
-    fn lock_sleep_and_user_switch_record_nothing_and_close_at_the_transition() {
+    fn lock_is_idle_while_sleep_and_user_switch_record_nothing_and_all_close_at_the_transition() {
         use session_events::Event::*;
         let path = std::env::temp_dir().join(format!("wf-collector-test-{}.db", uuid::Uuid::new_v4()));
         let db = Mutex::new(queue::open(&path).unwrap());
@@ -360,22 +404,25 @@ mod tests {
         let mut os = SessionState::default();
         let code = |a, b| ("ACTIVE".to_string(), Some("Code".to_string()), a, b);
 
+        let idle = |a, b| ("IDLE".to_string(), None, a, b);
         // Lock at 20 s: the open interval is closed and uploadable at once, not at the next sample.
         feed(&c, &db, sample(0, "Code", 0));
         feed(&c, &db, sample(15, "Code", 0));
         deliver(&c, &db, &mut os, Locked, 20);
         assert_eq!(rows(&db, "PENDING"), vec![code(0, 20)]);
-        assert!(rows(&db, "OPEN").is_empty());
-        assert!(c.status().locked && c.status().current_app.is_none());
+        assert_eq!(rows(&db, "OPEN"), vec![idle(20, 20)], "idle starts at the lock");
+        let st = c.status();
+        assert!(st.locked && st.idle && st.idle_since_ms == Some(20_000) && st.current_app.is_none());
         for t in (30..=90).step_by(15) {
             feed(&c, &db, locked(t));
         }
-        assert!(rows(&db, "OPEN").is_empty(), "no IDLE (or ACTIVE) while locked");
+        assert_eq!(rows(&db, "OPEN"), vec![idle(20, 90)], "IDLE while locked, even with input at the lock screen");
         deliver(&c, &db, &mut os, Unlocked, 95);
         assert!(c.wake.swap(false, Ordering::SeqCst), "unlock samples right away");
         assert!(!c.status().locked);
         feed(&c, &db, sample(95, "Code", 0));
-        assert_eq!(c.status().last_gap_ms, Some((20_000, 95_000)));
+        assert_eq!(c.status().last_gap_ms, None, "locked time is idle, not a gap");
+        assert!(!c.status().idle);
 
         // Sleep at 100 s, wake an hour later (wall clock jumped, monotonic did not), locked at wake.
         feed(&c, &db, sample(99, "Code", 0));
@@ -386,19 +433,19 @@ mod tests {
         feed(&c, &db, Sample { mono_ms: 115_000, ..locked(3_715) });
         deliver(&c, &db, &mut os, Unlocked, 3_720);
         feed(&c, &db, Sample { mono_ms: 120_000, ..sample(3_720, "Code", 1) });
-        assert_eq!(c.status().last_gap_ms, Some((100_000, 3_720_000)));
+        assert_eq!(c.status().last_gap_ms, Some((100_000, 3_715_000)), "the sleep; the locked screen after wake is idle");
 
         // Fast user switch at 3 730 s; the other user's input never counts.
         deliver(&c, &db, &mut os, SessionResigned, 3_730);
         assert!(c.status().session_inactive);
         for t in (3_735..=4_000).step_by(15) {
-            feed(&c, &db, Sample { mono_ms: t * 1000 - 3_600_000, ..locked(t) });
+            feed(&c, &db, Sample { mono_ms: t * 1000 - 3_600_000, ..away(t) });
         }
         deliver(&c, &db, &mut os, SessionActive, 4_005);
         assert!(!c.status().session_inactive);
         c.configure(&db, "STOPPED".into(), None, Config::new(15, 300));
 
-        assert_eq!(rows(&db, "PENDING"), vec![code(0, 20), code(95, 100), code(3_720, 3_730)]);
+        assert_eq!(rows(&db, "PENDING"), vec![code(0, 20), idle(20, 95), code(95, 100), idle(3_715, 3_720), code(3_720, 3_730)]);
         assert!(rows(&db, "OPEN").is_empty());
         crate::queue::tests::remove_db(&path);
     }

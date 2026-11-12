@@ -570,8 +570,7 @@ pub fn run() {
                     c.configure(&db, "STOPPED".into(), None, activity::Config::new(15, 300));
                 }
                 if let Some(s) = _app.try_state::<Arc<screenshot::Shooter>>() {
-                    let cfg = screenshot::Config { interval_ms: 300_000, quality: 70.0, max_dimension: 1920, masks: Vec::new(), blur: Some(false) };
-                    s.configure("STOPPED".into(), None, cfg);
+                    s.configure("STOPPED".into(), None, screenshot::Config::default());
                 }
             }
             _ => {}

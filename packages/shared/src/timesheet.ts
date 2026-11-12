@@ -215,3 +215,11 @@ export const dateRangeSchema = z
   .refine((r) => Date.parse(r.to) - Date.parse(r.from) <= (MAX_RANGE_DAYS - 1) * DAY_MS, `Range is limited to ${MAX_RANGE_DAYS} days`);
 
 export const employeeFilterSchema = z.object({ employeeId: z.uuid().optional() });
+
+/**
+ * A forgotten clock-out: the session is still open and was clocked in on an earlier local date (in the
+ * employee's time zone). Nothing is closed automatically; the employee requests a correction.
+ */
+export function missingClockOut(session: { clockInAt: string; clockOutAt: string | null } | null, timeZone: string, now = Date.now()): boolean {
+  return !!session && !session.clockOutAt && localDate(session.clockInAt, timeZone) < localDate(now, timeZone);
+}

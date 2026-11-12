@@ -9,21 +9,39 @@ The panel mostly reads. Its writes (all self-scoped by the server): leave reques
 while pending), attendance correction requests (create; reviewed by another administrator), the
 website notice acknowledgement and browser pairing/disconnect (`/my/websites`), and revoking own
 sessions (`/my/profile`). It never clocks in or out, starts timers, acknowledges the activity or
-screenshot notices (desktop app), captures or records anything. Productive share and application
+screenshot notices (desktop app), captures or records anything. Clocking in and out is desktop-only by
+decision: the panel has no clock buttons, the API rejects device-bound writes from browser sessions, and
+the dashboard and attendance pages say where to clock in. Productive share and application
 labels appear only when an administrator has labelled applications (labels apply at read time).
 
 | Page | Route | Endpoints (GET unless noted) |
 | --- | --- | --- |
-| Dashboard | `/my` | `attendance/current`, `attendance/timesheet` (today), `activity/summary` (today), `websites/me/usage` (today), `screenshots/me` (+ `screenshots?pageSize=4` and thumbnails when self-view is on), `task-time/assignments`, `task-time/current`, `leave?status=PENDING` |
-| Attendance | `/my/attendance` | `attendance/current`, `attendance/timesheet`, `attendance/history`, `attendance/corrections?mine=true`, `POST attendance/corrections` |
-| Activity | `/my/activity` | `activity/me`, `activity/summary`, `activity/timeline`, `websites/me/usage` (one day at a time) |
+| Dashboard | `/my` | `activity/me` (live status, idle threshold, sampling interval), `attendance/current` (+ forgotten clock-out notice), `attendance/timesheet` (today), `activity/summary` (today), `websites/me/usage` (today), `screenshots/me` (+ `screenshots?pageSize=4` and thumbnails when self-view is on), `task-time/assignments`, `task-time/current`, `leave?status=PENDING` |
+| Attendance | `/my/attendance` | `attendance/current`, `attendance/timesheet`, `attendance/history`, `attendance/corrections?mine=true`, `POST attendance/corrections`. History and corrections are paged (100 per page). `missingClockOut` shows a forgotten clock-out notice linking to the correction form |
+| Activity | `/my/activity` | `activity/me` (live status), `attendance/timeline` (day timeline), `activity/summary`, `activity/timeline`, `websites/me/usage` (one day at a time) |
 | Websites | `/my/websites` | `websites/me`, `websites/me/usage` (≤ 31 days, profile time zone), `POST websites/consent`, `POST websites/links`, `DELETE websites/links/:id` |
-| Screenshots | `/my/screenshots` | `screenshots/me`, `screenshots`, `screenshots/:id`, `screenshots/:id/content` (blob URLs, revoked; every view logged by the API). Self-view off: explanation only |
+| Screenshots | `/my/screenshots` | `screenshots/me`, `screenshots`, `screenshots/:id`, `screenshots/:id/content` (blob URLs, revoked; every view logged by the API). The state badge from `screenshots/me` `state` is always shown; self-view off hides only the gallery |
 | Projects | `/my/projects` | `task-time/assignments` |
 | Tasks | `/my/tasks` | `task-time/current`, `task-time/assignments`, `task-time/entries` |
 | Leave | `/my/leave` | `leave`, `POST leave`, `POST leave/:id/cancel` |
 | Reports | `/my/reports` | `attendance/timesheet`, `activity/summary` (≤ 31 days), `attendance/export?format=csv|xlsx` (own draft timesheet) |
-| Profile | `/my/profile` | `employees/:id` and `employees/:id/devices` (own id from the session), `activity/me`, `screenshots/me`, `websites/me` |
+| Profile | `/my/profile` | `employees/:id` and `employees/:id/devices` (own id from the session), `activity/me`, `screenshots/me`, `websites/me` (each notice's title and points as served by the API, with its own acknowledged state) |
+
+## Status, timeline and screenshot state
+
+- **Live status** (`ActivityStatusResponse.liveStatus`, `liveSince`): Not clocked in, On a break, Active, Idle or
+  Unknown. Unknown (clocked in, no fresh report from the desktop app) is shown as Unknown, never as active or
+  idle. Next to it: the idle threshold and sampling interval in force for this employee (`policy`).
+- **Day timeline** (`GET /attendance/timeline?date&page&pageSize`): clock-in, clock-out, breaks, active and idle
+  rows in the order the API returns them, in the time zone the response names, 100 per page. Only stored
+  records are listed; gaps are never filled. The older application timeline (with organisation labels) stays
+  below it.
+- **Screenshot state** (`ScreenshotStatusResponse.state`): Disabled, Awaiting consent, Enabled, Permission
+  denied, Capture failed. Each screenshot is labelled Upload pending, Uploaded or Deleted. There is no delete
+  or edit control.
+- **Notices**: activity and screenshot notices are separate acknowledgements (the server refuses a screenshot
+  notice version that is an activity notice version). Both are acknowledged in the desktop app.
+- "Updated" times use the employee's profile time zone.
 
 ## Known gaps (no API change made in P2)
 
@@ -35,7 +53,9 @@ labels appear only when an administrator has labelled applications (labels apply
 - `task-time/assignments` returns active projects and open tasks only (no due dates or progress);
   `task-time/current|entries` close timers already ended by a break or clock-out (existing behaviour).
 - Screenshot thumbnails are logged as views (existing behaviour); the dashboard shows four.
-- History and correction lists show the most recent 100; no paging beyond that.
+- Leave history (`/my/leave`) and the team lists (`/my/team/*`) show the first 100 rows; no paging beyond that.
+- `/my/reports` shows activity warnings in the API's wording (written for administrators).
+- Team pages use the browser's time zone for the default date or range.
 
 ## Verification
 

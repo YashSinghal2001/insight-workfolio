@@ -169,7 +169,10 @@ test("a team head sees and acts on only their team's members; everything else is
   assert.equal((await api(`/timelapses/${outsider.timelapse}`, h)).status, 404);
   assert.equal((await api(`/timelapses/${outsider.timelapse}/content`, h)).status, 404);
   assert.equal((await api(`/timelapses/${outsider.timelapse}/cancel`, { ...h, method: "POST" })).status, 404);
-  assert.equal((await api(`/timelapses/${outsider.timelapse}`, { ...h, method: "DELETE" })).status, 404);
+  // Deleting a timelapse is Super Admin-only: refused before any lookup, for a member's as for an outsider's.
+  assert.equal((await api(`/timelapses/${outsider.timelapse}`, { ...h, method: "DELETE" })).status, 403);
+  assert.equal((await api(`/timelapses/${member.timelapse}`, { ...h, method: "DELETE" })).status, 403);
+  assert.equal((await api(`/timelapses/${member.timelapse}`, h)).status, 200, "still there");
   assert.equal((await api("/timelapses", { ...h, method: "POST", body: { sessionId: outsider.session } })).status, 404);
 
   // Attendance

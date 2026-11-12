@@ -1,6 +1,6 @@
 // Session reads shared by attendance, timesheet and correction services.
 import type { DatabaseClient, Row } from "@workfolio/database";
-import type { AttendanceBreak, AttendanceSession, AttendanceState, SessionSource } from "@workfolio/shared";
+import type { AttendanceBreak, AttendanceSession, AttendanceState, DeviceActivityReport, DeviceActivityState, DeviceScreenshotState, SessionSource } from "@workfolio/shared";
 
 /** Columns for `FROM attendance_sessions s`. Source = how the current clock-in time was recorded. */
 export const SESSION_COLUMNS = `s.id, s.employee_id, s.clock_in_at, s.clock_out_at, s.status,
@@ -82,3 +82,16 @@ export async function clockedInSegments(db: DatabaseClient, employeeId: string, 
 }
 /** For `employee_profiles p JOIN users u`: account active and employment not ended. */
 export const ACTIVE_EMPLOYEE = "u.status = 'ACTIVE' AND p.employment_status <> 'TERMINATED'";
+
+/** Columns of `devices` holding what the desktop last reported about "now" (migration 0029). */
+export const DEVICE_LIVE_COLUMNS = "employee_id, last_seen_at, activity_state, activity_state_since, activity_state_at, screenshot_state, screenshot_state_at";
+
+/** The device's last activity report, for deriveLiveStatus; null when it never reported (or was cleared at clock-out). */
+export const activityReport = (r?: Row): DeviceActivityReport | null =>
+  r?.activity_state && r.activity_state_since && r.activity_state_at
+    ? { state: r.activity_state as DeviceActivityState, since: String(r.activity_state_since), reportedAt: String(r.activity_state_at) }
+    : null;
+
+/** The device's last screenshot report, for screenshotFeatureState. */
+export const screenshotReport = (r?: Row): { state: DeviceScreenshotState; reportedAt: string } | null =>
+  r?.screenshot_state && r.screenshot_state_at ? { state: r.screenshot_state as DeviceScreenshotState, reportedAt: String(r.screenshot_state_at) } : null;

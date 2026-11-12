@@ -17,10 +17,11 @@ pub enum Event {
     Unlocked,
     WillSleep,
     DidWake,
-    // macOS only (informational): Windows display power is not tracked.
-    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    // Display off/on: informational on macOS; on Windows (console display state) it is what
+    // stops screenshots of a dark display.
+    #[cfg_attr(not(any(target_os = "macos", windows)), allow(dead_code))]
     ScreensSlept,
-    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    #[cfg_attr(not(any(target_os = "macos", windows)), allow(dead_code))]
     ScreensWoke,
     /// Another user switched in (fast user switching) or this user is logging out.
     SessionResigned,
@@ -69,6 +70,7 @@ impl SessionState {
         self
     }
 
+    #[cfg(test)]
     pub fn observable(&self) -> bool {
         !(self.locked || self.asleep || self.session_inactive)
     }
@@ -128,10 +130,17 @@ const LOCK_GRACE_MS: i64 = 5_000;
 /// sleep, this user's session in front. Event state for exact timing, the CGSession dictionary as
 /// the level: a stale or missed unlock/become-active notification can never stop monitoring for good.
 pub fn observable_now() -> bool {
+    unobservable_now() == (false, false)
+}
+
+/// Why the session cannot be observed right now: (screen locked or secure desktop, away = going
+/// to sleep or another user's session in front). The collector records the first as IDLE and
+/// nothing for the second; `away` wins when both are set.
+pub fn unobservable_now() -> (bool, bool) {
+    use crate::activity::platform;
     let s = current();
-    let cg = crate::activity::platform::screen_locked() || !crate::activity::platform::on_console();
     let recent = s.last_transition_ms.is_some_and(|t| now_ms() - t < LOCK_GRACE_MS);
-    !(cg || s.asleep || (!s.observable() && recent))
+    (platform::screen_locked() || (s.locked && recent), !platform::on_console() || s.asleep || (s.session_inactive && recent))
 }
 
 // ---- macOS observers -----------------------------------------------------------------------

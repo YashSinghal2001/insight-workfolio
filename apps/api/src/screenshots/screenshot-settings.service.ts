@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { BadRequestException, Inject, Injectable, Logger, NotFoundException } from "@nestjs/common";
 import type { DatabaseClient, Row } from "@workfolio/database";
 import {
+  DEFAULT_NOTICE_VERSION,
   DEFAULT_SCREENSHOT_SETTINGS,
   parseMaskRegions,
   type ScreenshotMaskRegion,
@@ -14,7 +15,7 @@ import {
   type ScreenshotSettingsResponse,
   type ScreenshotSettingsVersion,
 } from "@workfolio/shared";
-import { POLICY } from "../common/policy.js";
+import { assertMayChangeRetention, POLICY } from "../common/policy.js";
 import { DATABASE } from "../database/database.module.js";
 import { MonitoringSettingsService } from "../settings/monitoring-settings.service.js";
 import { SCREENSHOT_STORAGE, type ScreenshotStorage } from "./storage.js";
@@ -121,11 +122,18 @@ export class ScreenshotSettingsService {
   }
 
   async update(admin: AuthUser, input: ScreenshotSettingsInput): Promise<ScreenshotSettingsResponse> {
+    assertMayChangeRetention(admin, await this.current(), input);
     const maxOffline = this.attendancePolicy.maxOfflineAgeDays;
     if (input.retentionDays < maxOffline) throw new BadRequestException(`retentionDays: must be at least the offline limit (${maxOffline} days)`);
     await this.monitoring.notice(input.noticeVersion).catch(() => {
       throw new BadRequestException("noticeVersion: no such notice");
     });
+    // Consents are kept per notice version: a notice also used for activity monitoring (now or earlier)
+    // would make that acknowledgement count as screenshot consent. Screenshots need their own.
+    const { rows: shared } = await this.db.execute({ sql: "SELECT 1 FROM monitoring_policies WHERE notice_version = ? LIMIT 1", args: [input.noticeVersion] });
+    if (shared.length || input.noticeVersion === DEFAULT_NOTICE_VERSION) {
+      throw new BadRequestException("noticeVersion: this notice is used for activity monitoring; screenshots need a separate notice");
+    }
     const { reason, ...next } = input;
     await this.db.execute({
       sql: `INSERT INTO screenshot_policies (screenshots_enabled, mask_regions, blur, interval_seconds, webp_quality, max_dimension, capture_scope,

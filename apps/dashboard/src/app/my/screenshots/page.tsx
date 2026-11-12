@@ -2,10 +2,10 @@
 
 import { useEffect, useRef, useState } from "react";
 import { addDays, SCREENSHOT_MIME, todayIn, type Paginated, type ScreenshotDetail, type ScreenshotItem, type ScreenshotStatusResponse } from "@workfolio/shared";
-import { EmptyState, PageHeader, Pagination, StatusBadge } from "@/components/kit";
+import { EmptyState, PageHeader, Pagination, StatusBadge, type Tone } from "@/components/kit";
 import { UpdatedAt, useApi, useMe } from "@/components/my-ui";
 import { RangePicker, type Range } from "@/components/range-picker";
-import { Card, Notice, secondaryButtonClass } from "@/components/ui";
+import { Card, formatInZone, Notice, secondaryButtonClass } from "@/components/ui";
 import { Loaded } from "../_components/states";
 import { apiBlob, errorMessage } from "@/lib/api";
 
@@ -22,9 +22,50 @@ function maskLine(count: number, labels: string[] | null = null) {
 }
 
 const unavailable = (item: ScreenshotItem) =>
-  item.uploadStatus === "DELETED" ? "Deleted by an administrator or under the retention policy" : item.uploadStatus === "REGISTERED" ? "Waiting for upload" : null;
+  item.uploadStatus === "DELETED" ? "Deleted by an administrator or under the retention policy" : item.uploadStatus === "REGISTERED" ? "Upload pending: the desktop app has not uploaded this image yet" : null;
 
 const DISABLED = "Your administrator has not enabled viewing your own screenshots for you. Screenshots may still be captured under the screenshot policy; ask your administrator if you have questions.";
+
+/** The screenshot feature for this employee (ScreenshotStatusResponse.state): shown whether or not self-view is on. */
+const STATE: Record<ScreenshotStatusResponse["state"], { label: string; tone: Tone; text: (s: ScreenshotStatusResponse) => string }> = {
+  DISABLED: { label: "Disabled", tone: "neutral", text: () => "Screenshots are turned off by your organization. None are taken." },
+  AWAITING_CONSENT: {
+    label: "Awaiting consent",
+    tone: "warning",
+    text: (s) => `No screenshots are taken until you acknowledge the screenshot notice (version ${s.consent.noticeVersion}) in the Insight Workfolio desktop app.`,
+  },
+  ENABLED: {
+    label: "Enabled",
+    tone: "success",
+    text: (s) => `One screenshot of your main screen about every ${Math.round(s.policy.intervalSeconds / 60)} min while you are clocked in and not on a break.`,
+  },
+  PERMISSION_DENIED: {
+    label: "Permission denied",
+    tone: "danger",
+    text: () => "Your computer is not allowing Insight Workfolio to capture the screen, so no screenshots are taken. Open the desktop app to allow it.",
+  },
+  CAPTURE_FAILED: { label: "Capture failed", tone: "danger", text: () => "The desktop app reported that it could not capture the screen. Open the desktop app for details." },
+};
+
+function FeatureState({ status: s, tz }: { status: ScreenshotStatusResponse; tz: string }) {
+  const st = STATE[s.state];
+  return (
+    <Card title="Screenshot status">
+      <div data-testid="my-screenshot-state" data-state={s.state} className="flex flex-col gap-2 text-sm">
+        <p className="flex flex-wrap items-center gap-2">
+          <StatusBadge tone={st.tone}>{st.label}</StatusBadge>
+          <span>{st.text(s)}</span>
+        </p>
+        <p className="text-xs text-muted">
+          Kept {s.retentionDays} days · screenshot notice {s.notice.version}{s.notice.draft ? " (draft)" : ""} ·{" "}
+          {s.consent.acknowledgedAt ? `acknowledged ${formatInZone(s.consent.acknowledgedAt, tz)}` : "not acknowledged"} · last upload{" "}
+          {s.lastStoredAt ? formatInZone(s.lastStoredAt, tz) : "none yet"}. The screenshot notice is separate from the activity notice.
+          Thumbnails and full views are logged.
+        </p>
+      </div>
+    </Card>
+  );
+}
 
 /** One image through the authenticated API as a short-lived object URL, revoked on cleanup. The API logs each load. */
 function useImage(id: string | null, variant: "thumbnail" | "full") {
@@ -69,7 +110,7 @@ function Thumbnail({ item, tz, onOpen }: { item: ScreenshotItem; tz: string; onO
       <div className="flex flex-col gap-1 px-3 py-2 text-xs">
         <span className="tabular-nums font-medium">{at}</span>
         <span>
-          <StatusBadge tone={gone ? (item.uploadStatus === "DELETED" ? "neutral" : "warning") : "success"}>{gone ? (item.uploadStatus === "DELETED" ? "Deleted" : "Not stored yet") : "Stored"}</StatusBadge>{" "}
+          <StatusBadge tone={gone ? (item.uploadStatus === "DELETED" ? "neutral" : "warning") : "success"}>{gone ? (item.uploadStatus === "DELETED" ? "Deleted" : "Upload pending") : "Uploaded"}</StatusBadge>{" "}
           <span className="text-muted">{item.maskCount ? `${item.maskCount} masked area(s)` : "Unmasked"}</span>
         </span>
       </div>
@@ -162,19 +203,12 @@ export default function MyScreenshotsPage() {
     <div className="flex flex-col gap-6">
       <PageHeader title="My screenshots" description="Only your own screenshots. Images are loaded through the API on demand and never cached or shared." />
       <Loaded load={load} reload={reload} label="your screenshot status">
-        {(s) =>
-          !s.employeeSelfView ? (
-            <Notice tone="warning">{DISABLED}</Notice>
-          ) : (
-            <>
-              <p className="text-xs text-muted">
-                Screenshots are {s.policy.enabled ? `on: one every ${Math.round(s.policy.intervalSeconds / 60)} min while clocked in` : "off"} · kept {s.retentionDays} days ·
-                notice {s.notice.version}{s.notice.draft ? " (draft)" : ""} · {s.consent.acknowledgedAt ? "acknowledged" : "not acknowledged"}. Thumbnails and full views are logged.
-              </p>
-              <Gallery tz={me.timezone} />
-            </>
-          )
-        }
+        {(s) => (
+          <>
+            <FeatureState status={s} tz={me.timezone} />
+            {s.employeeSelfView ? <Gallery tz={me.timezone} /> : <Notice tone="warning">{DISABLED}</Notice>}
+          </>
+        )}
       </Loaded>
     </div>
   );

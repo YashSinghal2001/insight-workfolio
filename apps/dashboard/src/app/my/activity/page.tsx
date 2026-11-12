@@ -6,8 +6,11 @@ import {
   addDays,
   formatDuration,
   formatDurationShort,
+  localDate,
   todayIn,
   type ActivityStatusResponse,
+  type AttendanceTimelineItem,
+  type AttendanceTimelineResponse,
   type CategorizedActivitySummary,
   type CategorizedTimelineItem,
   type ActivityWarning,
@@ -17,12 +20,14 @@ import {
 import { BreaksOverlay } from "@/components/breaks-overlay";
 import { Button, DataTable, EmptyState, PageHeader, Pagination, StatCard, StatGrid } from "@/components/kit";
 import { dayLabel, timeIn, UpdatedAt, useApi, useMe } from "@/components/my-ui";
-import { Card, inputClass, Notice, secondaryButtonClass } from "@/components/ui";
+import { Card, formatInZone, inputClass, Notice, secondaryButtonClass } from "@/components/ui";
 import { CategoryBadge, CategoryTotals } from "../_components/categories";
+import { LiveStatusLine } from "../_components/live-status";
 import { Loaded } from "../_components/states";
 import { ProductivityTrend } from "../../(admin)/_components/productivity-trend";
 
 const TIMELINE_PAGE = 200;
+const DAY_PAGE = 100;
 const TOP_DOMAINS = 10;
 /** The trend shows the selected day and the six before it. */
 const TREND_DAYS = 7;
@@ -42,11 +47,13 @@ export default function MyActivityPage() {
   const today = todayIn(tz);
   const [day, setDay] = useState(today);
   const [page, setPage] = useState(1);
-  const go = (d: string) => (setDay(d > today ? today : d), setPage(1));
+  const [dayPage, setDayPage] = useState(1);
+  const go = (d: string) => (setDay(d > today ? today : d), setPage(1), setDayPage(1));
   const q = `from=${day}&to=${day}`;
   const status = useApi<ActivityStatusResponse>("/activity/me");
   const summary = useApi<CategorizedActivitySummary>(`/activity/summary?${q}`);
   const timeline = useApi<Paginated<CategorizedTimelineItem>>(`/activity/timeline?${q}&page=${page}&pageSize=${TIMELINE_PAGE}`);
+  const dayTimeline = useApi<AttendanceTimelineResponse>(`/attendance/timeline?date=${day}&page=${dayPage}&pageSize=${DAY_PAGE}`);
   const trend = useApi<CategorizedActivitySummary>(`/activity/summary?from=${addDays(day, -(TREND_DAYS - 1))}&to=${day}`);
   const websites = useApi<WebsiteUsageResponse>(`/websites/me/usage?${q}`);
 
@@ -58,7 +65,12 @@ export default function MyActivityPage() {
       />
 
       <Loaded load={status.load} reload={status.reload} label="your monitoring status">
-        {(s) => <MonitoringState status={s} tz={tz} />}
+        {(s) => (
+          <div className="flex flex-col gap-3">
+            <LiveStatusLine status={s} tz={tz} />
+            <MonitoringState status={s} tz={tz} />
+          </div>
+        )}
       </Loaded>
 
       <nav aria-label="Day" className="flex flex-wrap items-end gap-2 text-sm">
@@ -98,7 +110,13 @@ export default function MyActivityPage() {
         </Loaded>
       </Card>
 
-      <Card title="Timeline">
+      <Card title="Day timeline" actions={dayTimeline.load.state === "ready" && <UpdatedAt at={dayTimeline.load.at} />}>
+        <Loaded load={dayTimeline.load} reload={dayTimeline.reload} label="your day timeline">
+          {(t) => <DayTimeline timeline={t} onPage={setDayPage} />}
+        </Loaded>
+      </Card>
+
+      <Card title="Application timeline">
         <BreaksOverlay from={day} to={day} tz={tz} />
         <Loaded load={timeline.load} reload={timeline.reload} label="your activity timeline">
           {(t) => <Timeline page={t} tz={tz} onPage={setPage} labelled={summary.load.state === "ready" && summary.load.data.categoriesConfigured} />}
@@ -167,6 +185,43 @@ function Totals({ summary: a }: { summary: CategorizedActivitySummary }) {
       </StatGrid>
       <CategoryTotals summary={a} />
       {a.activeMs + a.idleMs === 0 && <EmptyState title="No activity recorded on this day." />}
+    </div>
+  );
+}
+
+const EVENT: Record<AttendanceTimelineItem["type"], string> = { CLOCK_IN: "Clock-in", CLOCK_OUT: "Clock-out", BREAK: "Break", ACTIVE: "Active", IDLE: "Idle" };
+
+/**
+ * The day's stored records in order (GET /attendance/timeline): clock-in, clock-out, breaks, active and idle
+ * periods. Only what the server returns: time with no record has no row. Times in the zone the API names.
+ */
+function DayTimeline({ timeline: t, onPage }: { timeline: AttendanceTimelineResponse; onPage: (p: number) => void }) {
+  const tz = t.timezone;
+  // A period that started on an earlier day (or ends on a later one) shows its date too.
+  const at = (iso: string) => (localDate(iso, tz) === t.date ? timeIn(iso, tz) : formatInZone(iso, tz));
+  const pages = Math.ceil(t.total / t.pageSize);
+  return (
+    <div className="flex flex-col gap-3">
+      <p className="text-xs text-muted">{dayLabel(t.date)}, times in {tz}. Only recorded events are listed; time with no record has no row.</p>
+      {t.items.length === 0 ? (
+        <EmptyState title="Nothing recorded on this day." hint="No clock-in, break or activity was recorded." />
+      ) : (
+        <DataTable label="My day timeline" head={["From", "To", "Duration", "Event", "Application"]}>
+          {t.items.map((i) => {
+            const instant = i.type === "CLOCK_IN" || i.type === "CLOCK_OUT";
+            return (
+              <tr key={i.id} data-type={i.type} className={instant ? "font-medium" : undefined}>
+                <td className="tabular-nums whitespace-nowrap">{at(i.at)}</td>
+                <td className="tabular-nums whitespace-nowrap">{instant ? <span className="text-muted">—</span> : i.endAt ? at(i.endAt) : "ongoing"}</td>
+                <td className="tabular-nums">{i.endAt ? formatDurationShort(Date.parse(i.endAt) - Date.parse(i.at)) : <span className="text-muted">—</span>}</td>
+                <td>{EVENT[i.type]}</td>
+                <td>{i.applicationName ?? <span className="text-muted">—</span>}</td>
+              </tr>
+            );
+          })}
+        </DataTable>
+      )}
+      {pages > 1 && <Pagination label="Day timeline pages" page={t.page} pageCount={pages} onPage={onPage} />}
     </div>
   );
 }

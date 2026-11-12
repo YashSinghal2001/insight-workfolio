@@ -15,6 +15,13 @@ export const ACCOUNT_AUDIT_ACTIONS = [
   "SESSION_REUSE_DETECTED",
   "DEVICE_REGISTERED",
   "DEVICE_REVOKED",
+  // Reads of ANOTHER employee's records by an admin or team head (target = that employee's account).
+  "EMPLOYEE_SCREENSHOTS_VIEWED",
+  "EMPLOYEE_ACTIVITY_TIMELINE_VIEWED",
+  "EMPLOYEE_ATTENDANCE_TIMELINE_VIEWED",
+  "EMPLOYEE_ACTIVITY_SUMMARY_VIEWED",
+  "EMPLOYEE_ATTENDANCE_VIEWED",
+  "EMPLOYEE_ATTENDANCE_EXPORTED",
 ] as const;
 export type AccountAuditAction = (typeof ACCOUNT_AUDIT_ACTIONS)[number];
 export const ACCOUNT_AUDIT_RESOURCES = ["ACCOUNT", "SESSION", "DEVICE", "SETUP_LINK"] as const;

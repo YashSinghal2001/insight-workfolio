@@ -32,6 +32,20 @@ export function policyBlur(policy: object): boolean | null {
   return blur === undefined ? false : typeof blur === "boolean" ? blur : null;
 }
 
+/**
+ * How long a cached screenshot policy may be acted on without hearing from the server. Online it is
+ * refreshed every minute; offline the device cannot learn that an admin turned screenshots off or
+ * changed the notice, and the server rejects whatever was captured after that anyway. 24 hours lets
+ * a full working day offline (travel, an outage) still be captured as acknowledged, and bounds the
+ * pointless capture to that day.
+ */
+export const POLICY_MAX_AGE_MS = 24 * 3_600_000;
+
+/** Whether a policy fetched at `fetchedAtMs` may still be acted on. Unknown age (null) = no. */
+export function policyFresh(fetchedAtMs: number | null, nowMs: number): boolean {
+  return fetchedAtMs !== null && nowMs - fetchedAtMs <= POLICY_MAX_AGE_MS;
+}
+
 /** What the employee is told about blur and masks. */
 export function privacyText(masks: readonly { label: string }[], blur: boolean | null): string {
   if (!blur) return maskText(masks);

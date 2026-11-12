@@ -455,6 +455,26 @@ try {
     await signIn(email);
     await waitFor(`location.pathname === '/' && !!document.querySelector('nav[aria-label="Main"]')`, `${label} overview`);
     await auditRoutes(ADMIN_ROUTES, `${label} page`);
+
+    // Super Admin-only controls are offered to the Super Admin and not to the Admin (IT); the API refuses them anyway.
+    const isSuper = label === "Super Admin";
+    const rolesLink = await js(`!!document.querySelector('nav[aria-label="Main"] a[href="/roles"]')`);
+    await go("/roles");
+    const rolesPage = await tryWait(isSuper ? `!!document.querySelector('table[aria-label="Accounts and roles"]')` : `/Only a Super Admin can view or change roles/.test(document.querySelector('main').innerText)`, "roles page", 8000);
+    await go("/screenshots");
+    await js(setReact(`document.querySelector('main input[type=date]')`, addDays(todayUtc, -3)));
+    await waitFor(`[...document.querySelectorAll('section[aria-label="Screenshot gallery"] li img')].length > 0`, "thumbnails");
+    await click(`[...document.querySelectorAll('section[aria-label="Screenshot gallery"] li button')].find((b) => !b.disabled)`);
+    await waitFor(`document.querySelector('dialog[aria-label^="Screenshot of"]')?.open`, "viewer");
+    const deleteOffered = await js(`!!${buttonByText(`document.querySelector('dialog[aria-label^="Screenshot of"]')`, "Delete screenshot")}`);
+    await js(`document.querySelectorAll('dialog[open]').forEach((d) => d.close())`);
+    await go("/settings");
+    await waitFor(`/In force now/.test(document.querySelector('main').innerText)`, "in-force summary");
+    await waitFor(`document.querySelectorAll('main input[name=retentionDays]').length === 2`, "retention inputs");
+    const retentionLocked = await js(`[...document.querySelectorAll('main input[name=retentionDays], main input[name=retentionApproved]')].map((i) => i.disabled).join()`);
+    check(`roles: ${label} sees the retention inputs ${isSuper ? "enabled" : "disabled"} in Settings`, retentionLocked === Array(4).fill(String(!isSuper)).join(), retentionLocked);
+    check(`roles: ${label} ${isSuper ? "is" : "is not"} offered the Roles link, the roles table and "Delete screenshot"; Settings shows what is in force`,
+      rolesLink === isSuper && rolesPage && deleteOffered === isSuper, `link ${rolesLink}, page ${rolesPage}, delete ${deleteOffered}`);
   }
 
   // =========================== f. Workflows as Super Admin ======================================

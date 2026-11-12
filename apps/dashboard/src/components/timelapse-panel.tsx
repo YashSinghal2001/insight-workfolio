@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import {
+  can,
   TIMELAPSE_LIMITS,
   TIMELAPSE_MIME,
   timelapseDurationSeconds,
@@ -11,6 +12,7 @@ import {
 } from "@workfolio/shared";
 import type { Range } from "@/components/range-picker";
 import { Badge, buttonClass, Card, inputClass, Notice, secondaryButtonClass } from "@/components/ui";
+import { useAuth } from "@/components/auth-provider";
 import { api, apiBlob, ApiRequestError, errorMessage } from "@/lib/api";
 
 const FPS = [2, 4, 8, 12, 24];
@@ -83,6 +85,9 @@ export function TimelapsePanel({ employeeId, range, tz }: { employeeId: string; 
 }
 
 function SessionRow({ session, fps, canCreate, onChange }: { session: TimelapseSession; fps: number; canCreate: boolean; onChange: () => void }) {
+  const { auth } = useAuth();
+  // Server-enforced (Super Admin only); the button is simply not offered to anyone else.
+  const canDelete = auth.status === "authenticated" && can(auth.me.user, "screenshots:delete");
   const [job, setJob] = useState<TimelapseJob | null>(session.latestJob);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -171,7 +176,7 @@ function SessionRow({ session, fps, canCreate, onChange }: { session: TimelapseS
               Download
             </button>
           )}
-          {ready && <button type="button" className={secondaryButtonClass} disabled={busy} onClick={() => act(async () => (await api(`/timelapses/${job.id}`, { method: "DELETE" }), setPreview(null), onChange()))}>Delete video</button>}
+          {ready && canDelete && <button type="button" className={secondaryButtonClass} disabled={busy} onClick={() => act(async () => (await api(`/timelapses/${job.id}`, { method: "DELETE" }), setPreview(null), onChange()))}>Delete video</button>}
         </div>
       </div>
 

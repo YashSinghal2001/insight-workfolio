@@ -15,10 +15,10 @@ import {
   type Paginated,
   type TimesheetResponse,
 } from "@workfolio/shared";
-import { DataTable, EmptyState, PageHeader, StatCard, StatGrid, StatusBadge, SuccessNotice } from "@/components/kit";
+import { DataTable, EmptyState, PageHeader, Pagination, StatCard, StatGrid, StatusBadge, SuccessNotice } from "@/components/kit";
 import { dayLabel, timeIn, UpdatedAt, useApi, useMe } from "@/components/my-ui";
 import { RangePicker, type Range } from "@/components/range-picker";
-import { Card } from "@/components/ui";
+import { Card, Notice } from "@/components/ui";
 import { CORRECTION_TYPE_LABEL as TYPE_LABEL, CorrectionForm } from "../_components/correction-form";
 import { Loaded } from "../_components/states";
 
@@ -33,21 +33,24 @@ const dateTime = (iso: string, timeZone: string) => new Intl.DateTimeFormat("en-
 export default function MyAttendancePage() {
   const me = useMe();
   const tz = me.timezone;
-  const [range, setRange] = useState<Range>(() => {
+  const [range, setRangeState] = useState<Range>(() => {
     const from = weekStart(todayIn(tz));
     return { from, to: addDays(from, 6) };
   });
+  const [historyPage, setHistoryPage] = useState(1);
+  const [correctionsPage, setCorrectionsPage] = useState(1);
+  const setRange = (r: Range) => (setRangeState(r), setHistoryPage(1));
   const current = useApi<AttendanceCurrent>("/attendance/current");
   const sheet = useApi<TimesheetResponse>(`/attendance/timesheet?from=${range.from}&to=${range.to}`);
-  const history = useApi<Paginated<AttendanceSession>>(`/attendance/history?from=${range.from}&to=${range.to}&pageSize=${PAGE_SIZE}`);
-  const corrections = useApi<Paginated<CorrectionRequest>>(`/attendance/corrections?mine=true&pageSize=${PAGE_SIZE}`);
+  const history = useApi<Paginated<AttendanceSession>>(`/attendance/history?from=${range.from}&to=${range.to}&page=${historyPage}&pageSize=${PAGE_SIZE}`);
+  const corrections = useApi<Paginated<CorrectionRequest>>(`/attendance/corrections?mine=true&page=${correctionsPage}&pageSize=${PAGE_SIZE}`);
   const [ok, setOk] = useState<string | null>(null);
 
   return (
     <div className="flex flex-col gap-6">
       <PageHeader title="My attendance" description={`Times are shown in your time zone (${tz}).`} />
       <p role="note" className="rounded-lg border border-border bg-surface px-4 py-3 text-sm">
-        Attendance is recorded by the Insight Workfolio desktop app (clock in, breaks, clock out). It cannot be changed here; to fix a mistake, request a correction below. Nothing changes until an administrator approves it.
+        <strong>You clock in, take breaks and clock out in the Insight Workfolio desktop app on your work computer, not on this website.</strong> This page shows what the app recorded. It cannot be changed here; to fix a mistake, request a correction below. Nothing changes until an administrator approves it.
       </p>
 
       <Card title="Right now" actions={current.load.state === "ready" && <UpdatedAt at={current.load.at} />}>
@@ -67,12 +70,12 @@ export default function MyAttendancePage() {
 
       <Card title="Attendance history">
         <Loaded load={history.load} reload={history.reload} label="your attendance history">
-          {(h) => <HistoryView page={h} tz={tz} />}
+          {(h) => <HistoryView page={h} tz={tz} onPage={setHistoryPage} />}
         </Loaded>
       </Card>
 
       <Card title="Request a correction">
-        <div className="flex flex-col gap-3">
+        <div id="request-correction" className="flex scroll-mt-20 flex-col gap-3">
           <SuccessNotice message={ok} onDismiss={() => setOk(null)} timeoutMs={0} />
           <Loaded load={history.load} reload={history.reload} label="your shifts">
             {(h) => (
@@ -91,7 +94,7 @@ export default function MyAttendancePage() {
 
       <Card title="Correction requests">
         <Loaded load={corrections.load} reload={corrections.reload} label="your correction requests">
-          {(p) => <CorrectionsView items={p.items} total={p.total} tz={tz} />}
+          {(p) => <CorrectionsView page={p} tz={tz} onPage={setCorrectionsPage} />}
         </Loaded>
       </Card>
     </div>
@@ -109,7 +112,18 @@ function CurrentState({ current, tz }: { current: AttendanceCurrent; tz: string 
         : s?.clockOutAt
           ? `Clocked out. Last shift ended ${dateTime(s.clockOutAt, tz)}.`
           : "Clocked out. No shifts recorded yet.";
-  return <p data-testid="my-attendance-state" className="text-sm font-medium">{text}</p>;
+  return (
+    <div className="flex flex-col gap-3">
+      <p data-testid="my-attendance-state" className="text-sm font-medium">{text}</p>
+      {current.missingClockOut && s && (
+        <Notice tone="warning">
+          It looks like you forgot to clock out: the shift you started on {dateTime(s.clockInAt, tz)} is still open, so it is not counted in your worked time.
+          {" "}<a href="#request-correction" className="underline">Request a correction</a> below (choose “Missing clock-out”) to add the time you stopped; an administrator reviews it.
+        </Notice>
+      )}
+      {current.state === "CLOCKED_OUT" && <p className="text-xs text-muted">To clock in, open the Insight Workfolio desktop app on your work computer.</p>}
+    </div>
+  );
 }
 
 function TimesheetView({ sheet }: { sheet: TimesheetResponse }) {
@@ -154,7 +168,7 @@ function TimesheetView({ sheet }: { sheet: TimesheetResponse }) {
   );
 }
 
-function HistoryView({ page, tz }: { page: Paginated<AttendanceSession>; tz: string }) {
+function HistoryView({ page, tz, onPage }: { page: Paginated<AttendanceSession>; tz: string; onPage: (p: number) => void }) {
   if (!page.items.length) return <EmptyState title="No work sessions in this period." />;
   return (
     <div className="flex flex-col gap-2">
@@ -188,12 +202,18 @@ function HistoryView({ page, tz }: { page: Paginated<AttendanceSession>; tz: str
           );
         })}
       </DataTable>
-      {page.total > page.items.length && <p className="text-xs text-muted">Showing the {page.items.length} most recent of {page.total} sessions. Choose a shorter period to see the rest.</p>}
+      {page.total > page.pageSize && (
+        <>
+          <Pagination label="Attendance history pages" page={page.page} pageCount={Math.ceil(page.total / page.pageSize)} onPage={onPage} />
+          <p className="text-xs text-muted">{page.total} sessions in this period, newest first. The correction form lists the shifts on this page.</p>
+        </>
+      )}
     </div>
   );
 }
 
-function CorrectionsView({ items, total, tz }: { items: CorrectionRequest[]; total: number; tz: string }) {
+function CorrectionsView({ page, tz, onPage }: { page: Paginated<CorrectionRequest>; tz: string; onPage: (p: number) => void }) {
+  const { items, total } = page;
   if (!items.length) return <EmptyState title="You have not requested any corrections." />;
   return (
     <div className="flex flex-col gap-2">
@@ -213,7 +233,7 @@ function CorrectionsView({ items, total, tz }: { items: CorrectionRequest[]; tot
           </tr>
         ))}
       </DataTable>
-      {total > PAGE_SIZE && <p className="text-xs text-muted">Showing the {PAGE_SIZE} most recent requests.</p>}
+      {total > page.pageSize && <Pagination label="Correction request pages" page={page.page} pageCount={Math.ceil(total / page.pageSize)} onPage={onPage} />}
     </div>
   );
 }

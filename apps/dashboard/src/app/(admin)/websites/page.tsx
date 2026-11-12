@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import {
+  can,
   formatDuration,
   WEBSITE_RULE_CATEGORIES,
   type WebsiteCategory,
@@ -11,6 +12,7 @@ import {
   type WebsitePolicyResponse,
   type WebsiteReport,
 } from "@workfolio/shared";
+import { useAuth } from "@/components/auth-provider";
 import { RangePicker, weekRange, type Range } from "@/components/range-picker";
 import { Badge, buttonClass, Card, inputClass, Notice, secondaryButtonClass } from "@/components/ui";
 import { ConfirmDialog, ErrorState, PageHeader, SkeletonRows } from "@/components/kit";
@@ -27,6 +29,9 @@ const when = (iso: string) => new Date(iso).toLocaleString("en-GB", { dateStyle:
 
 function PolicyCard({ data, acknowledged, onChanged }: { data: PolicyResponse; acknowledged: WebsiteReport["acknowledged"] | null; onChanged: () => void }) {
   const p = data.current;
+  const { auth } = useAuth();
+  // Retention (the period and running it) is Super Admin only; the unchanged value still saves for an Admin.
+  const canRetention = auth.status === "authenticated" && can(auth.me.user, "screenshots:delete");
   const [form, setForm] = useState({ enabled: p.enabled, retentionDays: String(p.retentionDays), noticeVersion: p.noticeVersion, reason: "" });
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
@@ -66,7 +71,8 @@ function PolicyCard({ data, acknowledged, onChanged }: { data: PolicyResponse; a
         <form onSubmit={save} className="grid gap-3 sm:grid-cols-2">
           <label className="flex items-center gap-2"><input type="checkbox" checked={form.enabled} onChange={(e) => setForm({ ...form, enabled: e.target.checked })} /> Website tracking on</label>
           <label className="flex flex-col gap-1"><span className="font-medium">Keep records for (days)</span>
-            <input type="number" min={1} max={365} required value={form.retentionDays} onChange={(e) => setForm({ ...form, retentionDays: e.target.value })} className={inputClass} />
+            {!canRetention && <span className="text-xs text-muted" data-testid="retention-locked">Only a Super Admin can change retention.</span>}
+            <input type="number" min={1} max={365} required disabled={!canRetention} value={form.retentionDays} onChange={(e) => setForm({ ...form, retentionDays: e.target.value })} className={inputClass} />
           </label>
           <label className="flex flex-col gap-1"><span className="font-medium">Notice version employees must acknowledge</span>
             <input required value={form.noticeVersion} onChange={(e) => setForm({ ...form, noticeVersion: e.target.value })} className={inputClass} />
@@ -78,9 +84,11 @@ function PolicyCard({ data, acknowledged, onChanged }: { data: PolicyResponse; a
           {message && <p role="status" className="sm:col-span-2">{message}</p>}
           <div className="flex gap-2 sm:col-span-2">
             <button type="submit" className={buttonClass}>Save policy</button>
-            <button type="button" className={secondaryButtonClass} onClick={() => setConfirmRetention(true)}>
-              Run retention now
-            </button>
+            {canRetention && (
+              <button type="button" className={secondaryButtonClass} onClick={() => setConfirmRetention(true)}>
+                Run retention now
+              </button>
+            )}
           </div>
         </form>
         <ConfirmDialog

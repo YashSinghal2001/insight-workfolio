@@ -69,7 +69,7 @@ export function collectorStateText(c: CollectorView, active: boolean, clock: (ms
   if (!active || !c.collecting) return "—";
   if (c.sessionInactive) return "Session inactive (another user or logged out). Nothing is recorded.";
   if (c.asleep) return w.asleep;
-  if (c.locked) return "Screen locked. Nothing is recorded until you unlock.";
+  if (c.locked) return "Screen locked. This time counts as idle until you unlock.";
   if (c.idle) return `Idle since ${clock(c.idleSinceMs)} (no keyboard or mouse input)`;
   const name = c.currentApp?.name ?? "—";
   const quiet = c.idleSeconds ?? 0;
@@ -83,7 +83,7 @@ export function appNapText(c: Pick<CollectorView, "collecting" | "appNapPrevente
 
 // ---- Screenshots ---------------------------------------------------------------------------
 
-export type ScreenshotMode = MonitoringMode | "NEEDS_PERMISSION";
+export type ScreenshotMode = MonitoringMode | "NEEDS_PERMISSION" | "AWAITING_CONSENT";
 
 export interface ScreenshotInputs {
   signedIn: boolean;
@@ -100,6 +100,8 @@ export interface ScreenshotInputs {
   pendingClockIn: boolean;
   unverified: boolean;
   error: string | null;
+  /** The policy and consent are a cached copy too old to act on (screenshot-sync.ts `policyFresh`). */
+  policyStale?: boolean;
 }
 
 export interface ScreenshotDecision {
@@ -114,7 +116,8 @@ export function decideScreenshots(i: ScreenshotInputs, w: Wording = words()): Sc
   if (!i.supported) return d("STOPPED", "Screenshots are not available on this operating system. None are taken.");
   if (i.deviceStatus !== "ACTIVE") return d("STOPPED", "This device is not registered or was revoked. No screenshots are taken.");
   if (!i.enabled) return d("STOPPED", "Screenshots are turned off by your organization. None are taken.");
-  if (!i.consented) return d("STOPPED", "Read and acknowledge the screenshot notice below. No screenshots are taken until then.");
+  if (!i.consented) return d("AWAITING_CONSENT", "Read and acknowledge the screenshot notice below. No screenshots are taken until then.");
+  if (i.policyStale) return d("PAUSED_OFFLINE_OR_UNVERIFIED", "Paused: the screenshot settings could not be checked with the server for over a day. No screenshots are taken until this device reaches the server.");
   if (!i.projection) return d("PAUSED_OFFLINE_OR_UNVERIFIED", "Paused: your attendance status is unknown until this device reaches the server.");
   if (i.projection.state === "CLOCKED_OUT") return d("STOPPED", "Off: you are not clocked in. No screenshots are taken.");
   if (i.projection.state === "ON_BREAK") return d("PAUSED_BREAK", "Paused for your break. No screenshots are taken until you end it.");
@@ -127,6 +130,23 @@ export function decideScreenshots(i: ScreenshotInputs, w: Wording = words()): Sc
       ? "On: a screenshot of your main screen is taken at the interval below. Your clock-in is offline and pending server confirmation."
       : "On: a screenshot of your main screen is taken at the interval below while you are clocked in.",
   );
+}
+
+/** How the native worker starts `skipped` when a due capture was attempted and failed (screenshot.rs `CAPTURE_FAILED`). */
+export const CAPTURE_FAILED = "Capture failed: ";
+
+/** What the device reports to the server about capture (shared `DeviceScreenshotState`). */
+export type ScreenshotReport = "OK" | "PERMISSION_DENIED" | "CAPTURE_FAILED";
+
+/**
+ * Nothing to report (undefined) unless capture is meant to be running now: screenshots off, notice
+ * not acknowledged, break, clocked out and unknown states say nothing. A capture skipped because
+ * the screen was locked or asleep, or because local storage is full, is not a failure.
+ */
+export function screenshotReport(mode: ScreenshotMode, skipped: string | null): ScreenshotReport | undefined {
+  if (mode === "NEEDS_PERMISSION") return "PERMISSION_DENIED";
+  if (mode !== "ACTIVE") return undefined;
+  return skipped?.startsWith(CAPTURE_FAILED) ? "CAPTURE_FAILED" : "OK";
 }
 
 /** Employee-facing description of the privacy masks in force (labels set by the organization). */

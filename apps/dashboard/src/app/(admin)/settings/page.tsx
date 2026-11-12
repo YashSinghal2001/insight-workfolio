@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import {
   API_PREFIX,
+  can,
   SCREENSHOT_LIMITS,
   SETTINGS_LIMITS,
   type ScreenshotRetentionPreview,
@@ -17,13 +18,22 @@ import {
   type ScreenshotStorageProvider,
 } from "@workfolio/shared";
 import Link from "next/link";
-import { ErrorState, PageHeader, SkeletonRows } from "@/components/kit";
+import { useAuth } from "@/components/auth-provider";
+import { ErrorState, PageHeader, SkeletonRows, StatCard, StatGrid } from "@/components/kit";
 import { MaskEditor } from "@/components/mask-editor";
 import { Badge, buttonClass, Card, Field, inputClass, Notice, secondaryButtonClass } from "@/components/ui";
 import { api, ApiRequestError, errorMessage } from "@/lib/api";
 import { API_URL } from "@/lib/config";
 
 const when = (iso: string | null) => (iso ? new Intl.DateTimeFormat("en-GB", { dateStyle: "medium", timeStyle: "short" }).format(new Date(iso)) : "—");
+/** Super Admin only (shared `can`): retention purges and connecting storage. The API refuses everyone else. */
+function useCan() {
+  const { auth } = useAuth();
+  const user = auth.status === "authenticated" ? auth.me.user : null;
+  return { purge: !!user && can(user, "screenshots:delete"), storage: !!user && can(user, "storage:manage") };
+}
+const SUPER_ONLY = "Only a Super Admin can do this.";
+
 const range = (k: keyof typeof SETTINGS_LIMITS) => `${SETTINGS_LIMITS[k].min}–${SETTINGS_LIMITS[k].max}`;
 
 export default function SettingsPage() {
@@ -58,6 +68,18 @@ export default function SettingsPage() {
       </nav>
       {error && <ErrorState message={error} onRetry={load} />}
       {!data && !error && <SkeletonRows label="settings" />}
+      {data && shots && (
+        <section aria-labelledby="in-force" className="flex flex-col gap-3">
+          <h2 id="in-force" className="text-lg font-semibold">In force now</h2>
+          <StatGrid>
+            <StatCard label="Idle threshold" value={`${data.effective.idleThresholdSeconds} s`} hint={data.effective.enabled ? "No input this long counts as idle" : "Activity monitoring is off"} />
+            <StatCard label="Sampling interval" value={`${data.effective.sampleSeconds} s`} hint="How often the foreground app is checked" />
+            <StatCard label="Screenshots" value={shots.settings.effective.enabled ? "Enabled" : "Disabled"} hint={shots.settings.effective.enabled ? "After each employee's acknowledgement" : "Nothing is captured"} />
+            <StatCard label="Screenshot interval" value={`${shots.settings.effective.intervalSeconds} s`} hint={shots.settings.effective.enabled ? "While clocked in, not on a break" : "Applies once screenshots are enabled"} />
+          </StatGrid>
+          <p className="text-xs text-muted">Organisation values; one person can have their own idle threshold or blur setting on their employee page.</p>
+        </section>
+      )}
       {data && <PolicyForm data={data} onSaved={load} />}
       {data && <Notices notices={data.notices} onPublished={load} />}
       {retention && <Retention preview={retention} onRan={load} />}
@@ -152,6 +174,7 @@ function OneDriveStorage() {
   const [error, setError] = useState<string | null>(null);
   const [confirming, setConfirming] = useState(false);
   const [busy, setBusy] = useState(false);
+  const canStorage = useCan().storage;
   const [result] = useState(() => (typeof window === "undefined" ? null : CONNECT_RESULT[new URLSearchParams(window.location.search).get("oneDrive") ?? ""] ?? null));
   const load = useCallback(() => {
     // An API without this route (404) simply has no OneDrive section.
@@ -218,7 +241,8 @@ function OneDriveStorage() {
             </tbody>
           </table>
 
-          <div className="mt-4 flex flex-wrap items-center gap-2">
+          {!canStorage && <p className="mt-4 text-sm text-muted">Connecting or disconnecting storage: {SUPER_ONLY}</p>}
+          {canStorage && <div className="mt-4 flex flex-wrap items-center gap-2">
             <a href={connectUrl} className={st.connected ? secondaryButtonClass : buttonClass}>{st.connected ? "Reconnect" : "Connect OneDrive"}</a>
             {st.connected && !confirming && <button type="button" onClick={() => setConfirming(true)} className={secondaryButtonClass}>Disconnect</button>}
             {confirming && (
@@ -228,7 +252,7 @@ function OneDriveStorage() {
                 <button type="button" onClick={() => setConfirming(false)} className={secondaryButtonClass}>Cancel</button>
               </>
             )}
-          </div>
+          </div>}
           <p className="mt-3 text-xs text-muted">Connect signs in as the IT storage account at Microsoft and grants this server access to that account&apos;s own files only. No password or token is shown or stored in this page.</p>
         </>
       )}
@@ -240,6 +264,7 @@ function PolicyForm({ data, onSaved }: { data: MonitoringSettingsResponse; onSav
   const e = data.effective;
   const [status, setStatus] = useState<{ tone: "error" | "success"; text: string } | null>(null);
   const [saving, setSaving] = useState(false);
+  const canRetention = useCan().purge;
 
   async function submit(ev: FormEvent<HTMLFormElement>) {
     ev.preventDefault();
@@ -249,8 +274,9 @@ function PolicyForm({ data, onSaved }: { data: MonitoringSettingsResponse; onSav
       sampleSeconds: Number(f.get("sampleSeconds")),
       idleThresholdSeconds: Number(f.get("idleThresholdSeconds")),
       idleExcludedApps: String(f.get("idleExcludedApps")).split("\n").map((a) => a.trim()).filter(Boolean),
-      retentionDays: Number(f.get("retentionDays")),
-      retentionApproved: f.get("retentionApproved") === "on",
+      // Disabled inputs are not submitted: without the right to change retention the values in force are sent unchanged.
+      retentionDays: canRetention ? Number(f.get("retentionDays")) : e.retentionDays,
+      retentionApproved: canRetention ? f.get("retentionApproved") === "on" : e.retentionApproved,
       noticeVersion: String(f.get("noticeVersion")),
       reason: String(f.get("reason")),
     };
@@ -286,7 +312,7 @@ function PolicyForm({ data, onSaved }: { data: MonitoringSettingsResponse; onSav
           </Field>
         </div>
         <Field label="Activity retention (days)" hint={`${range("retentionDays")}. Proposed default 30 days.`}>
-          <input name="retentionDays" type="number" required min={SETTINGS_LIMITS.retentionDays.min} max={SETTINGS_LIMITS.retentionDays.max} defaultValue={e.retentionDays} className={inputClass} />
+          <input name="retentionDays" type="number" required disabled={!canRetention} min={SETTINGS_LIMITS.retentionDays.min} max={SETTINGS_LIMITS.retentionDays.max} defaultValue={e.retentionDays} className={inputClass} />
         </Field>
         <Field label="Required notice" hint="Employees must acknowledge this version before anything is recorded.">
           <select name="noticeVersion" defaultValue={e.noticeVersion} className={inputClass}>
@@ -294,12 +320,13 @@ function PolicyForm({ data, onSaved }: { data: MonitoringSettingsResponse; onSav
           </select>
         </Field>
         <label className="flex items-start gap-2 text-sm sm:col-span-2">
-          <input type="checkbox" name="retentionApproved" defaultChecked={e.retentionApproved} className="mt-1" />
+          <input type="checkbox" name="retentionApproved" defaultChecked={e.retentionApproved} disabled={!canRetention} className="mt-1" />
           <span>
             <span className="font-medium">Retention period approved by HR/Legal</span>
             <span className="block text-xs text-muted">Until this is checked nothing is deleted automatically. Once checked, activity older than the retention period is purged every 6 hours (attendance and corrections are never purged).</span>
           </span>
         </label>
+        {!canRetention && <p className="text-xs text-muted sm:col-span-2" data-testid="retention-locked">Only a Super Admin can change retention (the period and its approval); the rest of this form saves as usual.</p>}
         <div className="sm:col-span-2">
           <Field label="Reason for the change" hint="Kept in the history below.">
             <textarea name="reason" required maxLength={1000} rows={2} className={inputClass} />
@@ -378,6 +405,7 @@ function Notices({ notices, onPublished }: { notices: MonitoringNotice[]; onPubl
 function Retention({ preview, onRan }: { preview: RetentionPreview; onRan: () => void }) {
   const [confirmed, setConfirmed] = useState(false);
   const [status, setStatus] = useState<{ tone: "error" | "success"; text: string } | null>(null);
+  const canPurge = useCan().purge;
 
   async function run() {
     try {
@@ -402,7 +430,8 @@ function Retention({ preview, onRan }: { preview: RetentionPreview; onRan: () =>
         Only activity intervals are purged. Attendance, corrections, consent records and settings history are kept. Unsynced activity
         stays on the employee&apos;s computer and is never deleted there. A purge cannot be undone except from a database backup.
       </p>
-      {preview.approved && preview.eligibleIntervals > 0 && (
+      {preview.approved && preview.eligibleIntervals > 0 && !canPurge && <p className="mt-3 text-sm text-muted">Running the purge by hand: {SUPER_ONLY} The scheduled purge still runs.</p>}
+      {preview.approved && preview.eligibleIntervals > 0 && canPurge && (
         <div className="mt-3 flex flex-wrap items-center gap-3">
           <label className="flex items-center gap-2 text-sm">
             <input type="checkbox" checked={confirmed} onChange={(e) => setConfirmed(e.target.checked)} />
@@ -471,6 +500,7 @@ function Screenshots({ data, retention, notices, onSaved }: {
   const e = data.effective;
   const [status, setStatus] = useState<{ tone: "error" | "success"; text: string } | null>(null);
   const [confirmed, setConfirmed] = useState(false);
+  const canPurge = useCan().purge;
 
   async function submit(ev: FormEvent<HTMLFormElement>) {
     ev.preventDefault();
@@ -483,8 +513,8 @@ function Screenshots({ data, retention, notices, onSaved }: {
       captureScope: "PRIMARY_DISPLAY",
       maskRegions: JSON.parse(String(f.get("maskRegions") ?? "[]")),
       blur: f.get("blur") === "on",
-      retentionDays: Number(f.get("retentionDays")),
-      retentionApproved: f.get("retentionApproved") === "on",
+      retentionDays: canPurge ? Number(f.get("retentionDays")) : e.retentionDays,
+      retentionApproved: canPurge ? f.get("retentionApproved") === "on" : e.retentionApproved,
       noticeVersion: String(f.get("noticeVersion")),
       employeeSelfView: f.get("employeeSelfView") === "on",
       autoTimelapse: f.get("autoTimelapse") === "on",
@@ -530,7 +560,7 @@ function Screenshots({ data, retention, notices, onSaved }: {
           <input name="intervalSeconds" type="number" required min={SCREENSHOT_LIMITS.intervalSeconds.min} max={SCREENSHOT_LIMITS.intervalSeconds.max} defaultValue={e.intervalSeconds} className={inputClass} />
         </Field>
         <Field label="Screenshot retention (days)" hint={`${shotRange("retentionDays")}. Proposed default 30.`}>
-          <input name="retentionDays" type="number" required min={SCREENSHOT_LIMITS.retentionDays.min} max={SCREENSHOT_LIMITS.retentionDays.max} defaultValue={e.retentionDays} className={inputClass} />
+          <input name="retentionDays" type="number" required disabled={!canPurge} min={SCREENSHOT_LIMITS.retentionDays.min} max={SCREENSHOT_LIMITS.retentionDays.max} defaultValue={e.retentionDays} className={inputClass} />
         </Field>
         <Field label="WebP quality" hint={`${shotRange("webpQuality")}. About 70 keeps text readable.`}>
           <input name="webpQuality" type="number" required min={SCREENSHOT_LIMITS.webpQuality.min} max={SCREENSHOT_LIMITS.webpQuality.max} defaultValue={e.webpQuality} className={inputClass} />
@@ -573,12 +603,13 @@ function Screenshots({ data, retention, notices, onSaved }: {
           </span>
         </label>
         <label className="flex items-start gap-2 text-sm sm:col-span-2">
-          <input type="checkbox" name="retentionApproved" defaultChecked={e.retentionApproved} className="mt-1" />
+          <input type="checkbox" name="retentionApproved" defaultChecked={e.retentionApproved} disabled={!canPurge} className="mt-1" />
           <span>
             <span className="font-medium">Screenshot retention approved by HR/Legal</span>
             <span className="block text-xs text-muted">Until checked, nothing is deleted. Once checked, screenshots older than the retention period are deleted from storage every 6 hours; their metadata is kept, marked deleted.</span>
           </span>
         </label>
+        {!canPurge && <p className="text-xs text-muted sm:col-span-2" data-testid="retention-locked">Only a Super Admin can change retention (the period and its approval); the rest of this form saves as usual.</p>}
         <div className="sm:col-span-2">
           <Field label="Reason for the change"><textarea name="reason" required maxLength={1000} rows={2} className={inputClass} /></Field>
         </div>
@@ -604,7 +635,8 @@ function Screenshots({ data, retention, notices, onSaved }: {
           </tbody>
         </table>
       )}
-      {retention.approved && retention.eligible > 0 && (
+      {retention.approved && retention.eligible > 0 && !canPurge && <p className="mt-3 text-sm text-muted">Running the purge by hand: {SUPER_ONLY} The scheduled purge still runs.</p>}
+      {retention.approved && retention.eligible > 0 && canPurge && (
         <div className="mt-3 flex flex-wrap items-center gap-3">
           <label className="flex items-center gap-2 text-sm">
             <input type="checkbox" checked={confirmed} onChange={(ev) => setConfirmed(ev.target.checked)} />

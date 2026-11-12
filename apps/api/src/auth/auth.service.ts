@@ -43,6 +43,8 @@ const INVALID_LOGIN = "Invalid email or password";
 /** The authenticated caller, attached to the request by AuthGuard. Role always comes from the DB. */
 export interface AuthContext extends AuthUser {
   sessionId: string;
+  /** Which client signed in (from the session row, set at login). Device registration and device-bound writes need DESKTOP. */
+  client: SessionClient | null;
   /** Heads at least one active team (W41): team-scoped reads of those teams' members (common/scope.ts). */
   teamHead?: boolean;
 }
@@ -168,7 +170,7 @@ export class AuthService {
     }
     const row = (
       await this.db.execute({
-        sql: `SELECT u.id, u.email, u.role, u.admin_title,
+        sql: `SELECT u.id, u.email, u.role, u.admin_title, s.client,
                 EXISTS (SELECT 1 FROM teams t WHERE t.head_user_id = u.id AND t.active = 1) AS team_head
               FROM sessions s JOIN users u ON u.id = s.user_id
               WHERE s.id = ? AND u.id = ? AND s.revoked_at IS NULL AND s.expires_at > ? AND u.status = 'ACTIVE'`,
@@ -176,7 +178,7 @@ export class AuthService {
       })
     ).rows[0];
     if (!row) throw new UnauthorizedException();
-    return { id: String(row.id), email: String(row.email), role: row.role as Role, platformRole: platformRoleOf(row.role as Role, str(row.admin_title)), sessionId, teamHead: Boolean(row.team_head) };
+    return { id: String(row.id), email: String(row.email), role: row.role as Role, platformRole: platformRoleOf(row.role as Role, str(row.admin_title)), sessionId, client: str(row.client) as SessionClient | null, teamHead: Boolean(row.team_head) };
   }
 
   /** Consumes a one-time setup token, sets the password and signs out any existing sessions. */

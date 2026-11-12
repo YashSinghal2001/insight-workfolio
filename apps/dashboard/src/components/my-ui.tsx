@@ -73,8 +73,11 @@ export function Stat({ label, value, hint }: { label: string; value: ReactNode; 
   );
 }
 
+/** Time of the last load, in the employee's time zone (the browser's only when the account has no profile). */
 export function UpdatedAt({ at }: { at: number }) {
-  return <span className="text-xs text-muted">Updated {new Date(at).toLocaleTimeString()}</span>;
+  const { auth } = useAuth();
+  const timeZone = auth.status === "authenticated" ? auth.me.employee?.timezone : undefined;
+  return <span className="text-xs text-muted">Updated {new Date(at).toLocaleTimeString(undefined, { timeZone })}</span>;
 }
 
 /** Simple responsive table: scrolls horizontally on small screens. */

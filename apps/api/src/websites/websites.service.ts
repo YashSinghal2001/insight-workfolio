@@ -38,6 +38,7 @@ import {
 import { iso, str } from "../attendance/sessions.js";
 import type { AuthContext } from "../auth/auth.service.js";
 import { RateLimiter } from "../auth/crypto.js";
+import { assertMayChangeRetention } from "../common/policy.js";
 import type { Env } from "../config/env.js";
 import { DATABASE } from "../database/database.module.js";
 import { EmployeesService } from "../employees/employees.service.js";
@@ -135,6 +136,7 @@ export class WebsitesService implements OnModuleInit, OnModuleDestroy {
   }
 
   async setPolicy(admin: AuthContext, input: { enabled: boolean; retentionDays: number; noticeVersion: string; reason: string }) {
+    assertMayChangeRetention(admin, await this.policy(), input);
     if (!(await this.db.execute({ sql: "SELECT 1 FROM monitoring_notices WHERE version = ?", args: [input.noticeVersion] })).rows[0]) {
       throw new BadRequestException("Unknown notice version");
     }

@@ -9,6 +9,7 @@ import {
   type ApplicationCategory,
   type CategorizedActivitySummary,
   type CategorizedTimelineItem,
+  type MonitoringSettingsResponse,
   type Paginated,
 } from "@workfolio/shared";
 import { BreaksOverlay } from "@/components/breaks-overlay";
@@ -17,6 +18,7 @@ import { RangePicker, weekRange, type Range } from "@/components/range-picker";
 import { Badge, Card, formatInZone, Notice } from "@/components/ui";
 import { api, errorMessage } from "@/lib/api";
 import { ActivityOverview } from "../_components/activity-overview";
+import { DayTimeline } from "../_components/day-timeline";
 import { EmployeePicker } from "../_components/employee-picker";
 import { ProductivityTrend } from "../_components/productivity-trend";
 
@@ -85,6 +87,9 @@ function Activity() {
   const [timeline, setTimeline] = useState<Paginated<CategorizedTimelineItem> | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [retry, setRetry] = useState(0);
+  // Organisation idle threshold in force (read-only here). null = not loaded; then nothing is claimed.
+  const [policy, setPolicy] = useState<MonitoringSettingsResponse["effective"] | null>(null);
+  useEffect(() => void api<MonitoringSettingsResponse>("/settings/monitoring").then((s) => setPolicy(s.effective), () => setPolicy(null)), []);
 
   useEffect(() => {
     if (!employeeId || view !== "employee") return;
@@ -120,6 +125,12 @@ function Activity() {
             not a measure of performance.
           </>
         }
+        actions={policy && (
+          <span className="text-sm" data-testid="idle-threshold">
+            Idle threshold in force: <strong className="tabular-nums">{policy.idleThresholdSeconds} s</strong>
+            <span className="text-muted"> ({policy.enabled ? `sampled every ${policy.sampleSeconds} s` : "activity monitoring is off"}; <Link href="/settings" className="underline">Settings</Link>)</span>
+          </span>
+        )}
       />
 
       <RangePicker value={range} maxDays={31} onChange={(r) => (reset(), setRange(r))} />
@@ -130,6 +141,7 @@ function Activity() {
       ) : (
       <div className="flex flex-col gap-6">
       <EmployeePicker value={employeeId} onChange={pick} autoSelect />
+      {employeeId && <DayTimeline key={employeeId} employeeId={employeeId} />}
 
       {error && <ErrorState message={error} onRetry={() => setRetry((n) => n + 1)} />}
       {!employeeId && !error && <EmptyState title="Choose an employee" hint="Search by name or employee code. If the list stays empty, no employees are enrolled yet." />}

@@ -49,6 +49,42 @@ server rules are unchanged.
   (`SetWindowsHookEx` is never used), no raw input, no input contents.
 - Known limitation: some remote-desktop/accessibility tools and game controllers update or do
   not update this counter; verify on pilot hardware.
+- Mouse movement, buttons and wheel, and every key press, reset the counter. A held key is
+  expected to keep resetting it through typematic repeat (repeats arrive as ordinary keyboard
+  input); this is from documentation knowledge and is **NOT RUN** on a PC.
+- The threshold is the server policy (`idleThresholdSeconds`, default 300 s). The app shows it
+  at all times in the Activity monitoring card ("Idle after").
+- A long idle stretch is split every 15 minutes (like a long active interval), so it uploads as it
+  goes instead of only when input resumes.
+- **Live state.** The open interval is never uploaded, so the app also reports its current state
+  (`ACTIVE`, `IDLE`, `UNOBSERVED`) in the `current` field of `POST /activity/sync`: with every
+  interval upload, and in an upload with no intervals when the state changes or 60 s have passed
+  (`src/live-state.ts`). Nothing is reported while clocked out, on a break, without consent,
+  offline, or while attendance changes are still waiting to sync. Locked = `IDLE`; asleep or
+  another user in front = `UNOBSERVED`. The reporting runs on webview timers: whether WebView2
+  keeps them on time while the window is hidden to the tray is **NOT RUN**.
+
+### Injected (synthetic) input: counts as activity today — awaiting a decision
+
+`GetLastInputInfo` is also refreshed by input that programs inject (`SendInput`, `keybd_event`,
+`mouse_event`): software "mouse jigglers", AutoHotkey scripts, remote-control tools. Such input
+currently counts as activity and prevents IDLE. A hardware jiggler (a USB device) is a real input
+device and cannot be told apart by any method.
+
+Option, **not implemented**: low-level hooks (`WH_KEYBOARD_LL` + `WH_MOUSE_LL`) that read only the
+`LLKHF_INJECTED` / `LLMHF_INJECTED` flag and discount input positively flagged as injected, with
+`GetLastInputInfo` staying the authority. Costs:
+- It reverses the no-hooks promise above. The keyboard hook structure carries the key code even
+  though the code would never read it; the employee notice and this document would need review.
+- The binary is unsigned: antivirus/EDR products may flag a keyboard hook as keylogger behaviour.
+- Windows silently removes a hook whose callback exceeds the timeout (about 300 ms), so it needs
+  a periodic reinstall; every mouse move costs a synchronous hop to the hook thread.
+- People who legitimately work through injected input would be marked idle: TeamViewer/AnyDesk
+  sessions, the on-screen keyboard, AutoHotkey remaps, software KVMs.
+- Raw Input (`hDevice == NULL`) was considered and rejected: touchpads and touch may report a
+  null device too, which would mark real users idle.
+
+This needs the owner's explicit sign-off; until then `GetLastInputInfo` stays as it is.
 
 ## Screen lock and user switching (polled, authoritative)
 
@@ -56,7 +92,14 @@ server rules are unchanged.
   `Default` (`Winlogon`: lock screen, UAC prompt, Ctrl+Alt+Del; screen saver) means locked.
   Access denied (error 5) when opening also means locked. Any other failure is treated as unknown
   and counts as unlocked, as on macOS, so a broken query never stops monitoring by itself.
-- **A UAC prompt is treated as locked**: nothing is attributed while the secure desktop is up.
+- **A locked screen is IDLE**, from the lock to the unlock, on macOS and Windows alike: the
+  employee notice says idle time includes a locked screen. With the `WTS_SESSION_LOCK` event the
+  active interval ends at the lock; if only the poll sees it, it ends at the last unlocked sample.
+  Input at the lock screen never counts, and activity never resumes before the screen was last
+  seen locked (so a face or fingerprint unlock cannot turn the locked time active).
+- **A UAC prompt is treated as locked**: the few seconds the secure desktop is up are IDLE.
+- Sleep, fast user switching / another user in front, an invalid idle reading and clock jumps
+  stay unobserved (neither ACTIVE nor IDLE).
 - The user counts as in front if this process's session is the console session
   (`WTSGetActiveConsoleSessionId`), **or** the session is connected (`WTSConnectState ==
   WTSActive`, e.g. the user working over Remote Desktop). Fast user switching or an RDP
@@ -84,8 +127,12 @@ Message-only windows receive no broadcasts, so power events are registered expli
 
 If a registration fails (for example, the session service isn't ready right after logon), it is logged and the polled
 checks still cover lock and user switching. There is no retry yet.
-Display on/off is not tracked on Windows (`ScreensSlept`/`ScreensWoke` are macOS-only and
-informational).
+Display on/off: the same thread registers `RegisterPowerSettingNotification(GUID_CONSOLE_DISPLAY_STATE)`
+and maps `PBT_POWERSETTINGCHANGE` data 0 → `ScreensSlept`, 1 or 2 (on, dimmed) → `ScreensWoke`.
+Screenshots are skipped while the display is off (`display_asleep`), so an unlocked PC with a
+dark screen is not captured. If the registration fails or no notification arrives, the display
+counts as on: a missing notification never stops capture by itself. Activity tracking is
+unaffected (the idle counter covers it). Delivery to a message-only window is **NOT RUN** on a PC.
 
 ## Background throttling (power)
 
@@ -288,10 +335,13 @@ equivalent applied. On macOS `app_local_data_dir` and `app_data_dir` are the sam
    "Unknown app (protected)"; Calculator shows its own name and `calculatorapp.exe`, not "Application Frame Host".
 4. Idle threshold and resume; `Win+L` lock/unlock; sleep and wake (including Modern Standby). **NOT RUN.**
    Expected:
-   - `Win+L`: `[session] Locked` in the log; no ACTIVE or IDLE time until unlock, then `[session] Unlocked`.
+   - `Win+L`: `[session] Locked` in the log; IDLE from the lock until unlock (no ACTIVE time, even while typing the password), then `[session] Unlocked` and ACTIVE again.
+   - Hold one key for 30 s in Notepad: the app never shows "no input for …" and no IDLE is recorded.
+   - Leave the PC for the threshold: "Idle since …" in the app, IDLE in the admin and employee dashboards within about a minute; touch the mouse: ACTIVE again within about a minute. Repeat with the window closed to the tray for 10+ minutes.
+   - Windows Hello (face/fingerprint) unlock: the locked time stays IDLE.
    - Sleep (Start → Power → Sleep): `WillSleep`, then after wake `DidWake` (once or twice). The interval closes at sleep.
    - Fast user switch (Start → user icon → other user, then back): `SessionResigned`, then `SessionActive` and `Unlocked`.
-   - UAC prompt (e.g. run an installer): unobserved while the prompt is up.
+   - UAC prompt (e.g. run an installer): IDLE while the prompt is up.
    - Elevated app in front (Task Manager): ACTIVE with its name.
    - Remote Desktop into the same account: observed. Disconnect: not observed.
 4a. Background throttling. **NOT RUN.** Task Manager → Details → right-click a column header →

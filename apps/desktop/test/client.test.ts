@@ -29,7 +29,7 @@ function diskQueue(disk: QueuedEvent[]): Queue {
 const ev = (id: string, type: QueuedEvent["type"], occurredAt = "2026-10-12T09:00:00.000Z"): QueuedEvent => ({
   id, userId: "u1", deviceId: "d1", type, occurredAt, status: "PENDING",
 });
-const CURRENT: AttendanceCurrent = { state: "CLOCKED_OUT", session: null, serverTime: "2026-10-12T09:00:00.000Z" };
+const CURRENT: AttendanceCurrent = { state: "CLOCKED_OUT", session: null, missingClockOut: false, serverTime: "2026-10-12T09:00:00.000Z" };
 const offline = () => Promise.reject(new TypeError("fetch failed"));
 const accept = (status: "ACCEPTED" | "DUPLICATE" = "ACCEPTED") => async (b: { items: { id: string }[] }): Promise<SyncResponse> => ({
   results: b.items.map((e) => ({ id: e.id, status })),
@@ -150,6 +150,7 @@ test("reconciliation: server-side changes (e.g. an approved correction) win over
   // Locally the employee is on a break; meanwhile an admin approved a missing clock-out that closed the shift.
   const server: AttendanceCurrent = {
     state: "CLOCKED_OUT",
+    missingClockOut: false,
     serverTime: "2026-10-12T18:00:00.000Z",
     session: { id: "s1", clockInAt: "2026-10-12T09:00:00.000Z", clockOutAt: "2026-10-12T17:00:00.000Z", status: "CLOSED", breaks: [], corrected: true, clockInSource: "ONLINE" },
   };

@@ -3,6 +3,7 @@ import { ConfigService } from "@nestjs/config";
 import { isUniqueViolation, type DatabaseClient, type Row } from "@workfolio/database";
 import {
   DEFAULT_MONITORING_SETTINGS,
+  DEFAULT_SCREENSHOT_NOTICE_VERSION,
   effectiveIdleThreshold,
   type AttendancePolicy,
   type MonitoringPolicy,
@@ -13,7 +14,7 @@ import {
   type MonitoringSettingsVersion,
   type NoticeInput,
 } from "@workfolio/shared";
-import { POLICY } from "../common/policy.js";
+import { assertMayChangeRetention, POLICY } from "../common/policy.js";
 import type { Env } from "../config/env.js";
 import { DATABASE } from "../database/database.module.js";
 
@@ -128,12 +129,18 @@ export class MonitoringSettingsService {
   }
 
   async update(admin: AuthUser, input: MonitoringSettingsInput): Promise<MonitoringSettingsResponse> {
+    assertMayChangeRetention(admin, await this.current(), input);
     const maxOffline = this.attendancePolicy.maxOfflineAgeDays;
     // Shorter retention would let a late offline upload be accepted and purged at once.
     if (input.retentionDays < maxOffline) throw new BadRequestException(`retentionDays: must be at least the offline limit (${maxOffline} days)`);
     await this.notice(input.noticeVersion).catch(() => {
       throw new BadRequestException("noticeVersion: no such notice");
     });
+    // The reverse of the check in ScreenshotSettingsService.update: the two consents stay separate.
+    const { rows: shared } = await this.db.execute({ sql: "SELECT 1 FROM screenshot_policies WHERE notice_version = ? LIMIT 1", args: [input.noticeVersion] });
+    if (shared.length || input.noticeVersion === DEFAULT_SCREENSHOT_NOTICE_VERSION) {
+      throw new BadRequestException("noticeVersion: this notice is used for screenshots; activity monitoring needs a separate notice");
+    }
     const { reason, ...next } = input;
     // Omitted by older clients: the current exclusion list carries over.
     const excluded = next.idleExcludedApps ?? (await this.current()).idleExcludedApps;

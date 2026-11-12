@@ -191,12 +191,12 @@ describe("employee screenshot self-view (in-process API)", () => {
     assert.deepEqual(Buffer.from(thumb.bytes), Buffer.from(s.bytes));
     assert.equal(full.res.headers.get("cache-control"), "no-store, private, max-age=0");
     assert.equal(full.res.headers.get("content-security-policy"), "default-src 'none'; sandbox");
-    assert.deepEqual(await logRows(s.id), [`${a.userId}:VIEW`, `${a.userId}:THUMBNAIL`], "each image request logged with the employee's account");
+    assert.deepEqual(await logRows(s.id), [`${a.userId}:VIEW`, `${a.userId}:VIEW`], "each image request logged with the employee's account, as what was served (the full image)");
     await api(`/screenshots?pageSize=1`, { bearer: a.bearer });
     await api(`/screenshots/${s.id}`, { bearer: a.bearer });
     assert.equal((await logRows(s.id)).length, 2, "metadata requests are not image views");
     const adminView = await api(`/screenshots/${s.id}`, { cookie: admin });
-    assert.deepEqual(adminView.body.accessLog.map((l: { viewer: { id: string }; action: string }) => `${l.viewer.id}:${l.action}`).sort(), [`${a.userId}:THUMBNAIL`, `${a.userId}:VIEW`], "admins see the employee's own views");
+    assert.deepEqual(adminView.body.accessLog.map((l: { viewer: { id: string }; action: string }) => `${l.viewer.id}:${l.action}`).sort(), [`${a.userId}:VIEW`, `${a.userId}:VIEW`], "admins see the employee's own views");
     assert.deepEqual(adminView.body.masks, MASKS);
   });
 

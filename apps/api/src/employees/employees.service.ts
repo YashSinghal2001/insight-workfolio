@@ -13,7 +13,7 @@ import {
   type SetupToken,
   type UpdateEmployeeInput,
 } from "@workfolio/shared";
-import { accountAudit } from "../audit/account-audit.js";
+import { accountAudit, employeeReadAudit } from "../audit/account-audit.js";
 import type { AuthContext } from "../auth/auth.service.js";
 import { setupTokenStatements } from "../auth/setup-token.js";
 import { canReadEmployee, scopeSql } from "../common/scope.js";
@@ -266,6 +266,15 @@ export class EmployeesService {
       employeeCode: String(r.employee_code),
       timezone: String(r.timezone),
     };
+  }
+
+  /**
+   * Audits a served read of ANOTHER employee's records (admin or team head); nothing for the caller's own.
+   * Call it after the data was produced, so refused or failed requests leave no row.
+   */
+  async auditRead(caller: AuthContext, employee: { id: string; userId: string }, action: Parameters<typeof employeeReadAudit>[2], metadata: Parameters<typeof employeeReadAudit>[3] = {}): Promise<void> {
+    const audit = employeeReadAudit(caller, employee, action, metadata);
+    if (audit) await this.db.execute(audit);
   }
 
   async findByUserId(userId: string): Promise<Employee | null> {

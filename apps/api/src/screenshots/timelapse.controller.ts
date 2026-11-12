@@ -47,7 +47,9 @@ export class TimelapseController {
     return this.timelapses.cancel(user, id);
   }
 
+  /** Super Admin only (overrides the class permission; team heads and Admins get 403). */
   @Delete(":id")
+  @RequirePermission("screenshots:delete")
   @HttpCode(204)
   async remove(@CurrentUser() user: AuthContext, @Param("id", ParseUUIDPipe) id: string) {
     await this.timelapses.remove(user, id);

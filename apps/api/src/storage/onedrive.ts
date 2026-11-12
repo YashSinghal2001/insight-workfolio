@@ -470,7 +470,7 @@ export class OneDriveController {
 
   /** Opened in the admin's signed-in browser: redirects to Microsoft's sign-in for the IT storage account. */
   @Get("oauth/start")
-  @RequirePermission("settings:manage")
+  @RequirePermission("storage:manage")
   start(@CurrentUser() user: AuthContext, @Res() res: Response): void {
     const { url, binding } = this.onedrive.begin(user.id);
     res.cookie(ONEDRIVE_BINDING_COOKIE, binding, { httpOnly: true, sameSite: "lax", secure: this.secure, path: ONEDRIVE_CALLBACK_PATH, maxAge: STATE_TTL_MS });
@@ -508,7 +508,7 @@ export class OneDriveController {
 
   @Post("disconnect")
   @HttpCode(204)
-  @RequirePermission("settings:manage")
+  @RequirePermission("storage:manage")
   async disconnect(@CurrentUser() user: AuthContext): Promise<void> {
     await this.onedrive.disconnect(user.id);
   }

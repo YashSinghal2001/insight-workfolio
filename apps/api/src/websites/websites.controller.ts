@@ -80,7 +80,7 @@ export class WebsitesController {
 
   @Post("retention/run")
   @HttpCode(200)
-  @RequirePermission("websites:manage")
+  @RequirePermission("screenshots:delete")
   retention(@CurrentUser() user: AuthContext, @Body(new ZodPipe(retentionRunSchema)) _body: { confirm: true }) {
     return this.websites.retention(user);
   }

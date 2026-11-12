@@ -1,20 +1,34 @@
 # Roles: Super Admin, Admin, Employee
 
-Three identities, two permission levels. **Super Admin (CEO) and Admin (IT) have identical
-permissions** for every feature. A Super Admin can additionally (a) grant or remove the Super Admin
-identity and (b) manage Super Admin accounts: an Admin cannot edit, disable, reissue a setup link for,
-or revoke a device of a Super Admin (403 "Only a Super Admin can manage a Super Admin account").
-Employees see only their own data.
+Three identities. Super Admin and Admin (IT) share the `ADMIN` permission role and see the same data,
+but **an Admin does not hold the Super Admin-only permissions** below. Employees see only their own data;
+the head of an active team additionally reads their team members' records (see [teams.md](teams.md)).
 
-| Identity | `users.role` (permissions) | `users.admin_title` | Sees |
+| Identity | `users.role` | `users.admin_title` | Sees |
 | --- | --- | --- | --- |
 | Super Admin | `ADMIN` | `SUPER_ADMIN` | Everything an admin sees |
-| Admin | `ADMIN` | `ADMIN` | Everything an admin sees |
+| Admin (IT) | `ADMIN` | `ADMIN` | Everything an admin sees |
 | Employee | `EMPLOYEE` | `NULL` | Own records only (desktop app, `/my` web page) |
 
-Every permission check still uses `users.role` (`packages/shared/src/roles.ts`, `hasPermission`), so
-adding the identity changed no existing access rule. `platformRoleOf(role, adminTitle)` derives the
-identity; `roleOf(identity)` gives the permission role.
+## Super Admin only
+
+`SUPER_ADMIN_ONLY` in `packages/shared/src/roles.ts`; an Admin, a team head and an employee get 403.
+
+| Permission | Routes / actions |
+| --- | --- |
+| `screenshots:delete` | `DELETE /screenshots/:id` (reason required, stored in `screenshots.deleted_reason`); `DELETE /timelapses/:id`; `POST /screenshots/retention/run`, `POST /activity/retention/run`, `POST /websites/retention/run`; changing `retentionDays` or `retentionApproved` in the screenshot, activity-monitoring or website settings (`assertMayChangeRetention`, `apps/api/src/common/policy.ts`). Saving those forms with retention unchanged stays open to both admin identities. |
+| `storage:manage` | `GET /storage/onedrive/oauth/start`, `POST /storage/onedrive/disconnect`, `GET /storage/google-drive/oauth/start` |
+| `roles:manage` | `GET /roles/users`, `PATCH /roles/users/:id` (`platformRole`, `reason` 3–500 chars), `GET /roles/history` |
+
+A Super Admin also manages Super Admin accounts: an Admin cannot edit, disable, reissue a setup link for,
+or revoke a device of a Super Admin (403 "Only a Super Admin can manage a Super Admin account").
+
+The check is `can(user, permission)` (role check plus the Super Admin-only list), used by `AuthGuard`.
+`hasPermission(role, permission)` is the role-level check only. `platformRoleOf(role, adminTitle)` derives
+the identity; `roleOf(identity)` gives the permission role.
+
+**Before deploying:** at least one account must hold the Super Admin title, or nobody can manage roles,
+delete, purge, change retention or connect storage (`admin:create --super-admin`, see Setup).
 
 ## Enforcement
 
@@ -22,8 +36,11 @@ identity; `roleOf(identity)` gives the permission role.
   tokens or client state cannot raise it (tested with spoofed `x-role` headers).
 - The dashboard and the desktop app only *display* the identity they get from `/auth/me`. The admin
   layout redirects employees to `/my`; the API refuses them regardless.
-- `roles:manage` (admins): `GET /roles/users`, `PATCH /roles/users/:id` (`platformRole`, `reason`
-  3–500 chars), `GET /roles/history`.
+- Device registration and device-bound writes (clock-in/out, activity and screenshot uploads) need a
+  desktop sign-in (`sessions.client = DESKTOP`); a browser session gets 403. The client type is declared
+  at login, so this separates sessions, not people.
+- Tests: `apps/api/test/roles.e2e.test.ts`, `role-separation-live-status.e2e.test.ts`,
+  `qa-round2-security.e2e.test.ts`, `qa-round3-fixes.e2e.test.ts`.
 
 ## Safeguards
 
