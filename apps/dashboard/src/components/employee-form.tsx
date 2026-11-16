@@ -1,8 +1,9 @@
 "use client";
 
 import { useState, type FormEvent } from "react";
-import { DEFAULT_TIMEZONE, EMPLOYMENT_STATUSES, type Employee, type SetupToken } from "@workfolio/shared";
-import { buttonClass, Field, inputClass, Notice, secondaryButtonClass } from "./ui";
+import { DEFAULT_TIMEZONE, EMPLOYMENT_STATUSES, type Employee, type Invitation, type InvitationStatus, type SetupToken } from "@workfolio/shared";
+import { StatusBadge, type Tone } from "./kit";
+import { buttonClass, Field, formatInZone, inputClass, Notice, secondaryButtonClass } from "./ui";
 
 const TIMEZONES = typeof Intl.supportedValuesOf === "function" ? Intl.supportedValuesOf("timeZone") : [];
 
@@ -95,5 +96,36 @@ export function SetupLinkNotice({ setup, email }: { setup: SetupToken; email: st
         </button>
       </div>
     </Notice>
+  );
+}
+
+export const INVITATION_LABEL: Record<InvitationStatus, { tone: Tone; label: string }> = {
+  PENDING: { tone: "warning", label: "Invitation pending" },
+  SENT: { tone: "info", label: "Invitation sent" },
+  FAILED: { tone: "danger", label: "Invitation failed" },
+  ACCEPTED: { tone: "success", label: "Invitation accepted" },
+  EXPIRED: { tone: "neutral", label: "Invitation expired" },
+};
+
+/** The latest invitation email. "Sent" means the provider accepted it; delivery to the inbox is not confirmed. */
+export function InvitationSummary({ invitation: i, timezone }: { invitation: Invitation; timezone: string }) {
+  const s = INVITATION_LABEL[i.status];
+  return (
+    <div className="flex flex-col gap-1 text-sm" data-testid="invitation-status" data-status={i.status}>
+      <p className="flex flex-wrap items-center gap-2">
+        <StatusBadge tone={s.tone}>{s.label}</StatusBadge>
+        <span>
+          to <span className="font-medium">{i.recipient}</span>
+          {i.sentAt ? ` · ${formatInZone(i.sentAt, timezone)}` : ""}
+        </span>
+      </p>
+      <p className="text-xs text-muted">
+        {i.provider === "mock" ? "Mock provider (development): nothing was emailed. " : ""}
+        {i.status === "SENT" && "Accepted by Microsoft 365 for delivery; delivery to the inbox is not confirmed. "}
+        {i.status === "FAILED" && `Not sent after ${i.attempts} attempt${i.attempts === 1 ? "" : "s"}${i.lastError ? `: ${i.lastError}` : ""}. `}
+        {i.status === "PENDING" && "Being sent, or the send was interrupted. "}
+        {i.status !== "ACCEPTED" && `Link ${i.status === "EXPIRED" ? "expired or replaced" : `expires ${formatInZone(i.expiresAt, timezone)}`}.`}
+      </p>
+    </div>
   );
 }

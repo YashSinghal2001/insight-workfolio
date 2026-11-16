@@ -3,8 +3,8 @@
 import { Suspense, useCallback, useEffect, useState, type FormEvent } from "react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
-import type { Device, Employee, ScreenshotBlurOverridesResponse, SetupToken } from "@workfolio/shared";
-import { EmployeeForm, SetupLinkNotice } from "@/components/employee-form";
+import type { Device, Employee, InvitationResponse, ScreenshotBlurOverridesResponse, SetupToken } from "@workfolio/shared";
+import { EmployeeForm, InvitationSummary, SetupLinkNotice } from "@/components/employee-form";
 import { TrackingOverrides } from "@/components/tracking-overrides";
 import { ConfirmDialog, ErrorState, PageHeader, SkeletonRows, StatusBadge, SuccessNotice } from "@/components/kit";
 import { Card, Field, formatInZone, inputClass, Notice, secondaryButtonClass } from "@/components/ui";
@@ -19,7 +19,7 @@ export default function EmployeePage() {
   );
 }
 
-type Confirm = { kind: "status" } | { kind: "setup" } | { kind: "revoke"; device: Device };
+type Confirm = { kind: "status" } | { kind: "setup" } | { kind: "invite" } | { kind: "revoke"; device: Device };
 
 function EmployeeDetail() {
   const { id } = useParams<{ id: string }>();
@@ -128,6 +128,14 @@ function EmployeeDetail() {
             </p>
             <button type="button" className={secondaryButtonClass} onClick={() => setConfirm({ kind: "setup" })}>New setup link</button>
           </div>
+          {employee.invitation && (
+            <div className="flex flex-wrap items-center justify-between gap-3 border-t border-border pt-4">
+              <InvitationSummary invitation={employee.invitation} timezone={employee.timezone} />
+              {!employee.passwordSet && !disabled && (
+                <button type="button" className={secondaryButtonClass} onClick={() => setConfirm({ kind: "invite" })}>Resend invitation</button>
+              )}
+            </div>
+          )}
         </div>
       </Card>
 
@@ -173,6 +181,18 @@ function EmployeeDetail() {
         confirmLabel="Issue link"
         description="Any earlier setup link stops working. The new link is shown once, here; deliver it over a trusted company channel."
         onConfirm={act(async () => setSetup(await api<SetupToken>(`/employees/${id}/setup-token`, { method: "POST" })), "New setup link issued; earlier links no longer work.")}
+        onClose={() => setConfirm(null)}
+      />
+      <ConfirmDialog
+        open={confirm?.kind === "invite"}
+        title={`Resend the invitation to ${employee.email}?`}
+        confirmLabel="Resend invitation"
+        description="A new invitation email with a new link is sent from the IT mailbox; any earlier link stops working."
+        onConfirm={act(async () => {
+          const r = await api<InvitationResponse>(`/employees/${id}/invitation`, { method: "POST" });
+          setEmployee(r.employee);
+          setSetup(r.setup ?? null);
+        }, "Invitation resent.")}
         onClose={() => setConfirm(null)}
       />
       <ConfirmDialog

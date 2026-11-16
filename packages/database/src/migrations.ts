@@ -1249,6 +1249,29 @@ export const MIGRATIONS: Migration[] = [
       "ALTER TABLE screenshots ADD COLUMN deleted_reason TEXT CHECK (deleted_reason IS NULL OR length(deleted_reason) <= 500)",
     ],
   },
+  {
+    id: "0030_account_invitations",
+    statements: [
+      // One row per invitation email (docs/invitations.md). The link itself is never stored: only its
+      // setup token's id (the token table keeps the sha256). ACCEPTED/EXPIRED are derived from the token
+      // and the account, not stored. last_error is a short provider message, never the email body.
+      `CREATE TABLE account_invitations (
+        id             TEXT PRIMARY KEY,
+        user_id        TEXT NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+        setup_token_id TEXT NOT NULL UNIQUE REFERENCES account_setup_tokens(id) ON DELETE RESTRICT,
+        recipient      TEXT NOT NULL,
+        provider       TEXT NOT NULL CHECK (provider IN ('mock', 'graph')),
+        status         TEXT NOT NULL DEFAULT 'PENDING' CHECK (status IN ('PENDING', 'SENT', 'FAILED')),
+        attempts       INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+        sent_at        TEXT,
+        last_error     TEXT CHECK (last_error IS NULL OR length(last_error) <= 300),
+        created_by     TEXT REFERENCES users(id) ON DELETE RESTRICT,
+        created_at     TEXT NOT NULL DEFAULT ${NOW},
+        updated_at     TEXT NOT NULL DEFAULT ${NOW}
+      ) STRICT`,
+      "CREATE INDEX account_invitations_user ON account_invitations(user_id, created_at)",
+    ],
+  },
 ];
 
 const checksum = (m: Migration) => createHash("sha256").update(JSON.stringify(m.statements)).digest("hex");

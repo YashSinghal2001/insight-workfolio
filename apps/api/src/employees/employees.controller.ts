@@ -61,6 +61,13 @@ export class EmployeesController {
     return this.employees.setAccountStatus(id, body.status, user);
   }
 
+  /** Emails a fresh invitation (new link) to an employee who has not activated yet. */
+  @Post(":id/invitation")
+  @RequirePermission("employees:manage")
+  resendInvitation(@Id() id: string, @CurrentUser() user: AuthContext) {
+    return this.employees.resendInvitation(id, user);
+  }
+
   @Post(":id/setup-token")
   @RequirePermission("employees:manage")
   reissueSetupToken(@Id() id: string, @CurrentUser() user: AuthContext) {

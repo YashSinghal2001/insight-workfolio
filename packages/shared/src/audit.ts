@@ -8,6 +8,9 @@ export const ACCOUNT_AUDIT_ACTIONS = [
   "ACCOUNT_DISABLED",
   "ACCOUNT_ENABLED",
   "SETUP_LINK_ISSUED",
+  // Invitation email with the setup link (never the link itself): accepted by the provider, or given up.
+  "INVITATION_SENT",
+  "INVITATION_FAILED",
   "PASSWORD_SET",
   "SESSION_REVOKED",
   "SESSIONS_REVOKED_OTHERS",

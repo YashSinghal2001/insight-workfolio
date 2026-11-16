@@ -21,7 +21,7 @@ export function setupTokenStatements(userId: string, actorUserId: string | null,
     { sql: `INSERT INTO account_setup_tokens (id, user_id, token_hash, expires_at) SELECT ?, ?, ?, ?${guard ? ` WHERE ${guard.when}` : ""}`, args: [id, userId, sha256(token), expiresAt, ...(guard?.args ?? [])] },
     accountAudit({ actorUserId, targetUserId: userId, action: "SETUP_LINK_ISSUED", resourceType: "SETUP_LINK", resourceId: id, metadata: { expiresAt } }, guard?.when, { whenArgs: guard?.args }),
   ];
-  return { setup: { token, expiresAt } satisfies SetupToken, statements };
+  return { id, setup: { token, expiresAt } satisfies SetupToken, statements };
 }
 
 export const setupLink = (dashboardUrl: string, token: string) =>

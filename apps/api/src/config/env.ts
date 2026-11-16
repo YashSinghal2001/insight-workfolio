@@ -209,8 +209,30 @@ export const envSchema = z
      * confirmed manual run (POST /websites/retention/run) is not gated by it.
      */
     WEBSITE_RETENTION_APPROVED: z.enum(["true", "false"]).default("false").transform((v) => v === "true"),
-    /** Used only to print password-setup links (admin bootstrap CLI). */
+    /** Base of password-setup links: printed by the admin bootstrap CLI and put in invitation emails. */
     DASHBOARD_URL: z.url().default("http://localhost:3000"),
+    // Employee invitation emails (docs/invitations.md). Separate from REPORT_MAIL_PROVIDER: configuring it
+    // emails invitations only. none = the admin hands the setup link over (as before); mock = in memory,
+    // development and tests only; graph = Microsoft Graph sendMail, app-only, from MAIL_SENDER.
+    INVITATION_MAIL_PROVIDER: z.enum(["none", "mock", "graph"]).default("none"),
+    MAIL_GRAPH_TENANT_ID: z.string().optional().transform((v) => v || undefined),
+    MAIL_GRAPH_CLIENT_ID: z.string().optional().transform((v) => v || undefined),
+    /** Server only; never logged, never sent to the dashboard or desktops. */
+    MAIL_GRAPH_CLIENT_SECRET: z.string().optional().transform((v) => v || undefined),
+    /** The mailbox invitations are sent from, and the support address named in them, e.g. IT@TFFDigital.com. */
+    MAIL_SENDER: z
+      .string()
+      .optional()
+      .transform((v) => v?.trim() || undefined)
+      .refine((v) => !v || z.email().safeParse(v).success, "must be an email address"),
+  })
+  .refine((env) => env.NODE_ENV !== "production" || env.INVITATION_MAIL_PROVIDER !== "mock", {
+    message: "INVITATION_MAIL_PROVIDER=mock is for development and tests only",
+    path: ["INVITATION_MAIL_PROVIDER"],
+  })
+  .refine((env) => env.INVITATION_MAIL_PROVIDER !== "graph" || !!(env.MAIL_GRAPH_TENANT_ID && env.MAIL_GRAPH_CLIENT_ID && env.MAIL_GRAPH_CLIENT_SECRET && env.MAIL_SENDER), {
+    message: "MAIL_GRAPH_TENANT_ID, MAIL_GRAPH_CLIENT_ID, MAIL_GRAPH_CLIENT_SECRET and MAIL_SENDER are all required for INVITATION_MAIL_PROVIDER=graph",
+    path: ["INVITATION_MAIL_PROVIDER"],
   })
   // Production: a hosted database (libsql:// or https://; no wss://, Turso refuses the WebSocket transport) or a
   // persistent local file by ABSOLUTE path (the VPS: outside the repository, on a disk that survives deploys).

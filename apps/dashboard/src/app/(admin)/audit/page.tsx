@@ -26,6 +26,8 @@ const ACTION_LABEL: Record<string, string> = {
   APP_CATEGORY_RULE_CHANGED: "Application label changed",
   APP_CATEGORY_RULE_REMOVED: "Application label removed",
   SCREENSHOT_DELETED_BY_RETENTION: "Screenshot deleted by scheduled retention",
+  INVITATION_SENT: "Invitation email accepted by the provider",
+  INVITATION_FAILED: "Invitation email not sent",
   EMPLOYEE_ACTIVITY_SUMMARY_VIEWED: "Employee activity summary viewed",
   EMPLOYEE_ATTENDANCE_VIEWED: "Employee attendance viewed",
   EMPLOYEE_ATTENDANCE_EXPORTED: "Employee attendance exported",

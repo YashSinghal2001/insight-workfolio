@@ -3,9 +3,9 @@
 import { useState } from "react";
 import Link from "next/link";
 import type { CreateEmployeeResponse } from "@workfolio/shared";
-import { EmployeeForm, SetupLinkNotice } from "@/components/employee-form";
+import { EmployeeForm, InvitationSummary, SetupLinkNotice } from "@/components/employee-form";
 import { PageHeader } from "@/components/kit";
-import { Card } from "@/components/ui";
+import { Card, Notice } from "@/components/ui";
 import { api, errorMessage } from "@/lib/api";
 
 export default function NewEmployeePage() {
@@ -17,7 +17,13 @@ export default function NewEmployeePage() {
 
       {created ? (
         <>
-          <SetupLinkNotice setup={created.setup} email={created.employee.email} />
+          <Notice tone="success">{created.employee.fullName} was created.</Notice>
+          {created.employee.invitation && (
+            <Card title="Invitation email">
+              <InvitationSummary invitation={created.employee.invitation} timezone={created.employee.timezone} />
+            </Card>
+          )}
+          {created.setup && <SetupLinkNotice setup={created.setup} email={created.employee.email} />}
           <div className="flex gap-4 text-sm">
             <Link href={`/employees/${created.employee.id}`} className="text-brand underline">View {created.employee.fullName}</Link>
             <button type="button" onClick={() => setCreated(null)} className="text-brand underline">Add another</button>
@@ -26,7 +32,8 @@ export default function NewEmployeePage() {
       ) : (
         <Card>
           <p className="mb-4 text-sm text-muted">
-            No password is set here. The employee receives a one-time link to choose their own password.
+            No password is set here. The employee receives a one-time link to choose their own password: by email
+            when invitation emails are configured, otherwise you hand it over.
           </p>
           <EmployeeForm
             submitLabel="Create employee"

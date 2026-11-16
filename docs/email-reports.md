@@ -9,7 +9,7 @@ ever emailed a report.
 
 | Question | Finding |
 | --- | --- |
-| Email provider, SMTP, mail library | None (no `nodemailer`, SMTP settings, Graph `Mail.Send` or other mail code). The Microsoft Graph credentials in the API are for screenshot storage (Sites/Files) only |
+| Email provider, SMTP, mail library | None for reports. A Microsoft Graph sender exists for employee invitations only (`INVITATION_MAIL_PROVIDER`, docs/invitations.md); it does not send reports |
 | Scheduling | No job scheduler. Retention and timelapse sweeps use in-process `setInterval` timers (skipped under test); the report scheduler uses the same pattern |
 | Report sources | Timesheet totals (`TimesheetService.forEmployee`), F11 project summary, device last-seen times. F03's draft CSV exists but is an employee download, not attached |
 | Who may configure | Admins (the only privileged role) |

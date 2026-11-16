@@ -36,6 +36,7 @@ import { LeaveController } from "./leave/leave.controller.js";
 import { LeaveService } from "./leave/leave.service.js";
 import { ProjectsController, TaskTimeController } from "./projects/projects.controller.js";
 import { ProjectsService } from "./projects/projects.service.js";
+import { invitationTransportProvider } from "./employees/invitations.js";
 import { mailTransportProvider } from "./reports/mail.js";
 import { ReportsController } from "./reports/reports.controller.js";
 import { ReportsService } from "./reports/reports.service.js";
@@ -123,6 +124,7 @@ import { OneDriveController, OneDriveService } from "./storage/onedrive.js";
     TeamsService,
     ProjectsService,
     mailTransportProvider,
+    invitationTransportProvider,
     ReportsService,
     WebsitesService,
     RolesService,

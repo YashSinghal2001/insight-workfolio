@@ -1,10 +1,13 @@
 import { randomUUID } from "node:crypto";
-import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, NotFoundException } from "@nestjs/common";
+import { BadRequestException, ConflictException, ForbiddenException, HttpException, HttpStatus, Inject, Injectable, NotFoundException } from "@nestjs/common";
+import { ConfigService } from "@nestjs/config";
 import { isUniqueViolation, type DatabaseClient, type Row } from "@workfolio/database";
 import {
   type AccountStatus,
   type CreateEmployeeResponse,
   type EmployeeRef,
+  type Invitation,
+  type InvitationResponse,
   type Permission,
   type Device,
   type Employee,
@@ -15,18 +18,47 @@ import {
 } from "@workfolio/shared";
 import { accountAudit, employeeReadAudit } from "../audit/account-audit.js";
 import type { AuthContext } from "../auth/auth.service.js";
-import { setupTokenStatements } from "../auth/setup-token.js";
+import { RateLimiter } from "../auth/crypto.js";
+import { setupLink, setupTokenStatements } from "../auth/setup-token.js";
 import { canReadEmployee, scopeSql } from "../common/scope.js";
 import { DATABASE } from "../database/database.module.js";
 import { toDevice } from "../devices/devices.service.js";
+import type { Env } from "../config/env.js";
 import { assertCanDisable } from "../roles/roles.service.js";
+import { deliverInvitation, INVITATION_TRANSPORT, type InvitationTransport, invitationEmail, RESEND_COOLDOWN_MS } from "./invitations.js";
 
 // password_hash is reduced to a boolean in SQL so the hash never leaves the database.
 const SELECT = `
   SELECT p.id, p.user_id, u.email, u.role, u.status, u.password_hash IS NOT NULL AS password_set,
          p.employee_code, p.full_name, p.timezone, p.employment_status, p.created_at,
-         max(p.updated_at, u.updated_at) AS updated_at
-  FROM employee_profiles p JOIN users u ON u.id = p.user_id`;
+         max(p.updated_at, u.updated_at) AS updated_at,
+         i.id AS inv_id, i.recipient AS inv_recipient, i.provider AS inv_provider, i.status AS inv_status, i.attempts AS inv_attempts,
+         i.sent_at AS inv_sent_at, i.last_error AS inv_last_error, i.created_at AS inv_created_at, t.expires_at AS inv_expires_at, t.used_at AS inv_used_at
+  FROM employee_profiles p JOIN users u ON u.id = p.user_id
+  LEFT JOIN account_invitations i ON i.id = (SELECT id FROM account_invitations WHERE user_id = u.id ORDER BY created_at DESC, rowid DESC LIMIT 1)
+  LEFT JOIN account_setup_tokens t ON t.id = i.setup_token_id`;
+
+/** ACCEPTED once the password is set; EXPIRED once its link expired or was replaced (used_at also marks invalidation). */
+function toInvitation(r: Row): Invitation | null {
+  if (r.inv_id == null) return null;
+  const expiresAt = String(r.inv_expires_at);
+  const status: Invitation["status"] = r.password_set
+    ? "ACCEPTED"
+    : r.inv_used_at != null || expiresAt <= new Date().toISOString()
+      ? "EXPIRED"
+      : (r.inv_status as Invitation["status"]);
+  return {
+    id: String(r.inv_id),
+    status,
+    recipient: String(r.inv_recipient),
+    provider: r.inv_provider as Invitation["provider"],
+    attempts: Number(r.inv_attempts),
+    sentAt: r.inv_sent_at == null ? null : String(r.inv_sent_at),
+    lastError: r.inv_last_error == null ? null : String(r.inv_last_error),
+    expiresAt,
+    createdAt: String(r.inv_created_at),
+  };
+}
 
 const toEmployee = (r: Row): Employee => ({
   id: String(r.id),
@@ -41,6 +73,7 @@ const toEmployee = (r: Row): Employee => ({
   employmentStatus: r.employment_status as Employee["employmentStatus"],
   createdAt: String(r.created_at),
   updatedAt: String(r.updated_at),
+  invitation: toInvitation(r),
 });
 
 /**
@@ -66,7 +99,42 @@ function conflict(err: unknown): never {
 
 @Injectable()
 export class EmployeesService {
-  constructor(@Inject(DATABASE) private readonly db: DatabaseClient) {}
+  /** Invitation emails per admin (create + resend): bounds what one account can send from the IT mailbox. */
+  private readonly inviteLimiter = new RateLimiter(30, 15 * 60_000);
+
+  constructor(
+    @Inject(DATABASE) private readonly db: DatabaseClient,
+    @Inject(INVITATION_TRANSPORT) private readonly mail: InvitationTransport,
+    private readonly config: ConfigService<Env, true>,
+  ) {}
+
+  private get inviting() {
+    return this.mail.name !== "none";
+  }
+
+  private limitInvitations(caller: AuthContext) {
+    if (!this.inviteLimiter.hit(caller.id)) throw new HttpException("Too many invitations from this account; try again later", HttpStatus.TOO_MANY_REQUESTS);
+  }
+
+  /** Emails the invitation for a PENDING row and returns the response: the link only when no email went out. */
+  private async invite(employeeId: string, inv: { id: string; setupTokenId: string; token: string; expiresAt: string }, caller: AuthContext): Promise<InvitationResponse> {
+    const e = await this.require(employeeId);
+    const sent = await deliverInvitation(this.db, this.mail, {
+      id: inv.id,
+      userId: e.userId,
+      setupTokenId: inv.setupTokenId,
+      actorUserId: caller.id,
+      message: invitationEmail({
+        to: e.email,
+        fullName: e.fullName,
+        link: setupLink(this.config.get("DASHBOARD_URL", { infer: true }), inv.token),
+        expiresAt: inv.expiresAt,
+        timeZone: e.timezone,
+        support: this.config.get("MAIL_SENDER", { infer: true }) ?? "your IT department",
+      }),
+    });
+    return { employee: await this.require(employeeId), ...(sent ? {} : { setup: { token: inv.token, expiresAt: inv.expiresAt } }) };
+  }
 
   /** Without `caller`: every employee (internal use). With it: the caller's data scope (team heads: their teams). */
   async list({ q, page, pageSize }: ListEmployeesQuery, caller?: AuthContext, permission: Permission = "employees:read"): Promise<Paginated<Employee>> {
@@ -87,11 +155,16 @@ export class EmployeesService {
     return { items: rows!.rows.map(toEmployee), total: Number(count!.rows[0]!.n), page, pageSize };
   }
 
-  /** Creates the account without a password and returns a one-time setup token. */
-  async create(input: { email: string; fullName: string; employeeCode: string; timezone: string }, caller: AuthContext) {
+  /**
+   * Creates the account without a password. With an invitation provider, emails the one-time setup link (the
+   * account is committed first: a failed email never undoes or duplicates it); otherwise returns the link.
+   */
+  async create(input: { email: string; fullName: string; employeeCode: string; timezone: string }, caller: AuthContext): Promise<CreateEmployeeResponse> {
+    if (this.inviting) this.limitInvitations(caller);
     const userId = randomUUID();
     const id = randomUUID();
-    const { setup, statements } = setupTokenStatements(userId, caller.id);
+    const invitationId = randomUUID();
+    const { id: setupTokenId, setup, statements } = setupTokenStatements(userId, caller.id);
     try {
       // Account, profile, setup link and their audit rows commit together or not at all.
       await this.db.batch(
@@ -103,13 +176,57 @@ export class EmployeesService {
           },
           accountAudit({ actorUserId: caller.id, targetUserId: userId, action: "ACCOUNT_CREATED", resourceType: "ACCOUNT", resourceId: userId, metadata: { employeeId: id } }),
           ...statements,
+          ...(this.inviting
+            ? [{ sql: "INSERT INTO account_invitations (id, user_id, setup_token_id, recipient, provider, created_by) VALUES (?, ?, ?, ?, ?, ?)", args: [invitationId, userId, setupTokenId, input.email, this.mail.name, caller.id] }]
+            : []),
         ],
         "write",
       );
     } catch (err) {
       conflict(err);
     }
-    return { employee: await this.require(id), setup } satisfies CreateEmployeeResponse;
+    if (!this.inviting) return { employee: await this.require(id), setup };
+    return this.invite(id, { id: invitationId, setupTokenId, ...setup }, caller);
+  }
+
+  /**
+   * Emails a fresh invitation (new link; earlier links stop working). Only for an active account whose password
+   * is not set yet, and not while another invitation to it is in flight or was sent in the last minute. Every
+   * condition is checked inside the write itself, so concurrent resends cannot both go out.
+   */
+  async resendInvitation(id: string, caller: AuthContext): Promise<InvitationResponse> {
+    const e = await this.require(id);
+    if (!this.inviting) throw new ConflictException("No invitation email provider is configured; issue a setup link instead");
+    if (e.passwordSet) throw new ConflictException("This account is already activated");
+    if (e.accountStatus !== "ACTIVE") throw new ConflictException("This account is disabled");
+    const guard = await this.superAdminGuard(caller, e.userId);
+    this.limitInvitations(caller);
+    const since = new Date(Date.now() - RESEND_COOLDOWN_MS).toISOString();
+    const when = [
+      guard.when,
+      "(SELECT password_hash IS NULL AND status = 'ACTIVE' FROM users WHERE id = ?)",
+      "NOT EXISTS (SELECT 1 FROM account_invitations WHERE user_id = ? AND ((status = 'PENDING' AND updated_at > ?) OR (status = 'SENT' AND sent_at > ?)))",
+    ]
+      .filter(Boolean)
+      .join(" AND ");
+    const args = [...guard.args, e.userId, e.userId, since, since];
+    const invitationId = randomUUID();
+    const { id: setupTokenId, setup, statements } = setupTokenStatements(e.userId, caller.id, { when, args });
+    const [, inserted] = await this.db.batch(
+      [
+        ...statements,
+        {
+          sql: `INSERT INTO account_invitations (id, user_id, setup_token_id, recipient, provider, created_by) SELECT ?, ?, ?, ?, ?, ? WHERE ${when}`,
+          args: [invitationId, e.userId, setupTokenId, e.email, this.mail.name, caller.id, ...args],
+        },
+      ],
+      "write",
+    );
+    if (!inserted!.rowsAffected) {
+      await this.superAdminGuard(caller, e.userId); // promoted to Super Admin meanwhile → 403
+      throw new ConflictException("An invitation was sent moments ago, or the account changed meanwhile; refresh and try again");
+    }
+    return this.invite(id, { id: invitationId, setupTokenId, ...setup }, caller);
   }
 
   /**

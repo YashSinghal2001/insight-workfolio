@@ -51,6 +51,16 @@ test("email reports: the mock provider is refused in production; the default sen
   assert.throws(() => validateEnv({ ...production, REPORT_MAIL_PROVIDER: "smtp" }));
 });
 
+test("invitation emails: off by default, mock refused in production, graph needs all four settings", () => {
+  assert.equal(validateEnv(production).INVITATION_MAIL_PROVIDER, "none");
+  refused({ INVITATION_MAIL_PROVIDER: "mock" }, "INVITATION_MAIL_PROVIDER");
+  const graph = { INVITATION_MAIL_PROVIDER: "graph", MAIL_GRAPH_TENANT_ID: "t", MAIL_GRAPH_CLIENT_ID: "c", MAIL_GRAPH_CLIENT_SECRET: SECRET, MAIL_SENDER: "IT@TFFDigital.com" };
+  assert.equal(validateEnv({ ...production, ...graph }).MAIL_SENDER, "IT@TFFDigital.com");
+  for (const missing of ["MAIL_GRAPH_TENANT_ID", "MAIL_GRAPH_CLIENT_ID", "MAIL_GRAPH_CLIENT_SECRET", "MAIL_SENDER"]) refused({ ...graph, [missing]: undefined }, "INVITATION_MAIL_PROVIDER");
+  refused({ ...graph, MAIL_SENDER: "not-an-address" }, "MAIL_SENDER");
+  assert.equal(validateEnv({ ...production, REPORT_MAIL_PROVIDER: "none", ...graph }).REPORT_MAIL_PROVIDER, "none", "reports are not emailed by this setting");
+});
+
 test("website tracking: production collection is blocked until the operator sets WEBSITE_TRACKING_APPROVED=true", () => {
   assert.equal(validateEnv(production).WEBSITE_TRACKING_APPROVED, false);
   assert.equal(validateEnv({ ...production, WEBSITE_TRACKING_APPROVED: "true" }).WEBSITE_TRACKING_APPROVED, true);

@@ -9,6 +9,8 @@ export interface MailMessage {
   to: string;
   subject: string;
   text: string;
+  /** Sent instead of `text` by providers that take one body (Graph). */
+  html?: string;
 }
 
 /** A provider failure. Permanent ones (e.g. a rejected address) are not retried. */
@@ -25,8 +27,8 @@ export class MailError extends Error {
  * Email delivery, separate from report generation. A real provider (e.g. Microsoft Graph sendMail
  * or SMTP) implements this once it is approved and configured; none is integrated yet.
  */
-export interface MailTransport {
-  readonly name: ReportMailProvider;
+export interface MailTransport<Name extends string = ReportMailProvider> {
+  readonly name: Name;
   /** False for "none" and "mock": nothing reaches anyone's inbox. */
   readonly delivers: boolean;
   send(message: MailMessage): Promise<{ messageId: string }>;

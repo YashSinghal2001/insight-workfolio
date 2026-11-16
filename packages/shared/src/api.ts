@@ -90,6 +90,37 @@ export interface Employee {
   employmentStatus: EmploymentStatus;
   createdAt: string;
   updatedAt: string;
+  /** The latest emailed invitation; null when none was ever emailed (no provider, or created before invitations). */
+  invitation: Invitation | null;
+}
+
+/**
+ * PENDING: being sent (or interrupted). SENT: accepted by the email provider; Microsoft Graph gives no delivery
+ * confirmation, so this is not proof it reached the inbox. FAILED: the provider refused it or stayed unavailable.
+ * ACCEPTED: the employee set their password. EXPIRED: the link expired or was replaced by a newer one.
+ */
+export const INVITATION_STATUSES = ["PENDING", "SENT", "FAILED", "ACCEPTED", "EXPIRED"] as const;
+export type InvitationStatus = (typeof INVITATION_STATUSES)[number];
+
+export interface Invitation {
+  id: string;
+  status: InvitationStatus;
+  recipient: string;
+  /** "mock" = development only: nothing left the server. */
+  provider: "mock" | "graph";
+  attempts: number;
+  /** When the provider accepted it. */
+  sentAt: string | null;
+  /** Short provider error of the last failed attempt (never the link). */
+  lastError: string | null;
+  expiresAt: string;
+  createdAt: string;
+}
+
+export interface InvitationResponse {
+  employee: Employee;
+  /** Only when no email was sent (no provider configured, or it failed): the admin hands the link over instead. */
+  setup?: SetupToken;
 }
 
 export interface Device {
@@ -114,10 +145,7 @@ export interface SetupToken {
   expiresAt: string;
 }
 
-export interface CreateEmployeeResponse {
-  employee: Employee;
-  setup: SetupToken;
-}
+export type CreateEmployeeResponse = InvitationResponse;
 
 // ---- Devices --------------------------------------------------------------
 

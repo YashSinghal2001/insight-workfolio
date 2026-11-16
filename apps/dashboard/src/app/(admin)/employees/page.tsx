@@ -3,6 +3,7 @@
 import { useEffect, useState, type FormEvent } from "react";
 import Link from "next/link";
 import type { Employee, Paginated } from "@workfolio/shared";
+import { INVITATION_LABEL } from "@/components/employee-form";
 import { DataTable, EmptyState, ErrorState, FilterBar, PageHeader, Pagination, SkeletonRows, StatusBadge } from "@/components/kit";
 import { buttonClass, inputClass, secondaryButtonClass } from "@/components/ui";
 import { api, errorMessage } from "@/lib/api";
@@ -64,6 +65,11 @@ export default function EmployeesPage() {
                 <StatusBadge tone={e.accountStatus === "DISABLED" ? "danger" : e.passwordSet ? "success" : "warning"}>
                   {e.accountStatus === "DISABLED" ? "Disabled" : e.passwordSet ? "Active" : "Pending setup"}
                 </StatusBadge>
+                {!e.passwordSet && e.invitation && e.accountStatus !== "DISABLED" && (
+                  <span className="ml-1">
+                    <StatusBadge tone={INVITATION_LABEL[e.invitation.status].tone}>{INVITATION_LABEL[e.invitation.status].label}</StatusBadge>
+                  </span>
+                )}
               </td>
             </tr>
           ))}
