@@ -37,6 +37,7 @@ import type { DeviceContext } from "../devices/devices.service.js";
 import { EmployeesService } from "../employees/employees.service.js";
 import { employeeReadAudit } from "../audit/account-audit.js";
 import { ScreenshotSettingsService } from "../screenshots/screenshot-settings.service.js";
+import { ScreenshotsService } from "../screenshots/screenshots.service.js";
 import { MonitoringSettingsService } from "../settings/monitoring-settings.service.js";
 import { ACTIVE_EMPLOYEE, activityReport, DEVICE_LIVE_COLUMNS, iso, screenshotReport, SESSION_COLUMNS, stateOf, str, withBreaks } from "./sessions.js";
 
@@ -76,14 +77,17 @@ export class AttendanceService {
     private readonly locks: EmployeeLocks,
     private readonly screenshotSettings: ScreenshotSettingsService,
     private readonly monitoring: MonitoringSettingsService,
+    private readonly screenshots: ScreenshotsService,
   ) {}
 
   /** Online action from a direct endpoint: server time is authoritative. */
   async act(device: DeviceContext, type: AttendanceEventType, key: string | undefined): Promise<AttendanceCurrent> {
     if (!uuidSchema.safeParse(key).success) throw new BadRequestException("Idempotency-Key header must be a UUID");
-    const result = await this.locks.run(device.employeeId, () =>
-      this.apply(device, { key: key!, type, occurredAt: iso(Date.now()), deviceTime: null, source: "ONLINE" }),
-    );
+    const result = await this.locks.run(device.employeeId, async () => {
+      const r = await this.apply(device, { key: key!, type, occurredAt: iso(Date.now()), deviceTime: null, source: "ONLINE" });
+      await this.endWorkTime(device.employeeId, [[type, r]]);
+      return r;
+    });
     if (result.status === "REJECTED") throw new ConflictException(result.reason);
     return this.current(device.employeeId);
   }
@@ -118,6 +122,7 @@ export class AttendanceService {
           }),
         );
       }
+      await this.endWorkTime(device.employeeId, req.events.map((ev, i) => [ev.type, out[i]!]));
       return out;
     });
     return { results, current: await this.current(device.employeeId) };
@@ -366,6 +371,16 @@ export class AttendanceService {
   }
 
   // ---- internals --------------------------------------------------------------
+
+  /**
+   * After a break start or clock-out was accepted (caller holds the employee lock): screenshots received
+   * earlier but captured after that moment are not work time and are discarded. Breaks win over screenshots
+   * in either order: a break persisted first makes register/upload reject them; one persisted after them removes them.
+   */
+  private async endWorkTime(employeeId: string, applied: [AttendanceEventType, SyncResult][]): Promise<void> {
+    const ends = applied.flatMap(([type, r]) => (r.status === "ACCEPTED" && r.occurredAt && (type === "BREAK_START" || type === "CLOCK_OUT") ? [Date.parse(r.occurredAt)] : []));
+    if (ends.length) await this.screenshots.discardOutsideWork(employeeId, Math.min(...ends));
+  }
 
   private async apply(device: DeviceContext, ev: Incoming, retried = false): Promise<SyncResult> {
     const prior = (

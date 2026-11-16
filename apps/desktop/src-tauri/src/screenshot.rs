@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Manager};
@@ -286,6 +286,9 @@ pub struct Shooter {
     dir: PathBuf,
     cap_bytes: i64,
     started: Instant,
+    /// No recent keyboard/mouse input (Collector::input_idle), refreshed before every tick. Screenshots are
+    /// taken only while the employee is active: idle capture is off.
+    pub idle: AtomicBool,
 }
 
 impl Shooter {
@@ -313,6 +316,7 @@ impl Shooter {
             dir,
             cap_bytes,
             started: Instant::now(),
+            idle: AtomicBool::new(false),
         }
     }
 
@@ -325,6 +329,9 @@ impl Shooter {
                 let os = platform::Native;
                 loop {
                     std::thread::sleep(TICK);
+                    // No collector state yet = unknown = idle: never captured unobserved.
+                    let idle = app.try_state::<Arc<crate::collector::Collector>>().is_none_or(|c| c.input_idle());
+                    worker.idle.store(idle, Ordering::SeqCst);
                     worker.tick(&app.state::<Mutex<Connection>>(), &os, now_ms(), worker.started.elapsed().as_millis() as i64);
                 }
             })
@@ -351,6 +358,9 @@ impl Shooter {
         }
         if os.display_asleep() {
             return skip("Not taken: the display was asleep.");
+        }
+        if self.idle.load(Ordering::SeqCst) {
+            return skip("Not taken: no keyboard or mouse input (idle). Screenshots are taken only while you are active.");
         }
         let (used, rejected) = db.lock().ok().and_then(|c| Some((local_bytes(&c).ok()?, rejected_count(&c).ok()?))).unwrap_or((i64::MAX, 0));
         if used >= self.cap_bytes {
@@ -1228,6 +1238,22 @@ mod tests {
         s.configure("STOPPED".into(), None, CFG);
         run(&s, &e, &os, 61 * MIN + 1000, 90 * MIN);
         assert_eq!(e.rows().len(), 1, "clocked out: nothing more");
+    }
+
+    #[test]
+    fn idle_is_never_captured_and_input_resumes_capture() {
+        let e = Env::new();
+        let os = FakeOs::new();
+        let s = Shooter::new(e.dir.clone(), LOCAL_CAP_BYTES);
+        s.configure("ACTIVE".into(), Some(scope()), CFG);
+        s.idle.store(true, Ordering::SeqCst);
+        run(&s, &e, &os, 0, 30 * MIN);
+        assert_eq!(os.captures.load(Ordering::SeqCst), 0, "idle: not even attempted");
+        assert!(s.status().skipped.is_some_and(|r| r.starts_with("Not taken: no keyboard or mouse input")));
+        assert!(s.status().capturing, "the schedule goes on; only the due capture is skipped");
+        s.idle.store(false, Ordering::SeqCst); // input again
+        run(&s, &e, &os, 30 * MIN + 1000, 36 * MIN);
+        assert_eq!((os.captures.load(Ordering::SeqCst), e.rows().len()), (1, 1), "active again: captured");
     }
 
     #[test]

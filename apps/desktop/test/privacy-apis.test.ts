@@ -4,7 +4,7 @@
 // sources, or if the set of input-related OS calls changes without this file being updated on purpose.
 import assert from "node:assert/strict";
 import { readdirSync, readFileSync, statSync } from "node:fs";
-import { dirname, join, relative } from "node:path";
+import { dirname, join, relative, sep } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
@@ -19,7 +19,8 @@ function files(dir: string, ext: RegExp, out: string[] = []): string[] {
   }
   return out;
 }
-const read = (p: string) => readFileSync(p, "utf8");
+// CRLF checkouts (Windows) read as LF; paths are reported with "/" on every OS (the allow-lists use "/").
+const read = (p: string) => readFileSync(p, "utf8").replace(/\r\n/g, "\n");
 /** Comments say what is NOT collected ("no window titles, …"): only code is checked. */
 const code = (src: string) => src.replace(/\/\*[\s\S]*?\*\//g, "").split("\n").map((l) => l.replace(/^\s*\/\/.*$/, "").replace(/\s\/\/ .*$/, "")).join("\n");
 
@@ -32,7 +33,7 @@ function hits(paths: string[], patterns: [string, RegExp][], strip = true): stri
   for (const p of paths) {
     const lines = (strip ? code(read(p)) : read(p)).split("\n");
     lines.forEach((line, i) => {
-      for (const [what, re] of patterns) if (re.test(line)) found.push(`${relative(ROOT, p)}:${i + 1} ${what}: ${line.trim().slice(0, 120)}`);
+      for (const [what, re] of patterns) if (re.test(line)) found.push(`${relative(ROOT, p).split(sep).join("/")}:${i + 1} ${what}: ${line.trim().slice(0, 120)}`);
     });
   }
   return found;

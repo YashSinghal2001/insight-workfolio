@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { AttendanceCurrent } from "@workfolio/shared";
 import { CAPTURE_FAILED, decideScreenshots, screenshotReport, type ScreenshotInputs } from "../src/monitoring.ts";
-import { POLICY_MAX_AGE_MS, policyBlur, policyFresh, privacyText, uploadScreenshots, type Outcome, type ShotDeps, type ShotRow } from "../src/screenshot-sync.ts";
+import { LOCAL_INELIGIBLE, POLICY_MAX_AGE_MS, policyBlur, policyFresh, privacyText, shotEligible, uploadScreenshots, type Outcome, type ShotDeps, type ShotRow } from "../src/screenshot-sync.ts";
+import type { Projection } from "../src/sync.ts";
 import { ApiClient, HttpError } from "../src/session.ts";
 import { project, type QueuedEvent } from "../src/sync.ts";
 
@@ -72,6 +73,7 @@ function fakes(rows: ShotRow[], { register = (_: object) => ({ status: "REGISTER
   const marks: [string, Outcome, string | null][] = [];
   const calls: string[] = [];
   let attendancePending = false;
+  let projection: Projection | null = null;
   const deps: ShotDeps = {
     next: async () => rows.find((r) => !marks.some(([id, o]) => id === r.id && o !== "REGISTERED") && !marks.some(([id, o]) => id === r.id && o === "RETRY")) ?? null,
     read: async (id) => (calls.push(`read ${id}`), new Uint8Array([1, 2, 3]).buffer),
@@ -79,9 +81,10 @@ function fakes(rows: ShotRow[], { register = (_: object) => ({ status: "REGISTER
     register: async (b) => (calls.push(`register ${(b as { id: string }).id}`), register(b) as never),
     upload: async (id) => (calls.push(`upload ${id}`), upload(), { id, status: "STORED", storedAt: "x" }),
     attendancePending: () => attendancePending,
+    projection: () => projection,
     now: () => Date.parse("2026-10-13T10:00:00.000Z"),
   };
-  return { deps, marks, calls, setAttendancePending: (v: boolean) => (attendancePending = v) };
+  return { deps, marks, calls, setAttendancePending: (v: boolean) => (attendancePending = v), setProjection: (p: Projection | null) => (projection = p) };
 }
 
 test("upload: register, then bytes, STORED only after the server confirmed; registered rows skip registration", async () => {
@@ -117,6 +120,52 @@ test("upload: offline and storage failures retry later (backoff in the queue), n
   waiting.setAttendancePending(true);
   assert.deepEqual(await uploadScreenshots(waiting.deps), { stored: 0, rejected: 0, failed: null });
   assert.deepEqual(waiting.calls, [], "waits for attendance to sync first");
+});
+
+/** Session "s" clocked in at 08:00 with the given breaks (ISO times on 2026-10-13). */
+const session = (breaks: [string, string | null][], clockOut: string | null = null): Projection => ({
+  state: clockOut ? "CLOCKED_OUT" : breaks.some(([, end]) => !end) ? "ON_BREAK" : "CLOCKED_IN",
+  unsynced: 0,
+  session: {
+    id: "s", clockInAt: "2026-10-13T08:00:00.000Z", clockOutAt: clockOut && `2026-10-13T${clockOut}:00.000Z`, status: clockOut ? "CLOSED" : "OPEN", corrected: false, clockInSource: "ONLINE",
+    breaks: breaks.map(([a, b], i) => ({ id: `b${i}`, startedAt: `2026-10-13T${a}:00.000Z`, endedAt: b && `2026-10-13T${b}:00.000Z` })),
+  },
+});
+
+test("eligibility: a capture inside a break, before clock-in or after clock-out is never eligible; other sessions go to the server", () => {
+  const at = (hhmm: string, sessionId = "s") => ({ sessionId, capturedMs: Date.parse(`2026-10-13T${hhmm}:00.000Z`) });
+  const p = session([["09:00", "09:15"]], "17:00");
+  assert.equal(shotEligible(at("08:30"), p), true);
+  assert.equal(shotEligible(at("09:00"), p), false, "at the break start");
+  assert.equal(shotEligible(at("09:10"), p), false, "inside the break");
+  assert.equal(shotEligible(at("09:15"), p), true, "at the break end");
+  assert.equal(shotEligible(at("07:59"), p), false, "before clock-in");
+  assert.equal(shotEligible(at("17:00"), p), false, "at clock-out");
+  assert.equal(shotEligible(at("10:00"), session([["09:30", null]])), false, "open break");
+  assert.equal(shotEligible(at("10:00", "other"), p), true, "another session: judged by the server");
+  assert.equal(shotEligible(at("10:00"), null), true, "unknown attendance: judged by the server");
+});
+
+test("upload: nothing is sent during a break, and a capture that falls in a break is discarded before sending", async () => {
+  const onBreak = fakes([row("a")]);
+  onBreak.setProjection(session([["08:30", null]]));
+  assert.deepEqual(await uploadScreenshots(onBreak.deps), { stored: 0, rejected: 0, failed: null });
+  assert.deepEqual([onBreak.calls, onBreak.marks], [[], []], "held until the break ends");
+
+  // row() is captured at 09:00; the break (recorded after the capture was queued) covers it.
+  const late = fakes([row("a"), row("b", "REGISTERED")]);
+  late.setProjection(session([["08:55", "09:30"]]));
+  assert.deepEqual(await uploadScreenshots(late.deps), { stored: 0, rejected: 2, failed: null });
+  assert.deepEqual(late.marks, [["a", "REJECTED", LOCAL_INELIGIBLE], ["b", "REJECTED", LOCAL_INELIGIBLE]]);
+  assert.deepEqual(late.calls, [], "neither registered nor uploaded");
+
+  const clockedOut = fakes([row("a")]);
+  clockedOut.setProjection(session([], "08:59"));
+  assert.deepEqual(await uploadScreenshots(clockedOut.deps), { stored: 0, rejected: 1, failed: null }, "captured after clock-out");
+
+  const fine = fakes([row("a")]);
+  fine.setProjection(session([["08:30", "08:45"]], "17:00"));
+  assert.deepEqual(await uploadScreenshots(fine.deps), { stored: 1, rejected: 0, failed: null }, "captured before clock-out: uploads after it");
 });
 
 test("api client sends screenshot bytes as-is with their content type and the bearer token", async () => {

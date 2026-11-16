@@ -98,6 +98,7 @@ export function initScreenshots(ctx: ScreenshotContext) {
   let applied = "";
   let uploading = false;
   let uploadError: string | null = null;
+  let held = false;
 
   const call = <T>(cmd: string, args: Record<string, unknown>, fallback: T): Promise<T> => (ctx.inTauri ? invoke<T>(cmd, args) : Promise.resolve(fallback));
   const scope = () => {
@@ -149,6 +150,7 @@ export function initScreenshots(ctx: ScreenshotContext) {
 
   /** Tells the native worker what to do, only when something changed (a change restarts its schedule). */
   async function apply() {
+    if (held) return; // halt(): stays paused until the break / clock-out is queued (release())
     decision = decide();
     const sc = scope();
     const session = project(ctx.state().current, ctx.state().queued)?.session ?? null;
@@ -190,6 +192,7 @@ export function initScreenshots(ctx: ScreenshotContext) {
         register: (body) => ctx.client.request<ScreenshotRegisterResponse>("POST", "/screenshots/register", body, headers),
         upload: (id, bytes) => ctx.client.request<ScreenshotStoredResponse>("PUT", `/screenshots/${id}/content`, bytes, { ...headers, "content-type": "image/webp" }),
         attendancePending: pendingAttendance,
+        projection: () => project(ctx.state().current, ctx.state().queued),
         now: () => Date.now(),
       });
       uploadError = r.failed;
@@ -311,6 +314,20 @@ export function initScreenshots(ctx: ScreenshotContext) {
       await loadStatus();
       await poll();
       void upload().then(poll);
+    },
+    /**
+     * A break or clock-out is about to be recorded: stop the native worker before its time is taken, so no
+     * capture can be kept from that moment on (a capture already running is discarded by the worker).
+     */
+    async halt() {
+      held = true;
+      const p = policy();
+      native = await call<ShotStatus>("screenshot_configure", { mode: "PAUSED_BREAK", userId: null, deviceId: null, sessionId: null, intervalSeconds: p.intervalSeconds, quality: p.webpQuality, maxDimension: p.maxDimension, masks: [], blur: false }, OFF);
+      applied = ""; // the next apply() re-decides from the recorded attendance
+    },
+    release() {
+      held = false;
+      void apply().then(render);
     },
     /** Attendance changed: re-decide at once (a break or clock-out stops capture immediately). */
     update() {

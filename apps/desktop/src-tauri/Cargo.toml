@@ -1,6 +1,6 @@
 [package]
 name = "insight-workfolio-desktop"
-version = "0.1.0"
+version = "0.2.0"
 description = "Insight Workfolio desktop client"
 edition = "2024"
 publish = false

@@ -4,6 +4,7 @@
 import type { ScreenshotRegisterResponse, ScreenshotStoredResponse } from "@workfolio/shared";
 import { maskText } from "./monitoring.ts";
 import { HttpError, isNetworkError } from "./session.ts";
+import type { Projection } from "./sync.ts";
 
 export interface ShotRow {
   id: string;
@@ -63,15 +64,42 @@ export interface ShotDeps {
   upload(id: string, bytes: ArrayBuffer): Promise<ScreenshotStoredResponse>;
   /** Attendance changes are still waiting to sync: the server judges screenshots by attendance, so wait. */
   attendancePending(): boolean;
+  /** Attendance as this device knows it now (server snapshot + pending events). */
+  projection(): Projection | null;
   now(): number;
 }
 
-/** Uploads waiting screenshots oldest first; stops at the first failure (it is retried later with backoff). */
+/** Recorded locally on a screenshot this device will not upload; contains no personal data. */
+export const LOCAL_INELIGIBLE = "Not uploaded: captured during a break or outside clocked-in time";
+
+/**
+ * Local re-check before every upload: false when the capture time falls in a break, before clock-in or
+ * after clock-out of the session this device knows. Another session (e.g. an offline clock-in since
+ * replaced by the server's) is left to the server, which judges every screenshot the same way.
+ */
+export function shotEligible(row: Pick<ShotRow, "sessionId" | "capturedMs">, p: Projection | null): boolean {
+  const s = p?.session;
+  if (!s || s.id !== row.sessionId) return true;
+  const t = row.capturedMs;
+  if (t < Date.parse(s.clockInAt) || (s.clockOutAt !== null && t >= Date.parse(s.clockOutAt))) return false;
+  return !s.breaks.some((b) => t >= Date.parse(b.startedAt) && (b.endedAt === null || t < Date.parse(b.endedAt)));
+}
+
+/**
+ * Uploads waiting screenshots oldest first; stops at the first failure (it is retried later with backoff).
+ * Nothing is uploaded while attendance is unsynced or during a break; each screenshot is re-checked against
+ * the attendance known now just before it is sent, and one that is no longer eligible is never sent.
+ */
 export async function uploadScreenshots(deps: ShotDeps, max = 20): Promise<{ stored: number; rejected: number; failed: string | null }> {
   const out = { stored: 0, rejected: 0, failed: null as string | null };
-  for (let n = 0; n < max && !deps.attendancePending(); n++) {
+  for (let n = 0; n < max && !deps.attendancePending() && deps.projection()?.state !== "ON_BREAK"; n++) {
     const row = await deps.next(deps.now());
     if (!row) break;
+    if (!shotEligible(row, deps.projection())) {
+      await deps.mark(row.id, "REJECTED", LOCAL_INELIGIBLE, deps.now());
+      out.rejected++;
+      continue;
+    }
     try {
       if (row.status === "PENDING") {
         const r = await deps.register({

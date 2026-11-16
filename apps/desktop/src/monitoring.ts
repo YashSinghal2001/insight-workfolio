@@ -128,7 +128,7 @@ export function decideScreenshots(i: ScreenshotInputs, w: Wording = words()): Sc
     "ACTIVE",
     i.pendingClockIn
       ? "On: a screenshot of your main screen is taken at the interval below. Your clock-in is offline and pending server confirmation."
-      : "On: a screenshot of your main screen is taken at the interval below while you are clocked in.",
+      : "On: a screenshot of your main screen is taken at the interval below while you are clocked in and active. None while idle, locked or on a break.",
   );
 }
 

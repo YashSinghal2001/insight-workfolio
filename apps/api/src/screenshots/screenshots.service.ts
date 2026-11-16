@@ -64,6 +64,8 @@ import { TimelapseService } from "./timelapse.service.js";
 const DAY_MS = 86_400_000;
 /** A capture this far in the future (after skew correction) is refused. */
 const FUTURE_TOLERANCE_MS = 60_000;
+/** Stored as deleted_reason and returned to the device; no personal data. */
+const OUTSIDE_WORK_TIME = "Captured during a break or outside clocked-in time (attendance changed after registration); not stored";
 const SCHEDULE_MS = 6 * 3_600_000;
 const RETENTION_CHUNK = 100;
 
@@ -269,6 +271,20 @@ export class ScreenshotsService implements OnModuleInit, OnModuleDestroy {
       if (dims.width !== Number(row.width) || dims.height !== Number(row.height)) throw new BadRequestException("Image dimensions do not match the registration");
       if (createHash("sha256").update(body).digest("hex") !== row.checksum) throw new UnprocessableEntityException("Checksum mismatch; upload again");
 
+      // Judged again now: a break or clock-out may have been recorded since registration. Attendance writes
+      // hold this same per-employee lock, so a break already persisted can never be bypassed by a delayed upload.
+      const captured = Date.parse(String(row.captured_at));
+      const segments = await clockedInSegments(this.db, device.employeeId, captured, captured, Date.now() + FUTURE_TOLERANCE_MS);
+      if (!segments.some((s) => s.start <= captured && captured < s.end)) {
+        const at = new Date().toISOString();
+        await this.db.execute({
+          sql: "UPDATE screenshots SET upload_status = 'DELETED', deleted_at = ?, deleted_reason = ?, updated_at = ? WHERE id = ? AND upload_status = 'REGISTERED'",
+          args: [at, OUTSIDE_WORK_TIME, at, String(row.id)],
+        });
+        this.logger.log({ employeeId: device.employeeId, screenshotId: row.id }, "Screenshot discarded at upload: outside clocked-in time");
+        throw new GoneException(OUTSIDE_WORK_TIME);
+      }
+
       const key = String(row.storage_key);
       let confirmed;
       try {
@@ -467,6 +483,49 @@ export class ScreenshotsService implements OnModuleInit, OnModuleDestroy {
     return result;
   }
 
+  /**
+   * Attendance just recorded a break start or clock-out from `fromMs` (the caller holds this employee's lock).
+   * Screenshots captured since then that no longer fall inside clocked-in, non-break time are discarded: the
+   * file first (when stored), then the row is marked DELETED with a fixed, non-personal reason. Normally there
+   * are none (the desktop stops capture before it timestamps a break and uploads nothing while attendance is
+   * unsynced); this covers a break recorded with an earlier time than a screenshot already received.
+   * A storage failure leaves that row STORED and is logged as an error (retried on the next such event).
+   */
+  async discardOutsideWork(employeeId: string, fromMs: number): Promise<number> {
+    const { rows } = await this.db.execute({
+      sql: "SELECT id, captured_at, upload_status, storage_provider, storage_key FROM screenshots WHERE employee_id = ? AND captured_at >= ? AND upload_status != 'DELETED'",
+      args: [employeeId, iso(fromMs)],
+    });
+    if (!rows.length) return 0;
+    const times = rows.map((r) => Date.parse(String(r.captured_at)));
+    const segments = await clockedInSegments(this.db, employeeId, Math.min(...times), Math.max(...times), Date.now() + FUTURE_TOLERANCE_MS);
+    let discarded = 0;
+    for (const [i, r] of rows.entries()) {
+      if (segments.some((s) => s.start <= times[i]! && times[i]! < s.end)) continue;
+      if (r.upload_status === "STORED") {
+        try {
+          if (r.storage_provider !== this.storage.provider) throw new StorageError(`stored with ${String(r.storage_provider)}`);
+          await this.storage.delete(String(r.storage_key));
+        } catch (err) {
+          if (!(err instanceof StorageError)) throw err;
+          this.logger.error({ employeeId, screenshotId: r.id, err: err.message }, "Screenshot inside a break or after clock-out could not be removed from storage");
+          continue;
+        }
+      }
+      const at = new Date().toISOString();
+      await this.db.execute({
+        sql: "UPDATE screenshots SET upload_status = 'DELETED', deleted_at = ?, deleted_reason = ?, updated_at = ? WHERE id = ? AND upload_status != 'DELETED'",
+        args: [at, OUTSIDE_WORK_TIME, at, String(r.id)],
+      });
+      discarded++;
+    }
+    if (discarded) {
+      this.logger.warn({ employeeId, discarded }, "Screenshots discarded: attendance recorded a break or clock-out before their capture time");
+      await this.timelapses.sweep().catch((err: Error) => this.logger.error({ err: err.message }, "Timelapse sweep after a discard failed"));
+    }
+    return discarded;
+  }
+
   // ---- Retention ------------------------------------------------------------------------
 
   async retentionPreview(now = Date.now()): Promise<ScreenshotRetentionPreview> {
@@ -630,7 +689,7 @@ export class ScreenshotsService implements OnModuleInit, OnModuleDestroy {
 
   private async byClientId(employeeId: string, clientId: string): Promise<Row | undefined> {
     const { rows } = await this.db.execute({
-      sql: "SELECT id, device_id, upload_status, stored_at, file_size_bytes, width, height, checksum, storage_key FROM screenshots WHERE employee_id = ? AND idempotency_key = ?",
+      sql: "SELECT id, device_id, upload_status, stored_at, captured_at, file_size_bytes, width, height, checksum, storage_key FROM screenshots WHERE employee_id = ? AND idempotency_key = ?",
       args: [employeeId, clientId],
     });
     return rows[0];

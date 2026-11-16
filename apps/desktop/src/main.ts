@@ -541,16 +541,24 @@ for (const button of document.querySelectorAll<HTMLButtonElement>("[data-action]
     const type = button.dataset.action as AttendanceEventType;
     const p = project(app.current, app.queued);
     if (!app.queue || !app.engine || !p || !transition(p.state, type)) return;
-    // Durable queue first; the upload happens afterwards (now, or when back online).
-    await app.queue.add({
-      id: crypto.randomUUID(),
-      userId: app.profile!.userId,
-      deviceId: app.device!.device!.id,
-      type,
-      occurredAt: new Date().toISOString(),
-      status: "PENDING",
-    });
-    await reloadQueue();
+    // Screenshots stop before the break / clock-out time is taken: nothing can be captured after it.
+    // A failure here does not block attendance; the update() after queuing pauses capture as well.
+    const halting = type === "BREAK_START" || type === "CLOCK_OUT";
+    if (halting) await screenshots.halt().catch((err) => console.error("screenshot halt failed", err));
+    try {
+      // Durable queue first; the upload happens afterwards (now, or when back online).
+      await app.queue.add({
+        id: crypto.randomUUID(),
+        userId: app.profile!.userId,
+        deviceId: app.device!.device!.id,
+        type,
+        occurredAt: new Date().toISOString(),
+        status: "PENDING",
+      });
+      await reloadQueue();
+    } finally {
+      if (halting) screenshots.release();
+    }
     void app.engine.kick().then(reloadQueue);
   });
 }

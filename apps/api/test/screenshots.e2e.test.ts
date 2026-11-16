@@ -87,7 +87,7 @@ async function attendance(e: Emp, events: [string, number][]) {
     method: "POST", bearer: e.bearer, device: e.device,
     body: { sentAt: iso(Date.now()), events: events.map(([type, at]) => ({ id: randomUUID(), type, occurredAt: iso(at) })) },
   });
-  assert.ok(r.body.results.every((x: { status: string }) => x.status === "ACCEPTED"), r.text);
+  assert.ok(r.body?.results?.every((x: { status: string }) => x.status === "ACCEPTED"), `${r.status} ${r.text}`);
 }
 const settings = (patch: object) =>
   api("/settings/screenshots", { method: "PUT", cookie: admin, body: { ...DEFAULT_SCREENSHOT_SETTINGS, reason: "test", ...patch } });
@@ -313,6 +313,79 @@ describe("screenshot upload", () => {
     const { rows } = await db.execute({ sql: "SELECT id FROM devices WHERE employee_id = ?", args: [a.id] });
     await api(`/devices/${rows[0]!.id}/revoke`, { method: "POST", cookie: admin });
     assert.equal((await register(a, shot(Date.now() - 5 * M))).status, 401, "revoked device: its session is revoked with it (API-08)");
+  });
+});
+
+describe("breaks always win over screenshots (ordering and races)", () => {
+  const OUTSIDE = "Captured during a break or outside clocked-in time (attendance changed after registration); not stored";
+  const row = async (s: Shot) =>
+    (await db.execute({ sql: "SELECT upload_status, stored_at, deleted_reason, storage_key FROM screenshots WHERE idempotency_key = ?", args: [s.id] })).rows[0]!;
+
+  test("registered before the break synced, uploaded after: rejected (410), nothing stored, reason recorded", async () => {
+    await settings({ enabled: true, intervalSeconds: 60 });
+    const e = await ready();
+    const t = Date.now();
+    const s = shot(t - 2 * M);
+    assert.equal((await register(e, s)).body.status, "REGISTERED");
+    await attendance(e, [["BREAK_START", t - 3 * M]]); // break recorded with a time before the capture
+    const up = await upload(e, s);
+    assert.equal(up.status, 410, up.text);
+    const r = await row(s);
+    assert.deepEqual([r.upload_status, r.stored_at, r.deleted_reason], ["DELETED", null, OUTSIDE]);
+    assert.equal(existsSync(join(STORAGE_DIR, String(r.storage_key))), false, "no file written");
+    assert.equal((await register(e, s)).body.status, "REJECTED", "re-registering does not resurrect it");
+  });
+
+  test("stored, then a break recorded with an earlier time: the stored file is removed and the row marked", async () => {
+    await settings({ enabled: true, intervalSeconds: 60 });
+    const e = await ready();
+    const t = Date.now();
+    const keep = shot(t - 10 * M);
+    const s = shot(t - 2 * M);
+    for (const x of [keep, s]) {
+      assert.equal((await register(e, x)).body.status, "REGISTERED");
+      assert.equal((await upload(e, x)).status, 200);
+    }
+    const key = String((await row(s)).storage_key);
+    assert.ok(existsSync(join(STORAGE_DIR, key)));
+    await attendance(e, [["BREAK_START", t - 3 * M]]);
+    const r = await row(s);
+    assert.deepEqual([r.upload_status, r.deleted_reason], ["DELETED", OUTSIDE]);
+    assert.equal(existsSync(join(STORAGE_DIR, key)), false, "file removed from storage");
+    assert.equal((await row(keep)).upload_status, "STORED", "captured before the break: kept");
+  });
+
+  test("a clock-out recorded before a stored capture removes it too; a break that ended before it does not", async () => {
+    await settings({ enabled: true, intervalSeconds: 60 });
+    const e = await ready();
+    const t = Date.now();
+    const after = shot(t - 2 * M);
+    assert.equal((await register(e, after)).body.status, "REGISTERED");
+    assert.equal((await upload(e, after)).status, 200);
+    await attendance(e, [["BREAK_START", t - 20 * M], ["BREAK_END", t - 15 * M]]);
+    assert.equal((await row(after)).upload_status, "STORED", "after the break ended: work time, kept");
+    await attendance(e, [["CLOCK_OUT", t - 3 * M]]);
+    assert.equal((await row(after)).upload_status, "DELETED");
+  });
+
+  test("break start and upload racing: whichever runs first, nothing captured inside the break stays stored", async () => {
+    await settings({ enabled: true, intervalSeconds: 60 });
+    for (const round of [0, 1]) { // both orders; each round needs a fresh employee (setup is rate-limited per test process)
+      const e = await ready();
+      const t = Date.now();
+      const s = shot(t - 2 * M);
+      assert.equal((await register(e, s)).body.status, "REGISTERED");
+      const sync = api("/attendance/sync", {
+        method: "POST", bearer: e.bearer, device: e.device,
+        body: { sentAt: iso(Date.now()), events: [{ id: randomUUID(), type: "BREAK_START", occurredAt: iso(t - 3 * M) }] },
+      });
+      const [up, br] = round % 2 ? await Promise.all([upload(e, s), sync]) : (await Promise.all([sync, upload(e, s)])).reverse();
+      assert.equal(br.body.results[0].status, "ACCEPTED", br.text);
+      assert.ok([200, 410].includes(up.status), up.text);
+      const r = await row(s);
+      assert.equal(r.upload_status, "DELETED", `round ${round}: upload ${up.status}`);
+      assert.equal(existsSync(join(STORAGE_DIR, String(r.storage_key))), false);
+    }
   });
 });
 

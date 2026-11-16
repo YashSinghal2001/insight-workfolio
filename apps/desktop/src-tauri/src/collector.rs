@@ -271,6 +271,18 @@ impl Collector {
         st.status.clone()
     }
 
+    /// Whether screenshots must be skipped as idle right now: the tracker's verdict while it is collecting
+    /// (idle, or the screen locked; idle-excluded apps such as calls are not idle), otherwise no input for the
+    /// idle threshold. An idle time that cannot be read counts as idle: nothing is captured unobserved.
+    pub fn input_idle(&self) -> bool {
+        let st = self.lock_state();
+        if st.status.collecting {
+            return st.status.idle || st.status.locked;
+        }
+        let ms = platform::idle_ms();
+        ms < 0 || ms >= st.tracker.cfg.idle_threshold_ms
+    }
+
     pub fn status(&self) -> CollectorStatus {
         self.lock_state().status.clone()
     }
