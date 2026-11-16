@@ -7,7 +7,7 @@ import { useAuth } from "@/components/auth-provider";
 /** Admin navigation, grouped. Labels and hrefs are asserted by browser suites (`nav a` text). */
 export const ADMIN_NAV: readonly NavSection[] = [
   { title: "Overview", items: [{ label: "Overview", href: "/" }] },
-  { title: "People", items: [{ label: "Employees", href: "/employees" }, { label: "Teams", href: "/teams" }, { label: "Roles", href: "/roles" }] },
+  { title: "People", items: [{ label: "Employees", href: "/employees" }, { label: "Devices", href: "/devices" }, { label: "Teams", href: "/teams" }, { label: "Roles", href: "/roles" }] },
   {
     title: "Time",
     items: [

@@ -1,3 +1,4 @@
+import type { DeviceStatusResponse } from "@workfolio/shared";
 // Activity monitoring in the desktop UI: decides the monitoring mode from attendance, drives the
 // native collector (Rust), uploads its intervals and shows the employee exactly what is happening.
 import { invoke } from "@tauri-apps/api/core";
@@ -74,7 +75,7 @@ export interface ActivityContext {
     online: boolean;
     platform: "macos" | "windows";
     installationId: string;
-    deviceStatus: "ACTIVE" | "REVOKED" | "NOT_REGISTERED" | null;
+    deviceStatus: DeviceStatusResponse["status"] | null;
     deviceId: string | null;
     current: AttendanceCurrent | null;
     queued: QueuedEvent[];

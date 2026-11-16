@@ -3,13 +3,13 @@
 import Link from "next/link";
 import { PLATFORM_ROLE_LABEL, type ActivityStatusResponse, type Device, type Employee, type ScreenshotStatusResponse, type WebsiteStatus } from "@workfolio/shared";
 import { useAuth } from "@/components/auth-provider";
-import { DataTable, EmptyState, PageHeader, StatusBadge } from "@/components/kit";
+import { EmptyState, PageHeader, StatusBadge } from "@/components/kit";
 import { useApi, useMe } from "@/components/my-ui";
 import { SessionsCard } from "@/components/sessions-card";
+import { activeDevice, MyDeviceTable, OS_LABEL } from "@/components/devices";
 import { Card, formatInZone } from "@/components/ui";
 import { Loaded } from "../_components/states";
 
-const PLATFORM: Record<string, string> = { macos: "macOS", windows: "Windows", linux: "Linux" };
 const words = (s: string) => s.charAt(0) + s.slice(1).toLowerCase().replace(/_/g, " ");
 
 function Row({ label, children }: { label: string; children: React.ReactNode }) {
@@ -81,29 +81,25 @@ export default function MyProfilePage() {
         </Loaded>
       </Card>
 
-      <Card title="Devices">
+      <Card title="My devices">
         <Loaded load={devices.load} reload={devices.reload} label="your devices">
           {(list) =>
             list.length === 0 ? (
               <EmptyState title="No desktop app registered to your profile yet." hint="Sign in to the Insight Workfolio desktop app to register this computer." />
             ) : (
-              <DataTable label="My devices" head={["Name", "Platform", "Status", "Registered", "Last seen"]}>
-                {list.map((d) => (
-                  <tr key={d.id}>
-                    <td>{d.deviceName}</td>
-                    <td>{PLATFORM[d.platform] ?? d.platform}</td>
-                    <td className="whitespace-nowrap">
-                      {d.revokedAt ? <StatusBadge tone="neutral">Revoked {formatInZone(d.revokedAt, tz)}</StatusBadge> : <StatusBadge tone="success">Active</StatusBadge>}
-                    </td>
-                    <td className="whitespace-nowrap">{formatInZone(d.registeredAt, tz)}</td>
-                    <td className="whitespace-nowrap">{d.lastSeenAt ? formatInZone(d.lastSeenAt, tz) : "Never"}</td>
-                  </tr>
-                ))}
-              </DataTable>
+              <div className="flex flex-col gap-3">
+                <p className="text-sm">
+                  {(() => {
+                    const active = activeDevice(list);
+                    return active ? <>You are signed in on <span className="font-medium">{active.deviceName}</span> ({OS_LABEL[active.platform] ?? active.platform}). Sign out there before signing in on another device.</> : "You are not signed in on any device. Sign in on any registered device.";
+                  })()}
+                </p>
+                <MyDeviceTable devices={list} timeZone={tz} onChanged={devices.reload} />
+              </div>
             )
           }
         </Loaded>
-        <p className="mt-3 text-xs text-muted">Devices are registered from the desktop app and revoked by an administrator.</p>
+        <p className="mt-3 text-xs text-muted">Register a device by signing in to the desktop app on it. You can register several devices; your account is signed in on one at a time. Only an administrator can revoke a device.</p>
       </Card>
 
       <Card title="Monitoring notices">

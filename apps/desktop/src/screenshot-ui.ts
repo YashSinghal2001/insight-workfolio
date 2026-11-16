@@ -1,3 +1,4 @@
+import type { DeviceStatusResponse } from "@workfolio/shared";
 // Screenshots in the desktop UI: decides when capture may run, drives the native worker (Rust),
 // uploads the local queue and always shows the employee what is happening. Local capture and
 // confirmed cloud upload are shown separately.
@@ -54,7 +55,7 @@ export interface ScreenshotContext {
   state: () => {
     profile: CachedProfile | null;
     installationId: string;
-    deviceStatus: "ACTIVE" | "REVOKED" | "NOT_REGISTERED" | null;
+    deviceStatus: DeviceStatusResponse["status"] | null;
     deviceId: string | null;
     current: AttendanceCurrent | null;
     queued: QueuedEvent[];

@@ -22,7 +22,7 @@ import { RateLimiter } from "../auth/crypto.js";
 import { setupLink, setupTokenStatements } from "../auth/setup-token.js";
 import { canReadEmployee, scopeSql } from "../common/scope.js";
 import { DATABASE } from "../database/database.module.js";
-import { toDevice } from "../devices/devices.service.js";
+import { DEVICE_COLUMNS, toDevice } from "../devices/devices.service.js";
 import type { Env } from "../config/env.js";
 import { assertCanDisable } from "../roles/roles.service.js";
 import { deliverInvitation, INVITATION_TRANSPORT, type InvitationTransport, invitationEmail, RESEND_COOLDOWN_MS } from "./invitations.js";
@@ -244,8 +244,7 @@ export class EmployeesService {
   async devicesForCaller(id: string, caller: AuthContext): Promise<Device[]> {
     await this.getForCaller(id, caller);
     const { rows } = await this.db.execute({
-      sql: `SELECT id, device_name, platform, registered_at, last_seen_at, revoked_at
-            FROM devices WHERE employee_id = ? ORDER BY registered_at DESC`,
+      sql: `SELECT ${DEVICE_COLUMNS} FROM devices d WHERE d.employee_id = ? ORDER BY d.registered_at DESC`,
       args: [id],
     });
     return rows.map(toDevice);

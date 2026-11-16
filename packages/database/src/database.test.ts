@@ -64,7 +64,7 @@ test("schema constraints: unique email/code, normalized email, valid enums, fore
   db.close();
 });
 
-test("attendance guards: one active device, no overlapping sessions or breaks, no silent overwrites", async () => {
+test("attendance guards: one record per installation, no overlapping sessions or breaks, no silent overwrites", async () => {
   const db = createDatabase({ url: ":memory:" });
   await migrate(db);
   const run = (sql: string, ...args: (string | null)[]) => db.execute({ sql, args });
@@ -74,9 +74,10 @@ test("attendance guards: one active device, no overlapping sessions or breaks, n
   const device = (id: string, ident: string) =>
     run("INSERT INTO devices (id, employee_id, device_name, platform, device_identifier) VALUES (?, 'e1', 'Mac', 'macos', ?)", id, ident);
   await device("d1", "h1");
-  await assert.rejects(device("d2", "h2"), (e) => isUniqueViolation(e), "second active device");
-  await run("UPDATE devices SET revoked_at = '2026-10-12T00:00:00.000Z' WHERE id = 'd1'");
+  // 0031: several devices per employee; still one record per installation.
   await device("d2", "h2");
+  await assert.rejects(device("d3", "h1"), (e) => isUniqueViolation(e), "same installation twice");
+  await run("UPDATE devices SET revoked_at = '2026-10-12T00:00:00.000Z' WHERE id = 'd1'");
 
   const session = (id: string, start: string, end: string | null = null) =>
     run(

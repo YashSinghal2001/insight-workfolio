@@ -18,6 +18,13 @@ export const ACCOUNT_AUDIT_ACTIONS = [
   "SESSION_REUSE_DETECTED",
   "DEVICE_REGISTERED",
   "DEVICE_REVOKED",
+  // Multi-device, one active login (migration 0031). resource = the device.
+  "DEVICE_REREGISTRATION_APPROVED",
+  "DEVICE_REREGISTERED",
+  "DEVICE_SESSION_STARTED",
+  "DEVICE_SESSION_ENDED",
+  "DEVICE_SESSION_TAKEOVER",
+  "DEVICE_SESSION_REJECTED",
   // Reads of ANOTHER employee's records by an admin or team head (target = that employee's account).
   "EMPLOYEE_SCREENSHOTS_VIEWED",
   "EMPLOYEE_ACTIVITY_TIMELINE_VIEWED",

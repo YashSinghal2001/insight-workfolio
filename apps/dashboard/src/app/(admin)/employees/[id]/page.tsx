@@ -6,6 +6,7 @@ import { useParams } from "next/navigation";
 import type { Device, Employee, InvitationResponse, ScreenshotBlurOverridesResponse, SetupToken } from "@workfolio/shared";
 import { EmployeeForm, InvitationSummary, SetupLinkNotice } from "@/components/employee-form";
 import { TrackingOverrides } from "@/components/tracking-overrides";
+import { activeDevice, AdminDeviceTable, OS_LABEL } from "@/components/devices";
 import { ConfirmDialog, ErrorState, PageHeader, SkeletonRows, StatusBadge, SuccessNotice } from "@/components/kit";
 import { Card, Field, formatInZone, inputClass, Notice, secondaryButtonClass } from "@/components/ui";
 import { api, ApiRequestError, errorMessage } from "@/lib/api";
@@ -19,7 +20,7 @@ export default function EmployeePage() {
   );
 }
 
-type Confirm = { kind: "status" } | { kind: "setup" } | { kind: "invite" } | { kind: "revoke"; device: Device };
+type Confirm = { kind: "status" } | { kind: "setup" } | { kind: "invite" };
 
 function EmployeeDetail() {
   const { id } = useParams<{ id: string }>();
@@ -139,23 +140,26 @@ function EmployeeDetail() {
         </div>
       </Card>
 
-      <Card title="Registered devices">
+      <Card title={`Devices (${devices?.length ?? 0} registered)`}>
         {devices?.length ? (
-          <ul className="divide-y divide-border text-sm">
-            {devices.map((d) => (
-              <li key={d.id} className="flex flex-wrap justify-between gap-2 py-2">
-                <span className="font-medium">{d.deviceName} <span className="text-muted">({d.platform})</span></span>
-                <span className="flex flex-wrap items-center gap-3 text-muted">
-                  {d.revokedAt ? `Revoked ${formatInZone(d.revokedAt, employee.timezone)}` : `Last seen ${formatInZone(d.lastSeenAt, employee.timezone)}`}
-                  {!d.revokedAt && (
-                    <button type="button" className={secondaryButtonClass} onClick={() => setConfirm({ kind: "revoke", device: d })}>Revoke</button>
-                  )}
-                </span>
-              </li>
-            ))}
-          </ul>
+          <div className="flex flex-col gap-3">
+            <p className="text-sm">
+              {(() => {
+                const active = activeDevice(devices);
+                return active ? <>Signed in on <span className="font-medium">{active.deviceName}</span> ({OS_LABEL[active.platform] ?? active.platform}) since {formatInZone(active.sessionStartedAt, employee.timezone)}.</> : "Not signed in on any device.";
+              })()}
+            </p>
+            <AdminDeviceTable
+              devices={devices}
+              timeZone={employee.timezone}
+              onChanged={async (message) => {
+                setDevices(await api<Device[]>(`/employees/${id}/devices`));
+                setNotice(message);
+              }}
+            />
+          </div>
         ) : (
-          <p className="text-sm text-muted">No devices registered. A device appears after the employee signs in on the desktop app and registers it. One active device per employee.</p>
+          <p className="text-sm text-muted">No devices registered. A device appears after the employee signs in on the desktop app and registers it. An employee may register several devices; one at a time is signed in.</p>
         )}
       </Card>
 
@@ -193,19 +197,6 @@ function EmployeeDetail() {
           setEmployee(r.employee);
           setSetup(r.setup ?? null);
         }, "Invitation resent.")}
-        onClose={() => setConfirm(null)}
-      />
-      <ConfirmDialog
-        open={confirm?.kind === "revoke"}
-        title={`Revoke ${confirm?.kind === "revoke" ? confirm.device.deviceName : "this device"}?`}
-        tone="danger"
-        confirmLabel="Revoke device"
-        description="The device can no longer record attendance or upload activity. The employee can register a new device by signing in on it again."
-        onConfirm={act(async () => {
-          if (confirm?.kind !== "revoke") return;
-          await api(`/devices/${confirm.device.id}/revoke`, { method: "POST" });
-          setDevices(await api<Device[]>(`/employees/${id}/devices`));
-        }, "Device revoked. It can no longer record attendance; the employee can register a new device.")}
         onClose={() => setConfirm(null)}
       />
     </div>

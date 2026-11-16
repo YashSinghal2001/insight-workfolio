@@ -64,8 +64,10 @@ before(async () => {
   const e = await call(bases[0]!, "/employees", { method: "POST", cookie: admin, body: { email: "multi@multi.local", employeeCode: "MI-1", fullName: "Multi Instance", timezone: "UTC" } });
   employeeId = e.body.employee.id;
   await call(bases[0]!, "/auth/setup-password", { method: "POST", body: { token: e.body.setup.token, password: pw } });
-  // Two sign-ins of the same employee ("two devices"), one per instance.
-  devices = await Promise.all(bases.map(async (base) => ({ base, bearer: (await call(base, "/auth/login", { method: "POST", body: { email: "multi@multi.local", password: pw, client: "desktop" } })).body.accessToken as string })));
+  // One desktop sign-in used against both instances (0031: one active device sign-in per account, so two
+  // concurrent device sessions of one employee no longer exist; the races are between instances).
+  const bearer = (await call(bases[0]!, "/auth/login", { method: "POST", body: { email: "multi@multi.local", password: pw, client: "desktop" } })).body.accessToken as string;
+  devices = bases.map((base) => ({ base, bearer }));
   device = randomUUID();
   await call(bases[0]!, "/devices/register", { method: "POST", bearer: devices[0]!.bearer, body: { installationId: device, deviceName: "Mac", platform: "macos" } });
   const p = await call(bases[1]!, "/projects", { method: "POST", cookie: admin, body: { code: "MULTI", name: "Multi" } });

@@ -85,6 +85,10 @@ export const registerDeviceSchema = z.object({
 });
 export type RegisterDeviceInput = z.input<typeof registerDeviceSchema>;
 
+/** Admin revoke: the reason is optional and kept in the account audit. */
+export const revokeDeviceSchema = z.strictObject({ reason: z.string().trim().min(1).max(500).optional() }).default({});
+export type RevokeDeviceInput = z.input<typeof revokeDeviceSchema>;
+
 /** Header sent by the desktop app on attendance requests. */
 export const DEVICE_HEADER = "x-device-id";
 export const IDEMPOTENCY_HEADER = "idempotency-key";

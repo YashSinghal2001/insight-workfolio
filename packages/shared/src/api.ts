@@ -14,6 +14,10 @@ export interface ApiError {
   path: string;
   timestamp: string;
   requestId?: string;
+  /** Machine-readable reason, when the client must react to it (e.g. ACTIVE_ON_ANOTHER_DEVICE). */
+  code?: string;
+  /** Safe structured facts for that code (never tokens or hashes). */
+  details?: Record<string, unknown>;
 }
 
 export interface HealthResponse {
@@ -123,6 +127,12 @@ export interface InvitationResponse {
   setup?: SetupToken;
 }
 
+/**
+ * ACTIVE: holds the account's one live sign-in. INACTIVE: registered, signed out. REVOKED: no longer
+ * authorized (an admin may approve re-registration). Registration and sign-in are separate.
+ */
+export type DeviceState = "ACTIVE" | "INACTIVE" | "REVOKED";
+
 export interface Device {
   id: string;
   deviceName: string;
@@ -130,6 +140,48 @@ export interface Device {
   registeredAt: string;
   lastSeenAt: string | null;
   revokedAt: string | null;
+  status: DeviceState;
+  /** Start of the live sign-in on this device (status ACTIVE), else null. */
+  sessionStartedAt: string | null;
+  /** Most recent sign-in bound to this device. */
+  lastLoginAt: string | null;
+  /** Revoked device an admin cleared for re-registration (the employee must still register it again). */
+  reregistrationApprovedAt: string | null;
+}
+
+/** Admin device overview: the device plus whose it is. */
+export interface DeviceListItem extends Device {
+  employeeId: string;
+  employeeName: string;
+  employeeCode: string;
+  email: string;
+}
+
+/** The device that holds the account's active sign-in, as shown to the same employee. */
+export interface ActiveDeviceSummary {
+  id: string;
+  deviceName: string;
+  platform: string;
+  lastSeenAt: string | null;
+  since: string;
+}
+
+/** Error codes (ApiError.code) for device sign-in and registration. */
+export const DEVICE_ERROR = {
+  /** 409: another device holds the account's active sign-in. details.activeDevice: ActiveDeviceSummary. */
+  ACTIVE_ON_ANOTHER_DEVICE: "ACTIVE_ON_ANOTHER_DEVICE",
+  /** 403: this installation was revoked and re-registration is not approved. */
+  DEVICE_REVOKED: "DEVICE_REVOKED",
+  /** 409: this installation is registered to a different employee. */
+  DEVICE_OWNED_BY_ANOTHER_EMPLOYEE: "DEVICE_OWNED_BY_ANOTHER_EMPLOYEE",
+} as const;
+
+export interface DeviceHistoryEvent {
+  id: string;
+  action: string;
+  actorEmail: string | null;
+  reason: string | null;
+  createdAt: string;
 }
 
 export interface Paginated<T> {
@@ -151,10 +203,12 @@ export type CreateEmployeeResponse = InvitationResponse;
 
 /** Status of the calling installation. The installation ID itself is never returned. */
 export interface DeviceStatusResponse {
-  status: "ACTIVE" | "REVOKED" | "NOT_REGISTERED";
+  /** ACTIVE: this installation holds the account's sign-in and may record. INACTIVE: registered, another device is active. */
+  status: "ACTIVE" | "INACTIVE" | "REVOKED" | "NOT_REGISTERED";
   device: Device | null;
-  /** true when another of the employee's devices is active (MVP: one active device). */
+  /** true when another of the employee's devices holds the active sign-in. */
   otherActiveDevice: boolean;
+  activeDevice: ActiveDeviceSummary | null;
 }
 
 // ---- Attendance -----------------------------------------------------------

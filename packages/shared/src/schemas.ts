@@ -51,6 +51,13 @@ export const loginSchema = z.object({
   // Policy is not re-checked at login: it would leak which rule failed and block legacy passwords.
   password: z.string().min(1).max(PASSWORD_MAX),
   client: z.enum(["web", "desktop"]).default("web"),
+  /**
+   * Desktop only: the app's installation id. A registered installation becomes the account's active device
+   * in the same step, or the sign-in is refused with 409 ACTIVE_ON_ANOTHER_DEVICE (one active device).
+   */
+  installationId: z.uuid().optional(),
+  /** Explicit, password-confirmed switch: ends the session on the other device and signs in here. */
+  takeover: z.boolean().optional(),
 });
 export type LoginInput = z.input<typeof loginSchema>;
 

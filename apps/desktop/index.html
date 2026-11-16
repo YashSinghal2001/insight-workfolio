@@ -43,6 +43,7 @@
           <label>Work email <input name="email" type="email" autocomplete="username" required /></label>
           <label>Password <input name="password" type="password" autocomplete="current-password" required /></label>
           <button type="submit" id="login-submit">Sign in</button>
+          <button type="submit" id="login-switch" class="secondary" hidden>Switch to this device (signs the other device out)</button>
           <p class="muted">First time? Use the setup link from your administrator to choose a password.</p>
         </form>
       </section>
@@ -98,7 +99,7 @@
         <!-- Device enrolment: required once before attendance can be recorded. -->
         <section id="device-register" class="card" aria-labelledby="device-heading" hidden>
           <h2 id="device-heading">Register this device</h2>
-          <p class="muted">Attendance can be recorded from one registered device. This app uses a random ID it creates; no hardware identifiers are read.</p>
+          <p class="muted">You can register several devices; your account is signed in on one of them at a time. This app uses a random ID it creates; no hardware identifiers are read.</p>
           <form id="device-form" class="stack">
             <p id="device-error" class="error" role="alert" hidden></p>
             <label>Device name <input name="deviceName" maxlength="120" required /></label>

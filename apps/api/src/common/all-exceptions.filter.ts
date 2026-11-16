@@ -18,6 +18,7 @@ export class AllExceptionsFilter implements ExceptionFilter {
     let statusCode = HttpStatus.INTERNAL_SERVER_ERROR;
     let error = "Internal Server Error";
     let message: string | string[] = "An unexpected error occurred";
+    let extra: Pick<ApiError, "code" | "details"> = {};
 
     if (exception instanceof HttpException) {
       statusCode = exception.getStatus();
@@ -26,7 +27,9 @@ export class AllExceptionsFilter implements ExceptionFilter {
         message = body;
         error = STATUS_CODES[statusCode] ?? "Error";
       } else {
-        const b = body as { message?: string | string[]; error?: string };
+        const b = body as { message?: string | string[]; error?: string; code?: unknown; details?: unknown };
+        // Set only by our own exceptions (codedError); safe facts by construction.
+        if (typeof b.code === "string") extra = b.details && typeof b.details === "object" ? { code: b.code, details: b.details as Record<string, unknown> } : { code: b.code };
         message = b.message ?? exception.message;
         // Router 404s echo the raw URL ("Cannot GET /x?token=..."); strip the query string.
         if (typeof message === "string") message = message.replace(req.originalUrl, path);
@@ -50,6 +53,7 @@ export class AllExceptionsFilter implements ExceptionFilter {
       path,
       timestamp: new Date().toISOString(),
       requestId: req.id,
+      ...extra,
     };
     res.status(statusCode).json(payload);
   }

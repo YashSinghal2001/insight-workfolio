@@ -1,3 +1,4 @@
+import type { DeviceStatusResponse } from "@workfolio/shared";
 // When activity monitoring runs. Attendance is the authority: the collector runs only while the
 // employee is clocked in and not on a break, on an active registered device, after consent.
 import type { Projection } from "./sync.ts";
@@ -9,7 +10,7 @@ export interface MonitoringInputs {
   signedIn: boolean;
   /** This build has a collector for the OS (macOS and Windows). */
   supported: boolean;
-  deviceStatus: "ACTIVE" | "REVOKED" | "NOT_REGISTERED" | null;
+  deviceStatus: DeviceStatusResponse["status"] | null;
   /** Organization-wide switch from the server's monitoring settings. */
   enabled: boolean;
   consented: boolean;
@@ -36,7 +37,11 @@ export function decideMonitoring(i: MonitoringInputs): MonitoringDecision {
   if (!i.signedIn) return decision("STOPPED", "Signed out. Nothing is recorded.");
   if (!i.supported) return decision("STOPPED", "Activity collection is not available on this operating system yet. Only attendance is recorded.");
   if (i.deviceStatus !== "ACTIVE") {
-    return decision("STOPPED", i.deviceStatus === "REVOKED" ? "This device was revoked. Nothing is recorded." : "This device is not registered. Nothing is recorded.");
+    return decision("STOPPED", i.deviceStatus === "REVOKED"
+        ? "This device was revoked. Nothing is recorded."
+        : i.deviceStatus === "INACTIVE"
+          ? "Your account is signed in on another device. Nothing is recorded here."
+          : "This device is not registered. Nothing is recorded.");
   }
   if (!i.enabled) return decision("STOPPED", "Activity monitoring is turned off by your organization. Only attendance is recorded.");
   if (!i.consented) return decision("STOPPED", "Read and acknowledge the monitoring notice below. Nothing is recorded until then.");
@@ -89,7 +94,7 @@ export interface ScreenshotInputs {
   signedIn: boolean;
   /** This build can capture (macOS 14+, Windows). */
   supported: boolean;
-  deviceStatus: "ACTIVE" | "REVOKED" | "NOT_REGISTERED" | null;
+  deviceStatus: DeviceStatusResponse["status"] | null;
   /** Organization-wide screenshot switch (separate from activity monitoring). */
   enabled: boolean;
   /** The current screenshot-specific notice is acknowledged. */

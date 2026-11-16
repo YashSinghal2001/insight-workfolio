@@ -96,11 +96,11 @@ before(async () => {
 after(() => app.close());
 
 describe("devices", () => {
-  test("registration: idempotent per installation, one active device, identifiers never returned", async () => {
+  test("registration: idempotent per installation, several devices, one active sign-in, identifiers never returned", async () => {
     const e = await employee({ register: false });
     assert.equal((await act(e, "clock-in")).status, 403, "unregistered device cannot clock in");
     const me0 = await api("/devices/me", { bearer: e.bearer, device: e.device });
-    assert.deepEqual(me0.body, { status: "NOT_REGISTERED", device: null, otherActiveDevice: false });
+    assert.deepEqual(me0.body, { status: "NOT_REGISTERED", device: null, otherActiveDevice: false, activeDevice: null });
 
     const body = { installationId: e.device, deviceName: "Work Mac", platform: "macos" };
     const first = await api("/devices/register", { method: "POST", bearer: e.bearer, body });
@@ -108,10 +108,11 @@ describe("devices", () => {
     assert.equal(first.status, 201);
     assert.equal(again.body.id, first.body.id, "same installation -> same device");
     assert.ok(!first.text.includes(e.device), "installation id is not echoed");
-    assert.deepEqual(Object.keys(first.body).sort(), ["deviceName", "id", "lastSeenAt", "platform", "registeredAt", "revokedAt"]);
+    assert.deepEqual(Object.keys(first.body).sort(), ["deviceName", "id", "lastLoginAt", "lastSeenAt", "platform", "registeredAt", "reregistrationApprovedAt", "revokedAt", "sessionStartedAt", "status"]);
+    assert.equal(first.body.status, "ACTIVE");
 
     const second = await api("/devices/register", { method: "POST", bearer: e.bearer, body: { ...body, installationId: randomUUID() } });
-    assert.equal(second.status, 409, "one active device per employee");
+    assert.equal(second.status, 403, "a session bound to one device cannot enroll another");
     const other = await api("/devices/me", { bearer: e.bearer, device: randomUUID() });
     assert.deepEqual([other.body.status, other.body.otherActiveDevice], ["NOT_REGISTERED", true]);
 

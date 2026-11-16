@@ -63,9 +63,9 @@ test("fully migrated: every check passes, nothing pending", async () => {
 });
 
 test("pending only after the latest applied: passes and reports them", async () => {
-  const { code, out } = await verify(await dbFile(["0030_account_invitations"]));
+  const { code, out } = await verify(await dbFile(["0031_multi_device_single_session"]));
   assert.equal(code, 0, out);
-  assert.match(out, /pending 1 \(0030_account_invitations … 0030_account_invitations\), latest 0029_device_live_state/);
+  assert.match(out, /pending 1 \(0031_multi_device_single_session … 0031_multi_device_single_session\), latest 0030_account_invitations/);
   assert.doesNotMatch(out, /FAIL|WARN/);
 });
 

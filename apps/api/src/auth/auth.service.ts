@@ -24,6 +24,7 @@ import { str } from "../attendance/sessions.js";
 import { jwtVerify, SignJWT } from "jose";
 import type { Env } from "../config/env.js";
 import { DATABASE } from "../database/database.module.js";
+import { claimDeviceSession, deviceRevoked, rejectedAudit } from "./device-session.js";
 import {
   DUMMY_PASSWORD_HASH,
   hashPassword,
@@ -45,6 +46,8 @@ export interface AuthContext extends AuthUser {
   sessionId: string;
   /** Which client signed in (from the session row, set at login). Device registration and device-bound writes need DESKTOP. */
   client: SessionClient | null;
+  /** The device this session is the active sign-in of (sessions.device_id), or null when unbound. */
+  deviceId: string | null;
   /** Heads at least one active team (W41): team-scoped reads of those teams' members (common/scope.ts). */
   teamHead?: boolean;
 }
@@ -79,7 +82,7 @@ export class AuthService {
     this.key = secret ? new TextEncoder().encode(secret) : randomBytes(32);
   }
 
-  async login(email: string, password: string, ip: string, client: SessionClient): Promise<IssuedSession> {
+  async login(email: string, password: string, ip: string, client: SessionClient, device: { installationId?: string; takeover?: boolean } = {}): Promise<IssuedSession> {
     // A blocked IP is refused before its attempt counts against the email, so it can't lock others out.
     if (!this.loginByIp.hit(ip) || !this.loginByEmail.hit(email)) throw tooMany();
 
@@ -96,7 +99,29 @@ export class AuthService {
       throw new UnauthorizedException(INVALID_LOGIN);
     }
     this.loginByEmail.reset(email);
-    return this.createSession({ id: String(user.id), email: String(user.email), role: user.role as Role, platformRole: platformRoleOf(user.role as Role, str(user.admin_title)) }, client);
+    const authUser: AuthUser = { id: String(user.id), email: String(user.email), role: user.role as Role, platformRole: platformRoleOf(user.role as Role, str(user.admin_title)) };
+    const deviceId = client === "DESKTOP" && device.installationId ? await this.loginDevice(authUser.id, device.installationId) : null;
+    return this.createSession(authUser, client, deviceId, device.takeover === true);
+  }
+
+  /**
+   * The registered, authorized device a desktop sign-in claims, or null (not registered yet, or a revoked
+   * device whose re-registration an admin approved: the app registers it next, which claims then).
+   * Called only after the password was verified.
+   */
+  private async loginDevice(userId: string, installationId: string): Promise<string | null> {
+    const row = (
+      await this.db.execute({
+        sql: `SELECT d.id, d.revoked_at, d.reregistration_approved_at FROM devices d JOIN employee_profiles p ON p.id = d.employee_id
+              WHERE p.user_id = ? AND d.device_identifier = ?`,
+        args: [userId, sha256(installationId)],
+      })
+    ).rows[0];
+    if (!row) return null;
+    if (row.revoked_at === null) return String(row.id);
+    if (row.reregistration_approved_at !== null) return null;
+    await this.db.batch([rejectedAudit(userId, String(row.id), "DEVICE_REVOKED")], "write");
+    throw deviceRevoked();
   }
 
   /** Rotates the refresh token. Presenting a superseded token revokes the session (theft signal). */
@@ -145,13 +170,23 @@ export class AuthService {
     return { user, refreshToken: next, ...(await this.accessToken(user.id, sessionId)) };
   }
 
-  /** Revokes the session the refresh token belongs to. Unknown tokens are ignored (idempotent). */
+  /**
+   * Revokes the session the refresh token belongs to. Unknown tokens are ignored (idempotent). Ending a
+   * device sign-in frees the account's active slot: the device stays registered (INACTIVE).
+   */
   async logout(refreshToken: string | undefined): Promise<void> {
     if (!refreshToken) return;
-    await this.db.execute({
-      sql: "UPDATE sessions SET revoked_at = ? WHERE id = ? AND refresh_token_hash = ? AND revoked_at IS NULL",
-      args: [new Date().toISOString(), refreshToken.split(".")[0] ?? "", sha256(refreshToken)],
-    });
+    const sessionId = refreshToken.split(".")[0] ?? "";
+    const session = (await this.db.execute({ sql: "SELECT user_id, device_id FROM sessions WHERE id = ?", args: [sessionId] })).rows[0];
+    await this.db.batch(
+      [
+        { sql: "UPDATE sessions SET revoked_at = ? WHERE id = ? AND refresh_token_hash = ? AND revoked_at IS NULL", args: [new Date().toISOString(), sessionId, sha256(refreshToken)] },
+        ...(session?.device_id
+          ? [accountAudit({ actorUserId: String(session.user_id), targetUserId: String(session.user_id), action: "DEVICE_SESSION_ENDED", resourceType: "DEVICE", resourceId: String(session.device_id), metadata: { cause: "SIGNED_OUT" } }, "changes() > 0")]
+          : []),
+      ],
+      "write",
+    );
   }
 
   /** Verifies the access token AND that its session is live and the user still active. */
@@ -170,7 +205,7 @@ export class AuthService {
     }
     const row = (
       await this.db.execute({
-        sql: `SELECT u.id, u.email, u.role, u.admin_title, s.client,
+        sql: `SELECT u.id, u.email, u.role, u.admin_title, s.client, s.device_id,
                 EXISTS (SELECT 1 FROM teams t WHERE t.head_user_id = u.id AND t.active = 1) AS team_head
               FROM sessions s JOIN users u ON u.id = s.user_id
               WHERE s.id = ? AND u.id = ? AND s.revoked_at IS NULL AND s.expires_at > ? AND u.status = 'ACTIVE'`,
@@ -178,7 +213,7 @@ export class AuthService {
       })
     ).rows[0];
     if (!row) throw new UnauthorizedException();
-    return { id: String(row.id), email: String(row.email), role: row.role as Role, platformRole: platformRoleOf(row.role as Role, str(row.admin_title)), sessionId, client: str(row.client) as SessionClient | null, teamHead: Boolean(row.team_head) };
+    return { id: String(row.id), email: String(row.email), role: row.role as Role, platformRole: platformRoleOf(row.role as Role, str(row.admin_title)), sessionId, client: str(row.client) as SessionClient | null, deviceId: str(row.device_id), teamHead: Boolean(row.team_head) };
   }
 
   /** Consumes a one-time setup token, sets the password and signs out any existing sessions. */
@@ -255,13 +290,22 @@ export class AuthService {
     return revoked?.rowsAffected ?? 0;
   }
 
-  private async createSession(user: AuthUser, client: SessionClient): Promise<IssuedSession> {
+  /** With a device, the new session is inserted already bound, in the claim transaction (or not at all). */
+  private async createSession(user: AuthUser, client: SessionClient, deviceId: string | null = null, takeover = false): Promise<IssuedSession> {
     const sessionId = randomUUID();
     const refreshToken = `${sessionId}.${randomToken()}`;
-    await this.db.execute({
-      sql: "INSERT INTO sessions (id, user_id, refresh_token_hash, expires_at, client) VALUES (?, ?, ?, ?, ?)",
-      args: [sessionId, user.id, sha256(refreshToken), new Date(Date.now() + SESSION_TTL_MS).toISOString(), client],
-    });
+    const row = [sessionId, user.id, sha256(refreshToken), new Date(Date.now() + SESSION_TTL_MS).toISOString(), client];
+    if (!deviceId) {
+      await this.db.execute({ sql: "INSERT INTO sessions (id, user_id, refresh_token_hash, expires_at, client) VALUES (?, ?, ?, ?, ?)", args: row });
+    } else {
+      // Inserted only while the device is still authorized (a revoke committed meanwhile wins).
+      const insert = {
+        sql: `INSERT INTO sessions (id, user_id, refresh_token_hash, expires_at, client, device_id)
+              SELECT ?, ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM devices WHERE id = ? AND revoked_at IS NULL)`,
+        args: [...row, deviceId, deviceId],
+      };
+      if ((await claimDeviceSession(this.db, { userId: user.id, deviceId, sessionId, bind: insert, takeover })) !== 1) throw deviceRevoked();
+    }
     return { user, refreshToken, ...(await this.accessToken(user.id, sessionId)) };
   }
 

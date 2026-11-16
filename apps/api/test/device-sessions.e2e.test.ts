@@ -88,21 +88,24 @@ test("revoking a device revokes exactly the sessions used from it", async () => 
   const email = await employee();
   const [d1, d2] = [randomUUID(), randomUUID()];
 
-  // S1 registers device 1; S1b (a later sign-in on the same installation) is bound by its heartbeat.
+  // S1 registers device 1. S1b, a later sign-in on the same installation (an older app that binds on its
+  // heartbeat), becomes that device's sign-in and replaces S1 (0031: one active device sign-in per account).
   const s1 = await login(email);
   const reg1 = await register(s1, d1);
   assert.equal(reg1.status, 201, reg1.text);
   const s1b = await login(email);
   assert.equal((await api("/devices/me", { bearer: s1b.bearer, device: d1 })).body.status, "ACTIVE");
-  // S2: another session of the same user that never used device 1 (e.g. another machine not yet enrolled,
-  // since one device is active per employee). Other: another employee's device session.
+  assert.equal(await refresh(s1), 401, "the replaced sign-in on the same installation is ended");
+  // S2: another session of the same user that never used a device (unbound, like a web session).
+  // Other: another employee's device session.
   const s2 = await login(email);
   const other = await login(await employee());
   const otherDevice = randomUUID();
   assert.equal((await register(other, otherDevice)).status, 201);
-  assert.deepEqual([await boundTo(s1), await boundTo(s1b), await boundTo(s2), await boundTo(other)], [reg1.body.id, reg1.body.id, null, (await api("/devices/me", { bearer: other.bearer, device: otherDevice })).body.device.id]);
-  assert.equal(await refresh(s1), 200, "refresh keeps the binding");
-  assert.equal(await boundTo(s1), reg1.body.id);
+  assert.deepEqual([await boundTo(s1b), await boundTo(s2), await boundTo(other)], [reg1.body.id, null, (await api("/devices/me", { bearer: other.bearer, device: otherDevice })).body.device.id]);
+  assert.equal(await refresh(s1b), 200, "refresh keeps the binding");
+  assert.equal(await boundTo(s1b), reg1.body.id);
+  Object.assign(s1, s1b);
 
   const revoked = await api(`/devices/${reg1.body.id}/revoke`, { method: "POST", cookie: adminCookie });
   assert.equal(revoked.status, 200, revoked.text);

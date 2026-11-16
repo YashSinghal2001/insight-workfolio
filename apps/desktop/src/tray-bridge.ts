@@ -1,3 +1,4 @@
+import type { DeviceStatusResponse } from "@workfolio/shared";
 // Menu-bar (macOS) / system-tray (Windows) status: derived from app state, sent to the native tray only when it changes.
 // No Tauri imports, so node tests can drive it; main.ts injects the `tray_update` call.
 import type { Projection, SyncPhase } from "./sync.ts";
@@ -18,7 +19,7 @@ export interface TrayInput {
   signedIn: boolean;
   /** Session online and the server reachable. */
   online: boolean;
-  deviceStatus: "ACTIVE" | "REVOKED" | "NOT_REGISTERED" | null;
+  deviceStatus: DeviceStatusResponse["status"] | null;
   projection: Projection | null;
   syncPhase?: SyncPhase;
   /** Attendance events the server rejected and the employee has not dismissed. */
@@ -33,6 +34,7 @@ const BASE = { CLOCKED_IN: "Clocked in", ON_BREAK: "On break", CLOCKED_OUT: "Clo
 function attention(i: TrayInput, working: boolean): string | null {
   if (i.deviceStatus === "REVOKED") return "This device was revoked: attendance can't be recorded";
   if (i.deviceStatus === "NOT_REGISTERED" && i.online) return "Register this device to record attendance";
+  if (i.deviceStatus === "INACTIVE") return "Your account is signed in on another device";
   if (i.syncPhase === "blocked") return "Attendance sync is blocked: open the app";
   if (i.rejected) return `${i.rejected} attendance change(s) not recorded by the server`;
   if (i.screenshots === "Needs permission") return "Screen recording permission needed";

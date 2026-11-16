@@ -1272,6 +1272,35 @@ export const MIGRATIONS: Migration[] = [
       "CREATE INDEX account_invitations_user ON account_invitations(user_id, created_at)",
     ],
   },
+  {
+    id: "0031_multi_device_single_session",
+    statements: [
+      // Several registered devices per employee (docs/qa/MULTI-DEVICE-SESSION-IMPLEMENTATION.md). Dropping
+      // this index is the approved exception to "additive only": it removes the one-device limit, no data.
+      "DROP INDEX devices_one_active_per_employee",
+      // "This installation is already another employee's device" and the inventory look up the hash alone.
+      "CREATE INDEX devices_identifier ON devices(device_identifier)",
+      // A revoked device stays revoked until an admin approves its re-registration; the employee then
+      // completes registration again from the device (password sign-in). Who revoked it and why stays in
+      // account_audit (resource_type DEVICE), which is append-only.
+      "ALTER TABLE devices ADD COLUMN reregistration_approved_at TEXT",
+      "ALTER TABLE devices ADD COLUMN reregistration_approved_by TEXT REFERENCES users(id) ON DELETE RESTRICT",
+      // The active login: a live session bound to a device (sessions.device_id, 0023). At most one per
+      // account, enforced here so two concurrent sign-ins cannot both win. Expiry is time-based and cannot
+      // be part of the index, so the API ends expired device sessions (revoked_at = expires_at) before it
+      // claims; the two statements below do the same once for existing rows so the index can be built.
+      `UPDATE sessions SET revoked_at = expires_at
+         WHERE device_id IS NOT NULL AND revoked_at IS NULL AND expires_at <= ${NOW}`,
+      // Several live sessions bound at once (repeat sign-ins on the same installation): the most recently
+      // used one stays bound; the others are unbound, not revoked, so nobody is signed out by this migration.
+      `UPDATE sessions SET device_id = NULL
+         WHERE device_id IS NOT NULL AND revoked_at IS NULL AND EXISTS (
+           SELECT 1 FROM sessions o
+           WHERE o.user_id = sessions.user_id AND o.device_id IS NOT NULL AND o.revoked_at IS NULL
+             AND (coalesce(o.refreshed_at, o.created_at), o.id) > (coalesce(sessions.refreshed_at, sessions.created_at), sessions.id))`,
+      "CREATE UNIQUE INDEX sessions_one_active_device_per_user ON sessions(user_id) WHERE device_id IS NOT NULL AND revoked_at IS NULL",
+    ],
+  },
 ];
 
 const checksum = (m: Migration) => createHash("sha256").update(JSON.stringify(m.statements)).digest("hex");

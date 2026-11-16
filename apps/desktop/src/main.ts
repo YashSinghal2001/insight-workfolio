@@ -3,6 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import {
   API_PREFIX,
   attendanceTotals,
+  DEVICE_ERROR,
   DEVICE_HEADER,
   formatDuration,
   PLATFORM_ROLE_LABEL,
@@ -217,9 +218,11 @@ function show(view: "loading" | "login" | "signed-in") {
   $("#signed-in-view").hidden = view !== "signed-in";
 }
 
-function loginError(message: string | null) {
+function loginError(message: string | null, offerSwitch = false) {
   $("#login-error").hidden = !message;
   $("#login-error").textContent = message ?? "";
+  // One active device per account: the switch is offered only after the server said another device holds it.
+  $("#login-switch").hidden = !offerSwitch;
 }
 
 async function boot() {
@@ -436,15 +439,18 @@ function render() {
   $("#offline-banner").hidden = app.online && app.apiUp;
 
   const status = app.device?.status;
-  $("#device-register").hidden = !(app.online && status === "NOT_REGISTERED" && !app.device?.otherActiveDevice);
+  // A revoked device registers again only once an administrator approved it.
+  const reregister = status === "REVOKED" && !!app.device?.device?.reregistrationApprovedAt;
+  $("#device-register").hidden = !(app.online && (status === "NOT_REGISTERED" || reregister));
+  const active = app.device?.activeDevice;
   const blocked = !app.device
     ? "Connect to the internet once to set up this device."
-    : status === "REVOKED"
-      ? `This device was revoked by an administrator. Attendance can't be recorded from it.${
+    : status === "REVOKED" && !reregister
+      ? `This device was revoked by an administrator. Attendance can't be recorded from it. Ask an administrator to approve registering it again.${
           pendingCount() ? ` ${pendingCount()} unsynced event(s) from this device can't be uploaded; request a correction for those times.` : ""
         }`
-      : status === "NOT_REGISTERED" && app.device.otherActiveDevice
-        ? "Another device is already registered for your account. Ask an administrator to revoke it, then check again."
+      : status === "INACTIVE"
+        ? `Your account is signed in on ${active ? `${active.deviceName} (${active.platform === "macos" ? "macOS" : "Windows"})` : "another device"}. Sign out there, or sign out here and choose "Switch to this device".`
         : status === "NOT_REGISTERED" && !app.online
           ? "Connect to the internet to register this device."
           : null;
@@ -567,13 +573,17 @@ $<HTMLFormElement>("#login-form").addEventListener("submit", async (e) => {
   e.preventDefault();
   const form = e.currentTarget as HTMLFormElement; // currentTarget is null after the first await
   const data = new FormData(form);
+  // "Switch to this device" is its own submit button: the explicit, password-confirmed takeover.
+  const takeover = (e as SubmitEvent).submitter?.id === "login-switch";
   $<HTMLButtonElement>("#login-submit").disabled = true;
   loginError(null);
   try {
-    await client.login(String(data.get("email")), String(data.get("password")));
+    app.installationId ||= await installationId();
+    await client.login(String(data.get("email")), String(data.get("password")), app.installationId, takeover);
     form.reset();
     await enter(profileOf(await client.request<MeResponse>("GET", "/auth/me")), true);
   } catch (err) {
+    if (err instanceof HttpError && err.code === DEVICE_ERROR.ACTIVE_ON_ANOTHER_DEVICE) return loginError(err.message, true);
     loginError(
       err instanceof HttpError
         ? err.status === 429
@@ -599,6 +609,11 @@ $<HTMLFormElement>("#device-form").addEventListener("submit", async (e) => {
     await loadCurrent();
     await startSync();
   } catch (err) {
+    // Registered, but another device holds the sign-in: drop this provisional sign-in and offer the switch.
+    if (err instanceof HttpError && err.code === DEVICE_ERROR.ACTIVE_ON_ANOTHER_DEVICE) {
+      await signOut(true, `This device is now registered. ${err.message}`);
+      return loginError(`This device is now registered. ${err.message}`, true);
+    }
     $("#device-error").hidden = false;
     $("#device-error").textContent = err instanceof HttpError ? err.message : "Can't reach the server. Check your connection.";
   } finally {

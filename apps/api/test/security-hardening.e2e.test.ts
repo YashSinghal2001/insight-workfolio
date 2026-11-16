@@ -263,18 +263,20 @@ describe("devices", () => {
     const reg = await api("/devices/register", { method: "POST", bearer: desktop.body.accessToken, body: device });
     assert.equal(reg.status, 201, reg.text);
     assert.equal((await api("/attendance/clock-in", { method: "POST", cookie: e.cookie, headers: { "x-device-id": installationId, "idempotency-key": randomUUID() } })).status, 403, "still not from the browser, even with a real installation id");
-    // The last-seen update runs in a batch with the session binding (API-08).
+    // A later desktop sign-in (older app: no installation id) binds on its first device call; the binding
+    // re-checks the device inside its transaction (0031), so a revoke committed just before it wins.
+    const later = await api("/auth/login", { method: "POST", body: { email: e.email, password: PASSWORD, client: "desktop" } });
     const anyDb = db as unknown as { batch: (s: { sql: string }[], mode: string) => Promise<unknown> };
     const real = db.execute.bind(db);
     const realBatch = anyDb.batch.bind(db);
     anyDb.batch = async (stmts, mode) => {
-      if (stmts[0]?.sql.trimStart().startsWith("UPDATE devices SET last_seen_at")) {
+      if (stmts.some((s) => s.sql.trimStart().startsWith("UPDATE sessions SET device_id"))) {
         await real({ sql: "UPDATE devices SET revoked_at = ? WHERE id = ?", args: [iso(Date.now()), reg.body.id] });
       }
       return realBatch(stmts, mode);
     };
     try {
-      const me = await api("/devices/me", { cookie: e.cookie, headers: { "x-device-id": installationId } });
+      const me = await api("/devices/me", { bearer: later.body.accessToken, headers: { "x-device-id": installationId } });
       assert.equal(me.status, 403, me.text);
     } finally {
       anyDb.batch = realBatch;

@@ -97,7 +97,7 @@ test("device registration and revocation are audited once, with actor, and never
   assert.ok(!JSON.stringify(reg).includes("Alice"), "user-chosen device name is not audited");
 
   const second = await register(e, randomUUID());
-  assert.equal(second.status, 409, "one active device per employee");
+  assert.equal(second.status, 403, "a session bound to one device cannot enroll another");
   assert.equal((await audits("DEVICE_REGISTERED", e.userId)).length, 1, "refused device is not audited");
 
   const denied = await api(`/devices/${first.body.id}/revoke`, { method: "POST", bearer: e.bearer });

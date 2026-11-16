@@ -34,6 +34,12 @@ const ACTION_LABEL: Record<string, string> = {
   EMPLOYEE_SCREENSHOTS_VIEWED: "Employee screenshots viewed",
   EMPLOYEE_ACTIVITY_TIMELINE_VIEWED: "Employee activity timeline viewed",
   EMPLOYEE_ATTENDANCE_TIMELINE_VIEWED: "Employee attendance timeline viewed",
+  DEVICE_REREGISTRATION_APPROVED: "Device re-registration approved",
+  DEVICE_REREGISTERED: "Revoked device registered again",
+  DEVICE_SESSION_STARTED: "Signed in on a device",
+  DEVICE_SESSION_ENDED: "Device sign-in ended",
+  DEVICE_SESSION_TAKEOVER: "Sign-in switched from another device",
+  DEVICE_SESSION_REJECTED: "Device sign-in refused",
 };
 const SOURCE_TONE: Record<AuditSource, string> = {
   ACCOUNT: "bg-blue-500/15 text-blue-700 dark:text-blue-300",

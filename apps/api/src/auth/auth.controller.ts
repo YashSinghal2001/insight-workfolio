@@ -51,7 +51,10 @@ export class AuthController {
     @Req() req: Request,
     @Res({ passthrough: true }) res: Response,
   ): Promise<LoginResponse | DesktopLoginResponse> {
-    const session = await this.auth.login(body.email, body.password, req.ip ?? "unknown", body.client === "desktop" ? "DESKTOP" : "WEB");
+    const session = await this.auth.login(body.email, body.password, req.ip ?? "unknown", body.client === "desktop" ? "DESKTOP" : "WEB", {
+      installationId: body.installationId,
+      takeover: body.takeover,
+    });
     if (body.client === "desktop") return session;
     setAuthCookies(res, session, this.secureCookies);
     return { user: session.user };

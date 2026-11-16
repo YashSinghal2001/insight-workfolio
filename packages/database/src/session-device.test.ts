@@ -24,8 +24,8 @@ test("0023 keeps existing sessions (unbound) and links new ones to real devices 
     { id: "s2", user_id: "u1", refresh_token_hash: "x2", client: "WEB", revoked_at: null, device_id: null },
   ]);
 
-  await db.execute("UPDATE sessions SET device_id = 'd1' WHERE id = 's1'");
   await assert.rejects(db.execute("UPDATE sessions SET device_id = 'missing' WHERE id = 's2'"), /FOREIGN KEY/);
+  await db.execute("UPDATE sessions SET device_id = 'd1' WHERE id = 's1'");
   await assert.rejects(db.execute("DELETE FROM devices WHERE id = 'd1'"), (e) => guardViolation(e) === "append_only");
   const plan = (await db.execute("EXPLAIN QUERY PLAN UPDATE sessions SET revoked_at = 'now' WHERE device_id = 'd1' AND revoked_at IS NULL")).rows;
   assert.ok(JSON.stringify(plan).includes("sessions_device"), "revocation by device uses the index");

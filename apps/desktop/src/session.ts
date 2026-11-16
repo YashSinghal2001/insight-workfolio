@@ -10,9 +10,14 @@ export interface TokenStore {
 
 export class HttpError extends Error {
   readonly status: number;
-  constructor(status: number, message: string) {
+  /** ApiError.code, e.g. ACTIVE_ON_ANOTHER_DEVICE (see DEVICE_ERROR). */
+  readonly code: string | undefined;
+  readonly details: Record<string, unknown> | undefined;
+  constructor(status: number, message: string, code?: string, details?: Record<string, unknown>) {
     super(message);
     this.status = status;
+    this.code = code;
+    this.details = details;
   }
 }
 
@@ -49,14 +54,26 @@ export class ApiClient {
       signal,
     });
     if (!res.ok) {
-      const msg = await res.json().then((b: { message?: unknown }) => b.message, () => undefined);
-      throw new HttpError(res.status, Array.isArray(msg) ? msg.join("; ") : typeof msg === "string" ? msg : `HTTP ${res.status}`);
+      const b = (await res.json().catch(() => ({}))) as { message?: unknown; code?: unknown; details?: unknown };
+      const msg = b.message;
+      throw new HttpError(
+        res.status,
+        Array.isArray(msg) ? msg.join("; ") : typeof msg === "string" ? msg : `HTTP ${res.status}`,
+        typeof b.code === "string" ? b.code : undefined,
+        b.details && typeof b.details === "object" ? (b.details as Record<string, unknown>) : undefined,
+      );
     }
     return res.status === 204 ? undefined : as === "response" ? res : as === "blob" ? res.blob() : res.json();
   }
 
-  async login(email: string, password: string): Promise<DesktopLoginResponse> {
-    const session = (await this.send("POST", "/auth/login", { email, password, client: "desktop" })) as DesktopLoginResponse;
+  /**
+   * Signs in as this installation: a registered device becomes the account's active device, or the server
+   * refuses with 409 ACTIVE_ON_ANOTHER_DEVICE (one active device). `takeover` is the user's explicit
+   * "switch to this device", which signs the other device out.
+   */
+  async login(email: string, password: string, installationId?: string, takeover = false): Promise<DesktopLoginResponse> {
+    const body = { email, password, client: "desktop", ...(installationId && { installationId }), ...(takeover && { takeover: true }) };
+    const session = (await this.send("POST", "/auth/login", body)) as DesktopLoginResponse;
     this.accessToken = session.accessToken;
     await this.tokens.save(session.refreshToken);
     return session;
