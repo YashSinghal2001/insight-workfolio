@@ -1,0 +1,151 @@
+# Publish desktop installers to the VPS downloads page (docs/desktop/DESKTOP-PUBLISH-PIPELINE.md).
+#
+# Trigger: pushing an approved tag `desktop-vX.Y.Z` (tag creation restricted by a repository ruleset) whose
+# commit is on deploy/hostinger-vps. Pipeline per platform, each independent of the other:
+#   build + tests + signing + version/arch check (desktop-build.yml, environment `production`)
+#   -> manual approval (environment `desktop-downloads`, required reviewers; it holds ONLY the SSH key)
+#   -> upload to the restricted receiver (never overwrites) -> verify public https URL -> activate manifest
+#   -> verify public manifest
+# then a release report (job summary + artifact) for both platforms.
+#
+# Never: root SSH, a shell on the VPS, a dashboard/API deploy, a service restart, a database migration.
+#
+# Environment `desktop-downloads`:
+#   secrets: DESKTOP_PUBLISH_SSH_KEY (ed25519 private key of workfolio-publisher),
+#            DESKTOP_PUBLISH_KNOWN_HOSTS (the VPS host key line; host key checking is strict)
+#   vars:    DESKTOP_DOWNLOADS_ORIGIN (https://189.72.144.117), DESKTOP_PUBLISH_SSH_TARGET (workfolio-publisher@189.72.144.117)
+name: Desktop publish (VPS downloads)
+
+on:
+  push:
+    tags: ["desktop-v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-publish
+  cancel-in-progress: false
+
+jobs:
+  guard:
+    name: Tag and branch checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.tag.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: tag
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          [[ "$TAG" =~ ^desktop-v((0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*))$ ]] || { echo "::error::tag $TAG is not desktop-vMAJOR.MINOR.PATCH"; exit 1; }
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/deploy/hostinger-vps \
+            || { echo "::error::$GITHUB_SHA is not on deploy/hostinger-vps; only production commits are published"; exit 1; }
+          echo "version=${BASH_REMATCH[1]}" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: guard
+    uses: ./.github/workflows/desktop-build.yml
+    with:
+      environment: production
+      version: ${{ needs.guard.outputs.version }}
+      macos_universal: true
+    secrets: inherit
+
+  publish:
+    name: Publish ${{ matrix.platform }}
+    needs: [guard, build]
+    # Run each platform even when the other one's build failed; its own artifact decides.
+    if: ${{ !cancelled() && needs.guard.result == 'success' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { platform: windows, os: windows-latest }
+          - { platform: macos, os: macos-latest }
+    runs-on: ubuntu-latest
+    environment: desktop-downloads
+    timeout-minutes: 30
+    env:
+      VERSION: ${{ needs.guard.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: deploy/scripts
+      - uses: actions/download-artifact@v4
+        with:
+          name: desktop-production-${{ needs.guard.outputs.version }}-${{ matrix.os }}
+          path: in
+      - name: Publish
+        env:
+          EXPECTED_PLATFORM: ${{ matrix.platform }}
+          EXPECTED_VERSION: ${{ needs.guard.outputs.version }}
+          COMMIT: ${{ github.sha }}
+          DESKTOP_DOWNLOADS_ORIGIN: ${{ vars.DESKTOP_DOWNLOADS_ORIGIN }}
+          DESKTOP_PUBLISH_SSH_TARGET: ${{ vars.DESKTOP_PUBLISH_SSH_TARGET }}
+          SSH_KEY: ${{ secrets.DESKTOP_PUBLISH_SSH_KEY }}
+          KNOWN_HOSTS: ${{ secrets.DESKTOP_PUBLISH_KNOWN_HOSTS }}
+        run: |
+          umask 077
+          export DESKTOP_PUBLISH_SSH_KEY_FILE="$RUNNER_TEMP/publish_key" DESKTOP_PUBLISH_KNOWN_HOSTS_FILE="$RUNNER_TEMP/known_hosts"
+          trap 'rm -f "$DESKTOP_PUBLISH_SSH_KEY_FILE"' EXIT
+          printf '%s\n' "$SSH_KEY" > "$DESKTOP_PUBLISH_SSH_KEY_FILE"
+          printf '%s\n' "$KNOWN_HOSTS" > "$DESKTOP_PUBLISH_KNOWN_HOSTS_FILE"
+          file=$(jq -er .file in/installer.json)
+          [[ "$file" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || { echo "::error::bad file name in installer.json"; exit 1; }
+          bash deploy/scripts/desktop-publish.sh in/installer.json "in/$file" "$RUNNER_TEMP/result.json"
+      - name: Record result
+        if: ${{ always() }}
+        run: |
+          [ -f "$RUNNER_TEMP/result.json" ] || jq -n --arg p "${{ matrix.platform }}" --arg v "$VERSION" --arg c "$GITHUB_SHA" \
+            '{platform:$p, version:$v, commit:$c, file:"", sha256:"", sizeBytes:null, url:"", status:"not published (no verified build artifact)"}' > "$RUNNER_TEMP/result.json"
+          cat "$RUNNER_TEMP/result.json"
+      - uses: actions/upload-artifact@v4
+        if: ${{ always() }}
+        with:
+          name: publish-result-${{ matrix.platform }}
+          path: ${{ runner.temp }}/result.json
+
+  report:
+    name: Release report
+    needs: [guard, build, publish]
+    if: ${{ always() && needs.guard.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: publish-result-*
+          path: results
+      - name: Report
+        env:
+          VERSION: ${{ needs.guard.outputs.version }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          for p in windows macos; do
+            f=results/publish-result-$p/result.json
+            if [ -f "$f" ]; then cat "$f"; else
+              jq -n --arg p "$p" --arg v "$VERSION" --arg c "$GITHUB_SHA" \
+                '{platform:$p, version:$v, commit:$c, file:"", sha256:"", sizeBytes:null, url:"", status:"not published (build failed, approval rejected or job cancelled)"}'
+            fi
+          done | jq -s --arg tag "$GITHUB_REF_NAME" --arg run "$RUN_URL" '{tag:$tag, run:$run, platforms:.}' > release-report.json
+          {
+            echo "## Desktop release report: $GITHUB_REF_NAME"
+            echo "Commit \`$GITHUB_SHA\` · [run]($RUN_URL)"
+            echo
+            echo "| Platform | Version | Status | File | Size | SHA-256 | URL |"
+            echo "|---|---|---|---|---|---|---|"
+            jq -r '.platforms | sort_by(.platform)[] | "| \(.platform) | \(.version) | \(.status) | \(.file) | \(.sizeBytes // "") | `\(.sha256)` | \(.url) |"' release-report.json
+          } | tee release-report.md >> "$GITHUB_STEP_SUMMARY"
+          jq -e '[.platforms[] | select(.status == "published")] | length == 2' release-report.json >/dev/null \
+            || { echo "::warning::not every platform was published; see the table"; }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-report-${{ needs.guard.outputs.version }}
+          path: |
+            release-report.json
+            release-report.md

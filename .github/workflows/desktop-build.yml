@@ -1,0 +1,169 @@
+# Reusable: build, test, sign and VERIFY the desktop packages for one environment. Called by
+# desktop-release.yml (GitHub pre-release for the in-app updater) and desktop-publish.yml (VPS downloads).
+# No concurrency group here: the callers own it (a shared group between caller and callee deadlocks).
+#
+# Platforms are independent (fail-fast off): a failed macOS build does not cancel Windows, and vice versa.
+# Each platform uploads artifact desktop-<environment>-<version>-<os> holding the renamed packages plus
+# installer.json: { platform, file, version, arch, sizeBytes, sha256, commit } of the downloadable installer,
+# written only after its version and architecture were checked from the built bytes.
+#
+# Secrets/variables come from the GitHub Environment `environment` (see desktop-release.yml for the list).
+name: Desktop build (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        type: string
+        required: true
+      version:
+        type: string
+        required: true
+      macos_universal:
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build ${{ matrix.os }}
+    environment: ${{ inputs.environment }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    env:
+      VERSION: ${{ inputs.version }}
+      WORKFOLIO_ENV: ${{ inputs.environment }}
+      WORKFOLIO_API_URL: ${{ vars.WORKFOLIO_API_URL }}
+      WORKFOLIO_DASHBOARD_URL: ${{ vars.WORKFOLIO_DASHBOARD_URL }}
+      WORKFOLIO_UPDATER_PUBKEY: ${{ vars.WORKFOLIO_UPDATER_PUBKEY }}
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+      MAC_TARGET: ${{ inputs.macos_universal && 'universal' || 'aarch64' }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Version and configuration checks
+        run: |
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "version must be MAJOR.MINOR.PATCH"; exit 1; }
+          v=$(node -p 'require("./apps/desktop/src-tauri/tauri.conf.json").version')
+          [ "$v" = "$VERSION" ] || { echo "tauri.conf.json is $v, not $VERSION"; exit 1; }
+          [ "$(node -p 'require("./apps/desktop/package.json").version')" = "$v" ] || { echo "package.json version differs"; exit 1; }
+          grep -q "^version = \"$v\"" apps/desktop/src-tauri/Cargo.toml || { echo "Cargo.toml version differs"; exit 1; }
+          [ -n "$WORKFOLIO_UPDATER_PUBKEY" ] && [ -n "$TAURI_SIGNING_PRIVATE_KEY" ] || { echo "Updater key pair missing in environment $WORKFOLIO_ENV"; exit 1; }
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.os == 'macos-latest' && inputs.macos_universal && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/desktop/src-tauri
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build:packages
+      - run: pnpm --filter @workfolio/desktop build
+      - name: Tests
+        run: |
+          pnpm --filter @workfolio/desktop exec node --test
+          cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml
+      - name: macOS notarization key (if configured)
+        if: matrix.os == 'macos-latest'
+        env:
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+        run: |
+          [ -n "$APPLE_API_KEY_P8" ] || { echo "No notarization key: unsigned/un-notarized macOS build (test only)"; exit 0; }
+          mkdir -p "$RUNNER_TEMP/apple" && echo "$APPLE_API_KEY_P8" | base64 --decode > "$RUNNER_TEMP/apple/key.p8"
+          echo "APPLE_API_KEY_PATH=$RUNNER_TEMP/apple/key.p8" >> "$GITHUB_ENV"
+      - name: Build signed packages (macOS)
+        if: matrix.os == 'macos-latest'
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+        run: pnpm --filter @workfolio/desktop package -- --bundles app,dmg ${{ inputs.macos_universal && '--target universal-apple-darwin' || '' }}
+      - name: Build signed packages (Windows)
+        if: matrix.os == 'windows-latest'
+        env:
+          AZURE_TRUSTED_SIGNING_ENDPOINT: ${{ secrets.AZURE_TRUSTED_SIGNING_ENDPOINT }}
+          AZURE_TRUSTED_SIGNING_ACCOUNT: ${{ secrets.AZURE_TRUSTED_SIGNING_ACCOUNT }}
+          AZURE_TRUSTED_SIGNING_PROFILE: ${{ secrets.AZURE_TRUSTED_SIGNING_PROFILE }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+        run: pnpm --filter @workfolio/desktop package -- --bundles nsis
+      # Stable, space-free names. Renaming does not affect the signature (it covers the bytes). Tauri's own
+      # names carry version and target, so matching them exactly is the first version/architecture check.
+      - name: Collect packages
+        run: |
+          v=$VERSION; out=release; mkdir -p $out
+          if [ "${{ matrix.os }}" = "macos-latest" ]; then
+            t=$MAC_TARGET
+            dir=apps/desktop/src-tauri/target/$([ "$t" = universal ] && echo universal-apple-darwin/)release/bundle
+            tgz=$(ls "$dir"/macos/*.app.tar.gz | head -1)
+            cp "$tgz" "$out/insight-workfolio_${v}_darwin-$t.app.tar.gz"
+            cp "$tgz.sig" "$out/insight-workfolio_${v}_darwin-$t.app.tar.gz.sig"
+            dmg=("$dir"/dmg/*_"${v}"_"$t".dmg); [ ${#dmg[@]} = 1 ] && [ -f "${dmg[0]}" ] || { echo "no single *_${v}_$t.dmg in $dir/dmg"; ls "$dir/dmg"; exit 1; }
+            cp "${dmg[0]}" "$out/insight-workfolio_${v}_macos-$t.dmg"
+          else
+            dir=apps/desktop/src-tauri/target/release/bundle/nsis
+            exe=("$dir"/*_"${v}"_x64-setup.exe); [ ${#exe[@]} = 1 ] && [ -f "${exe[0]}" ] || { echo "no single *_${v}_x64-setup.exe in $dir"; ls "$dir"; exit 1; }
+            cp "${exe[0]}" "$out/insight-workfolio_${v}_windows-x86_64-setup.exe"
+            cp "${exe[0]}.sig" "$out/insight-workfolio_${v}_windows-x86_64-setup.exe.sig"
+          fi
+          ls -l $out
+          (cd $out && (sha256sum * 2>/dev/null || shasum -a 256 *)) | tee -a "$GITHUB_STEP_SUMMARY"
+      # Read version and CPU architecture from the built bytes, not from configuration.
+      - name: Verify installer (macOS)
+        if: matrix.os == 'macos-latest'
+        run: |
+          dmg=release/insight-workfolio_${VERSION}_macos-$MAC_TARGET.dmg
+          mnt=$(mktemp -d); hdiutil attach -nobrowse -readonly -mountpoint "$mnt" "$dmg" >/dev/null
+          trap 'hdiutil detach "$mnt" -quiet || true' EXIT
+          apps=("$mnt"/*.app); [ ${#apps[@]} = 1 ] || { echo "expected one .app in the dmg"; exit 1; }
+          plist="${apps[0]}/Contents/Info.plist"
+          ver=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$plist")
+          exe=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$plist")
+          archs=$(lipo -archs "${apps[0]}/Contents/MacOS/$exe" | tr ' ' '\n' | sort | xargs)
+          echo "dmg app version $ver, architectures: $archs"
+          [ "$ver" = "$VERSION" ] || { echo "app in dmg is $ver, not $VERSION"; exit 1; }
+          want=$([ "$MAC_TARGET" = universal ] && echo "arm64 x86_64" || echo arm64)
+          [ "$archs" = "$want" ] || { echo "architectures '$archs', expected '$want'"; exit 1; }
+      - name: Verify installer (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: >-
+          ./deploy/scripts/verify-windows-installer.ps1
+          -Installer "release/insight-workfolio_$($env:VERSION)_windows-x86_64-setup.exe"
+          -App apps/desktop/src-tauri/target/release/insight-workfolio-desktop.exe
+          -Version $env:VERSION
+      - name: Installer metadata
+        env:
+          PLATFORM: ${{ matrix.os == 'macos-latest' && 'macos' || 'windows' }}
+          ARCH: ${{ matrix.os == 'macos-latest' && (inputs.macos_universal && 'universal' || 'aarch64') || 'x86_64' }}
+          FILE: ${{ matrix.os == 'macos-latest' && format('insight-workfolio_{0}_macos-{1}.dmg', inputs.version, inputs.macos_universal && 'universal' || 'aarch64') || format('insight-workfolio_{0}_windows-x86_64-setup.exe', inputs.version) }}
+          COMMIT: ${{ github.sha }}
+        run: |
+          node -e '
+            const fs = require("fs"), crypto = require("crypto"), e = process.env;
+            const bytes = fs.readFileSync("release/" + e.FILE);
+            const meta = { platform: e.PLATFORM, file: e.FILE, version: e.VERSION, arch: e.ARCH, sizeBytes: bytes.length,
+              sha256: crypto.createHash("sha256").update(bytes).digest("hex"), commit: e.COMMIT };
+            fs.writeFileSync("release/installer.json", JSON.stringify(meta, null, 2) + "\n");
+            console.log(meta);'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: desktop-${{ inputs.environment }}-${{ inputs.version }}-${{ matrix.os }}
+          path: release/
+          if-no-files-found: error

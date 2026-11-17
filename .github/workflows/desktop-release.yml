@@ -35,102 +35,14 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Build, tests, signing and installer verification live in desktop-build.yml (shared with desktop-publish.yml).
   build:
-    name: Build ${{ matrix.os }}
-    environment: ${{ inputs.environment }}
-    strategy:
-      fail-fast: true
-      matrix:
-        os: [macos-latest, windows-latest]
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 90
-    defaults:
-      run:
-        shell: bash
-    env:
-      WORKFOLIO_ENV: ${{ inputs.environment }}
-      WORKFOLIO_API_URL: ${{ vars.WORKFOLIO_API_URL }}
-      WORKFOLIO_DASHBOARD_URL: ${{ vars.WORKFOLIO_DASHBOARD_URL }}
-      WORKFOLIO_UPDATER_PUBKEY: ${{ vars.WORKFOLIO_UPDATER_PUBKEY }}
-      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-    steps:
-      - uses: actions/checkout@v4
-      - name: Version and configuration checks
-        run: |
-          v=$(node -p 'require("./apps/desktop/src-tauri/tauri.conf.json").version')
-          [ "$v" = "${{ inputs.version }}" ] || { echo "tauri.conf.json is $v, not ${{ inputs.version }}"; exit 1; }
-          [ "$(node -p 'require("./apps/desktop/package.json").version')" = "$v" ] || { echo "package.json version differs"; exit 1; }
-          grep -q "^version = \"$v\"" apps/desktop/src-tauri/Cargo.toml || { echo "Cargo.toml version differs"; exit 1; }
-          [ -n "$WORKFOLIO_UPDATER_PUBKEY" ] && [ -n "$TAURI_SIGNING_PRIVATE_KEY" ] || { echo "Updater key pair missing in environment ${{ inputs.environment }}"; exit 1; }
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 24
-          cache: pnpm
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.os == 'macos-latest' && inputs.macos_universal && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: apps/desktop/src-tauri
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm build:packages
-      - run: pnpm --filter @workfolio/desktop build
-      - name: Tests
-        run: |
-          pnpm --filter @workfolio/desktop exec node --test
-          cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml
-      - name: macOS notarization key (if configured)
-        if: matrix.os == 'macos-latest'
-        env:
-          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
-        run: |
-          [ -n "$APPLE_API_KEY_P8" ] || { echo "No notarization key: unsigned/un-notarized macOS build (test only)"; exit 0; }
-          mkdir -p "$RUNNER_TEMP/apple" && echo "$APPLE_API_KEY_P8" | base64 --decode > "$RUNNER_TEMP/apple/key.p8"
-          echo "APPLE_API_KEY_PATH=$RUNNER_TEMP/apple/key.p8" >> "$GITHUB_ENV"
-      - name: Build signed packages (macOS)
-        if: matrix.os == 'macos-latest'
-        env:
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
-          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
-        run: pnpm --filter @workfolio/desktop package -- --bundles app,dmg ${{ inputs.macos_universal && '--target universal-apple-darwin' || '' }}
-      - name: Build signed packages (Windows)
-        if: matrix.os == 'windows-latest'
-        env:
-          AZURE_TRUSTED_SIGNING_ENDPOINT: ${{ secrets.AZURE_TRUSTED_SIGNING_ENDPOINT }}
-          AZURE_TRUSTED_SIGNING_ACCOUNT: ${{ secrets.AZURE_TRUSTED_SIGNING_ACCOUNT }}
-          AZURE_TRUSTED_SIGNING_PROFILE: ${{ secrets.AZURE_TRUSTED_SIGNING_PROFILE }}
-          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
-          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
-          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
-        run: pnpm --filter @workfolio/desktop package -- --bundles nsis
-      # Stable, space-free names. Renaming does not affect the signature (it covers the bytes).
-      - name: Collect packages
-        run: |
-          v=${{ inputs.version }}; out=release; mkdir -p $out
-          if [ "${{ matrix.os }}" = "macos-latest" ]; then
-            t=$([ "${{ inputs.macos_universal }}" = "true" ] && echo universal || echo aarch64)
-            dir=apps/desktop/src-tauri/target/$([ "$t" = universal ] && echo universal-apple-darwin/)release/bundle
-            tgz=$(ls "$dir"/macos/*.app.tar.gz | head -1)
-            cp "$tgz" "$out/insight-workfolio_${v}_darwin-$t.app.tar.gz"
-            cp "$tgz.sig" "$out/insight-workfolio_${v}_darwin-$t.app.tar.gz.sig"
-            cp "$(ls "$dir"/dmg/*.dmg | head -1)" "$out/insight-workfolio_${v}_macos-$t.dmg"
-          else
-            exe=$(ls apps/desktop/src-tauri/target/release/bundle/nsis/*-setup.exe | head -1)
-            cp "$exe" "$out/insight-workfolio_${v}_windows-x86_64-setup.exe"
-            cp "$exe.sig" "$out/insight-workfolio_${v}_windows-x86_64-setup.exe.sig"
-          fi
-          ls -l $out
-          (cd $out && (sha256sum * 2>/dev/null || shasum -a 256 *)) | tee -a "$GITHUB_STEP_SUMMARY"
-      - uses: actions/upload-artifact@v4
-        with:
-          name: desktop-${{ inputs.environment }}-${{ inputs.version }}-${{ matrix.os }}
-          path: release/
-          if-no-files-found: error
+    uses: ./.github/workflows/desktop-build.yml
+    with:
+      environment: ${{ inputs.environment }}
+      version: ${{ inputs.version }}
+      macos_universal: ${{ inputs.macos_universal }}
+    secrets: inherit
 
   prerelease:
     name: Attach to a GitHub pre-release (not visible to employees)
@@ -149,6 +61,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: desktop-${{ inputs.environment }}-v${{ inputs.version }}
         run: |
+          rm -f release/installer.json # per-platform build metadata (desktop-build.yml), not a release asset
           gh release create "$TAG" release/* --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --prerelease \
             --title "Desktop ${{ inputs.version }} (${{ inputs.environment }} candidate)" \
             --notes "Release candidate. Not offered to employees until published in the dashboard (Desktop app updates)."

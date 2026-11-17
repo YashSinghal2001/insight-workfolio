@@ -1,15 +1,17 @@
 "use client";
 
-import type { ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { Button, StatusBadge } from "@/components/kit";
 import { dayLabel } from "@/components/my-ui";
 import { Card, Notice, buttonClass } from "@/components/ui";
-import releases from "@/lib/desktop-releases.json";
+import bundled from "@/lib/desktop-releases.json";
 
 /**
- * A verified installer in public/downloads/ (served as /downloads/<file>). An entry is added to
- * src/lib/desktop-releases.json only together with its file; scripts/smoke.mjs fails when the file is
- * missing or its size or SHA-256 differ. null = no verified installer: the card says so, with no link.
+ * A verified installer. Source of truth on the VPS: /desktop-downloads/desktop-releases.json, written only by the
+ * publish pipeline after upload and HTTPS verification (deploy/scripts/desktop-downloads-receiver.py). The bundled
+ * src/lib/desktop-releases.json is the fallback when that is unreachable or malformed (local dev, before the
+ * Caddy route exists). Bundled entries without href are files in public/downloads/, checked by scripts/smoke.mjs.
+ * null = no verified installer: the card says so, with no link.
  */
 interface Release {
   version: string;
@@ -52,10 +54,45 @@ const PLATFORMS: { id: "macos" | "windows"; name: string; ext: string; requires:
   },
 ];
 
+const MANIFEST_URL = "/desktop-downloads/desktop-releases.json";
+const HREF = /^\/desktop-downloads\/[A-Za-z0-9][A-Za-z0-9._-]*\.(exe|dmg)$/;
+const FILE = /^[\w.-]+\.(dmg|exe)$/;
+
+/** Only a well-formed entry with a same-origin installer link is shown; anything else is ignored. */
+function asRelease(x: unknown): Release | null {
+  if (!x || typeof x !== "object") return null;
+  const r = x as Record<string, unknown>;
+  const ok =
+    typeof r.version === "string" && /^\d+\.\d+\.\d+$/.test(r.version) &&
+    typeof r.releasedAt === "string" && /^\d{4}-\d{2}-\d{2}$/.test(r.releasedAt) &&
+    typeof r.file === "string" && FILE.test(r.file) &&
+    (r.href === undefined || (typeof r.href === "string" && HREF.test(r.href))) &&
+    typeof r.arch === "string" && r.arch.length <= 80 &&
+    typeof r.sizeBytes === "number" && Number.isSafeInteger(r.sizeBytes) && r.sizeBytes > 0 &&
+    typeof r.sha256 === "string" && /^[0-9a-f]{64}$/.test(r.sha256);
+  return ok ? { version: r.version, releasedAt: r.releasedAt, file: r.file, href: r.href, arch: r.arch, sizeBytes: r.sizeBytes, sha256: r.sha256 } as Release : null;
+}
+
+/** The published manifest when reachable and valid per platform; the bundled copy otherwise. */
+function useReleases(): Record<string, Release | null> {
+  const [live, setLive] = useState<Record<string, unknown> | null>(null);
+  useEffect(() => {
+    let active = true;
+    fetch(MANIFEST_URL, { cache: "no-store" })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((j: unknown) => { if (active && j && typeof j === "object") setLive(j as Record<string, unknown>); })
+      .catch(() => {});
+    return () => { active = false; };
+  }, []);
+  const fallback = bundled as Record<string, unknown>;
+  return Object.fromEntries(PLATFORMS.map((p) => [p.id, asRelease(live?.[p.id]) ?? asRelease(fallback[p.id])]));
+}
+
 const mb = (bytes: number) => `${(bytes / 1_048_576).toFixed(1)} MB`;
 
 /** Desktop app downloads on the employee dashboard: one card per platform, from the verified release manifest. */
 export function DesktopDownloads() {
+  const releases = useReleases();
   return (
     <section aria-label="Desktop app" className="mb-6">
       <h2 className="text-lg font-semibold">Desktop app</h2>
@@ -65,7 +102,7 @@ export function DesktopDownloads() {
       </p>
       <div className="grid gap-4 md:grid-cols-2">
         {PLATFORMS.map((p) => {
-          const r = (releases as Record<string, Release | null>)[p.id] ?? null;
+          const r = releases[p.id] ?? null;
           return (
             <Card key={p.id} title={p.name} actions={<StatusBadge tone={r ? "success" : "neutral"}>{r ? `Version ${r.version}` : "Not available yet"}</StatusBadge>}>
               <div data-platform={p.id} className="flex flex-col gap-3 text-sm">

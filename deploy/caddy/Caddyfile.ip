@@ -47,12 +47,20 @@
 	}
 
 	# Desktop installers hosted on the VPS, kept out of the public git repository. Only top-level .exe/.dmg
-	# files in /srv/workfolio-downloads (root-owned, 755/644) are served; no listing, nothing else.
+	# files in /srv/workfolio-downloads (folder root:workfolio-publisher 1775, files 644) and its
+	# desktop-releases.json manifest are served; no listing, nothing else.
 	handle_path /desktop-downloads/* {
 		root * /srv/workfolio-downloads
 		@installer path_regexp ^/[A-Za-z0-9][A-Za-z0-9._-]*\.(exe|dmg)$
 		handle @installer {
 			header Content-Disposition attachment
+			header X-Content-Type-Options nosniff
+			header Cache-Control no-cache
+			file_server
+		}
+		# Runtime release manifest the dashboard reads (written atomically by the publisher receiver).
+		@manifest path /desktop-releases.json
+		handle @manifest {
 			header X-Content-Type-Options nosniff
 			header Cache-Control no-cache
 			file_server

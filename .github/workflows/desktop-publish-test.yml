@@ -1,0 +1,107 @@
+# Tests of the desktop publish pipeline on DISPOSABLE GitHub runners. No secrets, no environments, no network
+# access to the VPS: everything (sshd, Caddy, the publisher account) is created on the runner and thrown away.
+#   linux:   local selftest + real sshd/forced-command/sticky-bit/Caddy test (desktop-publish-sshtest.sh)
+#   windows: builds the UNSIGNED placeholder NSIS installer (as ci.yml) and runs verify-windows-installer.ps1,
+#            including the cases it must reject
+#   lint:    actionlint over every workflow
+name: Desktop publish pipeline tests
+
+on:
+  push:
+    paths:
+      - deploy/scripts/desktop-*
+      - deploy/scripts/install-desktop-publisher.sh
+      - deploy/scripts/verify-windows-installer.ps1
+      - deploy/caddy/**
+      - apps/dashboard/src/app/my/_components/desktop-downloads.tsx
+      - .github/workflows/desktop-*.yml
+  pull_request:
+    paths:
+      - deploy/scripts/desktop-*
+      - deploy/scripts/install-desktop-publisher.sh
+      - deploy/scripts/verify-windows-installer.ps1
+      - deploy/caddy/**
+      - apps/dashboard/src/app/my/_components/desktop-downloads.tsx
+      - .github/workflows/desktop-*.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-publish-test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux:
+    name: Receiver, client, real sshd, sticky bit, Caddy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      # Caddy from its official repository, as deploy/scripts/install-vps.sh installs it on the VPS.
+      - name: Install Caddy, sshd, jq
+        run: |
+          curl -1sLf https://dl.cloudsmith.io/public/caddy/stable/gpg.key | sudo gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+          curl -1sLf https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt | sudo tee /etc/apt/sources.list.d/caddy-stable.list >/dev/null
+          sudo apt-get update -q && sudo apt-get install -y -q caddy openssh-server jq
+          sudo systemctl stop caddy || true
+          caddy version; ssh -V
+      - name: Local selftest (fake ssh)
+        run: bash deploy/scripts/desktop-publish-selftest.sh
+      - name: Real sshd test (disposable runner)
+        run: sudo DESKTOP_PUBLISH_SSHTEST_DISPOSABLE=yes bash deploy/scripts/desktop-publish-sshtest.sh
+
+  windows:
+    name: Windows installer version and architecture check
+    runs-on: windows-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/desktop/src-tauri
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build:packages
+      - run: pnpm --filter @workfolio/desktop build
+      - name: Build UNSIGNED placeholder NSIS installer (never distributed)
+        env:
+          WORKFOLIO_API_URL: https://api.example.invalid
+          WORKFOLIO_DASHBOARD_URL: https://app.example.invalid
+        run: pnpm --filter @workfolio/desktop package -- --bundles nsis
+      - name: verify-windows-installer.ps1 accepts the real build and rejects wrong ones
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $v = node -p 'require("./apps/desktop/src-tauri/tauri.conf.json").version'
+          $installer = (Get-ChildItem "apps/desktop/src-tauri/target/release/bundle/nsis/*_${v}_x64-setup.exe").FullName
+          $app = "apps/desktop/src-tauri/target/release/insight-workfolio-desktop.exe"
+          ./deploy/scripts/verify-windows-installer.ps1 -Installer $installer -App $app -Version $v
+          function Expect-Reject($label, [scriptblock] $run) {
+            $failed = $false
+            try { & $run } catch { $failed = $true; Write-Host "rejected as expected ($label): $_" }
+            if (-not $failed) { throw "NOT rejected: $label" }
+          }
+          Expect-Reject 'wrong version' { ./deploy/scripts/verify-windows-installer.ps1 -Installer $installer -App $app -Version '9.9.9' }
+          Expect-Reject '32-bit binary as app (the NSIS stub)' { ./deploy/scripts/verify-windows-installer.ps1 -Installer $installer -App $installer -Version $v }
+          Set-Content -Path "$env:RUNNER_TEMP/not-pe.exe" -Value 'not a PE file'
+          Expect-Reject 'non-PE file' { ./deploy/scripts/verify-windows-installer.ps1 -Installer $installer -App "$env:RUNNER_TEMP/not-pe.exe" -Version $v }
+
+  lint:
+    name: actionlint
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker://rhysd/actionlint:1.7.7
+        with:
+          args: -color
