@@ -42,10 +42,11 @@ eff=$(sshd -T -C "user=$user,host=localhost,addr=127.0.0.1")
 for o in "forcecommand $receiver" "permittty no" "allowtcpforwarding no" "allowagentforwarding no" "x11forwarding no" "permittunnel no" "authenticationmethods publickey" "disableforwarding yes"; do
   check "sshd effective for $user: $o" grep -qx "$o" <<<"$eff"
 done
-check "other users unaffected (no forcecommand for root)" bash -c "! sshd -T -C user=root,host=localhost,addr=127.0.0.1 | grep -q '^forcecommand'"
+check "other users unaffected (forcecommand none for root)" bash -c "sshd -T -C user=root,host=localhost,addr=127.0.0.1 | grep -qx 'forcecommand none'"
 check "re-running the installer is safe" bash "$here/install-desktop-publisher.sh" "$tmp/key.pub"
 
-ssh-keyscan -q -t ed25519 127.0.0.1 > "$tmp/known_hosts"
+ssh-keyscan -t ed25519 127.0.0.1 > "$tmp/known_hosts" 2>/dev/null
+check "host key scanned" test -s "$tmp/known_hosts"
 S=(ssh -i "$tmp/key" -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$tmp/known_hosts" -o ConnectTimeout=10)
 T="$user@127.0.0.1"
 
