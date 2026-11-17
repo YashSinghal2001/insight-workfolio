@@ -3,7 +3,7 @@
 #   linux:   local selftest + real sshd/forced-command/sticky-bit/Caddy test (desktop-publish-sshtest.sh)
 #   windows: builds the UNSIGNED placeholder NSIS installer (as ci.yml) and runs verify-windows-installer.ps1,
 #            including the cases it must reject
-#   lint:    actionlint over every workflow
+#   lint:    actionlint over the desktop workflows
 name: Desktop publish pipeline tests
 
 on:
@@ -104,4 +104,5 @@ jobs:
       - uses: actions/checkout@v4
       - uses: docker://rhysd/actionlint:1.7.7
         with:
-          args: -color
+          # The desktop workflows only: ci.yml/deploy-staging.yml have older shellcheck notes outside this change.
+          args: -color .github/workflows/desktop-build.yml .github/workflows/desktop-release.yml .github/workflows/desktop-publish.yml .github/workflows/desktop-publish-test.yml

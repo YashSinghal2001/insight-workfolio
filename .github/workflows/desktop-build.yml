@@ -57,7 +57,7 @@ jobs:
           [ "$v" = "$VERSION" ] || { echo "tauri.conf.json is $v, not $VERSION"; exit 1; }
           [ "$(node -p 'require("./apps/desktop/package.json").version')" = "$v" ] || { echo "package.json version differs"; exit 1; }
           grep -q "^version = \"$v\"" apps/desktop/src-tauri/Cargo.toml || { echo "Cargo.toml version differs"; exit 1; }
-          [ -n "$WORKFOLIO_UPDATER_PUBKEY" ] && [ -n "$TAURI_SIGNING_PRIVATE_KEY" ] || { echo "Updater key pair missing in environment $WORKFOLIO_ENV"; exit 1; }
+          if [ -z "$WORKFOLIO_UPDATER_PUBKEY" ] || [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then echo "Updater key pair missing in environment $WORKFOLIO_ENV"; exit 1; fi
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
@@ -108,22 +108,24 @@ jobs:
       - name: Collect packages
         run: |
           v=$VERSION; out=release; mkdir -p $out
+          # one(): exactly one existing file matches the glob, else stop and show the folder.
+          one() { if [ $# != 1 ] || [ ! -f "$1" ]; then echo "expected exactly one match, got: $*" >&2; exit 1; fi; echo "$1"; }
           if [ "${{ matrix.os }}" = "macos-latest" ]; then
             t=$MAC_TARGET
             dir=apps/desktop/src-tauri/target/$([ "$t" = universal ] && echo universal-apple-darwin/)release/bundle
-            tgz=$(ls "$dir"/macos/*.app.tar.gz | head -1)
+            tgz=$(one "$dir"/macos/*.app.tar.gz)
             cp "$tgz" "$out/insight-workfolio_${v}_darwin-$t.app.tar.gz"
             cp "$tgz.sig" "$out/insight-workfolio_${v}_darwin-$t.app.tar.gz.sig"
-            dmg=("$dir"/dmg/*_"${v}"_"$t".dmg); [ ${#dmg[@]} = 1 ] && [ -f "${dmg[0]}" ] || { echo "no single *_${v}_$t.dmg in $dir/dmg"; ls "$dir/dmg"; exit 1; }
-            cp "${dmg[0]}" "$out/insight-workfolio_${v}_macos-$t.dmg"
+            dmg=$(one "$dir"/dmg/*_"${v}"_"$t".dmg)
+            cp "$dmg" "$out/insight-workfolio_${v}_macos-$t.dmg"
           else
             dir=apps/desktop/src-tauri/target/release/bundle/nsis
-            exe=("$dir"/*_"${v}"_x64-setup.exe); [ ${#exe[@]} = 1 ] && [ -f "${exe[0]}" ] || { echo "no single *_${v}_x64-setup.exe in $dir"; ls "$dir"; exit 1; }
-            cp "${exe[0]}" "$out/insight-workfolio_${v}_windows-x86_64-setup.exe"
-            cp "${exe[0]}.sig" "$out/insight-workfolio_${v}_windows-x86_64-setup.exe.sig"
+            exe=$(one "$dir"/*_"${v}"_x64-setup.exe)
+            cp "$exe" "$out/insight-workfolio_${v}_windows-x86_64-setup.exe"
+            cp "$exe.sig" "$out/insight-workfolio_${v}_windows-x86_64-setup.exe.sig"
           fi
-          ls -l $out
-          (cd $out && (sha256sum * 2>/dev/null || shasum -a 256 *)) | tee -a "$GITHUB_STEP_SUMMARY"
+          ls -l "$out"
+          (cd "$out" && (sha256sum -- ./* 2>/dev/null || shasum -a 256 -- ./*)) | tee -a "$GITHUB_STEP_SUMMARY"
       # Read version and CPU architecture from the built bytes, not from configuration.
       - name: Verify installer (macOS)
         if: matrix.os == 'macos-latest'

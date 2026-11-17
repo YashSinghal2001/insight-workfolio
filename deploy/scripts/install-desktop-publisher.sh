@@ -72,6 +72,8 @@ Match User $user
 	GatewayPorts no
 EOF
 chmod 644 "$conf"
+# sshd -t needs its privilege-separation dir; with socket activation it may not exist until a first login.
+[ -d /run/sshd ] || install -d -m 755 -o root -g root /run/sshd
 sshd -t || { rm -f "$conf"; die "sshd rejected the configuration; removed $conf, nothing reloaded"; }
 eff=$(sshd -T -C "user=$user,host=localhost,addr=127.0.0.1")
 grep -qx "forcecommand $receiver" <<<"$eff" && grep -qx "permittty no" <<<"$eff" && grep -qx "allowtcpforwarding no" <<<"$eff" \
