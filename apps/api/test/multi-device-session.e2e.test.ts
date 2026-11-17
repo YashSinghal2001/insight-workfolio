@@ -301,6 +301,7 @@ describe("revocation and re-registration", () => {
     const blocked = await api("/devices/register", { method: "POST", bearer: legacy.body.accessToken, body: { installationId: mac, deviceName: "MacBook Air M2", platform: "macos" } });
     assert.equal(blocked.status, 403);
     assert.equal(blocked.body.code, "DEVICE_REVOKED");
+    assert.equal((await api("/devices/me", { bearer: legacy.body.accessToken, device: mac })).body.status, "REVOKED", "unapproved stays REVOKED");
 
     const approved = await api(`/devices/${macId}/allow-reregistration`, { method: "POST", cookie: itCookie });
     assert.equal(approved.status, 200, approved.text);
@@ -310,6 +311,14 @@ describe("revocation and re-registration", () => {
 
     const s = await mustSignIn(p, mac);
     assert.equal((await api("/attendance/clock-in", { method: "POST", bearer: s.bearer, device: mac })).status, 403, "not authorized until registered again");
+    // Older desktop apps show "Register" only on NOT_REGISTERED; the device itself still says REVOKED + approved.
+    const me = await api("/devices/me", { bearer: s.bearer, device: mac });
+    assert.equal(me.body.status, "NOT_REGISTERED", me.text);
+    assert.equal(me.body.device.status, "REVOKED");
+    assert.ok(me.body.device.reregistrationApprovedAt);
+    const web = await webLogin(p.email);
+    assert.equal((await api("/devices/me", { cookie: web, device: mac })).body.status, "REVOKED", "web view unchanged");
+    assert.equal((await devicesOf(p)).find((d) => d.id === macId)?.status, "REVOKED", "admin list unchanged until registered");
     const re = await register(s, mac, "MacBook Air M2", "macos");
     assert.equal(re.status, 201, re.text);
     assert.equal(re.body.id, macId, "the same record, history kept");

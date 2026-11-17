@@ -147,7 +147,9 @@ export class DevicesService {
     };
     if (!row) return state("NOT_REGISTERED", null);
     const device = toDevice(row);
-    if (device.status === "REVOKED") return state("REVOKED", device);
+    // Approved for re-registration: desktop apps built before 0031 (<= 0.2.0) only offer "Register" on
+    // NOT_REGISTERED, so say that; registering still needs this password sign-in and consumes the approval.
+    if (device.status === "REVOKED") return state(device.reregistrationApprovedAt && caller.client === "DESKTOP" ? "NOT_REGISTERED" : "REVOKED", device);
     if (caller.client !== "DESKTOP") return state(device.status === "ACTIVE" ? "ACTIVE" : "INACTIVE", device); // a browser only looks
     if (caller.deviceId !== null && caller.deviceId !== device.id) return state("INACTIVE", device);
     try {
