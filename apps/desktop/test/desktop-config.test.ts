@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 // @ts-expect-error -- plain .mjs script without type declarations
-import { environmentIdentity, releaseDashboardUrl, signingPlan, tauriBuildArgs, windowsSigningPlan } from "../scripts/desktop-config.mjs";
+import { environmentIdentity, releaseDashboardUrl, signingPlan, tauriBuildArgs, updaterPlan, windowsSigningPlan } from "../scripts/desktop-config.mjs";
 
 test("WORKFOLIO_ENV: production keeps tauri.conf.json's identity, staging gets its own identifier, name and keychain service", () => {
   const conf = JSON.parse(readFileSync(new URL("../src-tauri/tauri.conf.json", import.meta.url), "utf8"));
@@ -95,4 +95,30 @@ test("tauriBuildArgs: pnpm's leading `--` is dropped so --bundles reaches tauri 
   // A deliberate second `--` still forwards Cargo args.
   assert.deepEqual(tauriBuildArgs("f.json", ["--", "--bundles", "nsis", "--", "--features", "x"]), [...base, "--bundles", "nsis", "--", "--features", "x"]);
   assert.ok(!tauriBuildArgs("f.json", ["--", "--bundles", "nsis"]).slice(base.length).includes("--"), "no `--` before --bundles");
+});
+
+test("updater: off without a public key; with one it needs the private signing key, requires signed versions and points at the API", () => {
+  // A throwaway public key (key id 69F20A3332AE2F01); public keys are not secret.
+  const PUB = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDY5RjIwQTMzMzJBRTJGMDEKUldRQkw2NHlNd3J5YWNHV3JFNTQ3UFhpamhMRC9DSlBUNXJ5RXRnZ0RCQjluRFl2d2F3MHFrcmcK";
+  assert.equal(updaterPlan({}, "https://api.example.com"), null);
+  assert.throws(() => updaterPlan({ WORKFOLIO_UPDATER_PUBKEY: PUB }, "https://api.example.com"), /TAURI_SIGNING_PRIVATE_KEY/);
+  assert.throws(() => updaterPlan({ WORKFOLIO_UPDATER_PUBKEY: "bm90IGEga2V5", TAURI_SIGNING_PRIVATE_KEY: "x" }, "https://api.example.com"), /base64 content of the .pub file/);
+  assert.throws(() => updaterPlan({ WORKFOLIO_UPDATER_PUBKEY: PUB, TAURI_SIGNING_PRIVATE_KEY_PATH: "/k" }, "https://api.example.com"), /TAURI_SIGNING_PRIVATE_KEY/, "tauri build ignores _PATH");
+  const plan = updaterPlan({ WORKFOLIO_UPDATER_PUBKEY: PUB, TAURI_SIGNING_PRIVATE_KEY: "/k" }, "https://api.example.com");
+  assert.equal(plan.keyId, "69F20A3332AE2F01");
+  assert.deepEqual(plan.config, {
+    bundle: { createUpdaterArtifacts: true },
+    plugins: {
+      updater: {
+        pubkey: PUB,
+        endpoints: ["https://api.example.com/api/v1/desktop-updates/manifest/{{target}}/{{arch}}/{{current_version}}"],
+        requireSignedVersion: true,
+        windows: { installMode: "passive" },
+      },
+    },
+  });
+  // The committed config has no updater: dev builds and CI test installers never check for updates.
+  const conf = JSON.parse(readFileSync(new URL("../src-tauri/tauri.conf.json", import.meta.url), "utf8"));
+  assert.equal(conf.plugins?.updater, undefined);
+  assert.equal(conf.bundle.createUpdaterArtifacts, undefined);
 });

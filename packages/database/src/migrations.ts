@@ -1301,6 +1301,67 @@ export const MIGRATIONS: Migration[] = [
       "CREATE UNIQUE INDEX sessions_one_active_device_per_user ON sessions(user_id) WHERE device_id IS NOT NULL AND revoked_at IS NULL",
     ],
   },
+  {
+    id: "0032_desktop_updates",
+    statements: [
+      // Desktop app releases (docs/desktop/AUTO-UPDATE-ARCHITECTURE.md). Only PUBLISHED releases reach
+      // employees; TESTING reaches administrators' own devices. Nothing here is a secret: artifacts are
+      // public download URLs plus their minisign signatures (the private key never reaches the server).
+      `CREATE TABLE desktop_releases (
+        id               TEXT PRIMARY KEY,
+        version          TEXT NOT NULL UNIQUE,
+        notes            TEXT NOT NULL DEFAULT '' CHECK (length(notes) <= 10000),
+        status           TEXT NOT NULL DEFAULT 'DRAFT' CHECK (status IN ('DRAFT', 'TESTING', 'PUBLISHED', 'DISABLED')),
+        policy           TEXT NOT NULL DEFAULT 'OPTIONAL' CHECK (policy IN ('OPTIONAL', 'RECOMMENDED', 'MANDATORY')),
+        postpone_hours   INTEGER NOT NULL DEFAULT 24 CHECK (postpone_hours BETWEEN 1 AND 720),
+        rollout_percent  INTEGER NOT NULL DEFAULT 100 CHECK (rollout_percent BETWEEN 0 AND 100),
+        minimum_version  TEXT,
+        published_at     TEXT,
+        published_by     TEXT REFERENCES users(id) ON DELETE RESTRICT,
+        created_by       TEXT REFERENCES users(id) ON DELETE RESTRICT,
+        created_at       TEXT NOT NULL DEFAULT ${NOW},
+        updated_at       TEXT NOT NULL DEFAULT ${NOW}
+      ) STRICT`,
+      // One signed updater package per platform. size/sha256/verified_at are filled by the API when it
+      // downloads the package and checks its signature (moving to TESTING or PUBLISHED).
+      `CREATE TABLE desktop_release_artifacts (
+        release_id   TEXT NOT NULL REFERENCES desktop_releases(id) ON DELETE CASCADE,
+        target       TEXT NOT NULL CHECK (target IN ('windows-x86_64', 'darwin-aarch64', 'darwin-x86_64')),
+        url          TEXT NOT NULL CHECK (length(url) <= 2000),
+        signature    TEXT NOT NULL CHECK (length(signature) <= 4000),
+        size_bytes   INTEGER,
+        sha256       TEXT,
+        verified_at  TEXT,
+        PRIMARY KEY (release_id, target)
+      ) STRICT`,
+      // Who did what to a release, and why (append-only, like account_audit): created, edited, status
+      // changes, artifact verification. metadata holds non-secret details (versions, targets, rollout).
+      `CREATE TABLE desktop_release_events (
+        id          TEXT PRIMARY KEY,
+        release_id  TEXT NOT NULL REFERENCES desktop_releases(id) ON DELETE RESTRICT,
+        actor_id    TEXT REFERENCES users(id) ON DELETE RESTRICT,
+        action      TEXT NOT NULL CHECK (length(action) BETWEEN 3 AND 64),
+        reason      TEXT CHECK (reason IS NULL OR length(reason) <= 300),
+        metadata    TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(metadata) AND length(metadata) <= 2000),
+        created_at  TEXT NOT NULL DEFAULT ${NOW}
+      ) STRICT`,
+      "CREATE INDEX desktop_release_events_release ON desktop_release_events(release_id, created_at)",
+      "CREATE TRIGGER desktop_release_events_no_update BEFORE UPDATE ON desktop_release_events BEGIN SELECT RAISE(ABORT, 'append_only'); END",
+      "CREATE TRIGGER desktop_release_events_no_delete BEFORE DELETE ON desktop_release_events BEGIN SELECT RAISE(ABORT, 'append_only'); END",
+      // What each registered device last reported about updates (one row per device, overwritten).
+      // Only versions and update state: no activity, screenshots or personal data.
+      `CREATE TABLE desktop_update_status (
+        device_id          TEXT PRIMARY KEY REFERENCES devices(id) ON DELETE CASCADE,
+        installed_version  TEXT NOT NULL,
+        available_version  TEXT,
+        state              TEXT NOT NULL CHECK (state IN ('UP_TO_DATE', 'AVAILABLE', 'POSTPONED', 'DOWNLOADING', 'INSTALLING', 'FAILED')),
+        failure_reason     TEXT CHECK (failure_reason IS NULL OR length(failure_reason) <= 300),
+        last_check_at      TEXT NOT NULL,
+        last_updated_at    TEXT,
+        last_updated_from  TEXT
+      ) STRICT`,
+    ],
+  },
 ];
 
 const checksum = (m: Migration) => createHash("sha256").update(JSON.stringify(m.statements)).digest("hex");

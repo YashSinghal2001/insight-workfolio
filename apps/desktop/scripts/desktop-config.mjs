@@ -11,6 +11,9 @@
 // complete set of notarization credentials, notarizes and staples the .app. See docs/deployment.md.
 // Windows signing is optional too (windowsSigningPlan): a certificate in the store by thumbprint, or
 // Azure Trusted Signing; without either the NSIS installer is unsigned (SmartScreen warns).
+// In-app updates are on only with WORKFOLIO_UPDATER_PUBKEY (updaterPlan): the build then embeds that public key
+// and the API's manifest URL, and signs updater packages with TAURI_SIGNING_PRIVATE_KEY (key or path), which must
+// be set too. Each environment has its own key pair (docs/desktop/AUTO-UPDATE-SECURITY.md).
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -134,6 +137,51 @@ export function windowsSigningPlan(env) {
   return null;
 }
 
+/** The updater manifest path on the API (DesktopUpdatesController); {{…}} are filled in by the Tauri updater. */
+export const UPDATE_MANIFEST_PATH = "/api/v1/desktop-updates/manifest/{{target}}/{{arch}}/{{current_version}}";
+
+/**
+ * The plugins.updater + bundle override that turns on in-app updates, or null (no updater in this build).
+ * Throws when the public key is malformed or no private signing key is available: an updater build whose
+ * packages cannot be signed would produce releases the API refuses.
+ */
+export function updaterPlan(env, apiUrl) {
+  const pubkey = env.WORKFOLIO_UPDATER_PUBKEY?.trim();
+  if (!pubkey) return null;
+  let text;
+  try {
+    text = Buffer.from(pubkey, "base64").toString("utf8");
+  } catch {
+    text = "";
+  }
+  const line = text.split("\n").find((l) => l && !l.startsWith("untrusted comment:")) ?? "";
+  const raw = Buffer.from(line, "base64");
+  if (raw.length !== 42 || raw.subarray(0, 2).toString() !== "Ed") {
+    throw new Error("WORKFOLIO_UPDATER_PUBKEY must be the base64 content of the .pub file written by `tauri signer generate`");
+  }
+  // `tauri build` reads only TAURI_SIGNING_PRIVATE_KEY (the key itself or a path to it); _PATH is ignored there.
+  if (!env.TAURI_SIGNING_PRIVATE_KEY) {
+    throw new Error("WORKFOLIO_UPDATER_PUBKEY needs TAURI_SIGNING_PRIVATE_KEY (the private key or a path to it) to sign the update packages");
+  }
+  const keyId = Buffer.from(raw.subarray(2, 10)).reverse().toString("hex").toUpperCase();
+  return {
+    keyId,
+    config: {
+      bundle: { createUpdaterArtifacts: true },
+      plugins: {
+        updater: {
+          pubkey,
+          endpoints: [`${apiUrl}${UPDATE_MANIFEST_PATH}`],
+          // The signature must name the announced version: a tampered manifest cannot pair a new version
+          // number with an older signed package (downgrade).
+          requireSignedVersion: true,
+          windows: { installMode: "passive" },
+        },
+      },
+    },
+  };
+}
+
 /**
  * The `tauri build` arguments for this script's argv. pnpm passes the separator in
  * `pnpm package -- --bundles nsis` through to the script; forwarded as-is, `tauri build … -- --bundles nsis`
@@ -180,6 +228,17 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     process.exit(1);
   }
   if (windowsSigning) result.config.bundle = { windows: windowsSigning.config };
+  let updater;
+  try {
+    updater = updaterPlan(process.env, result.apiUrl);
+  } catch (err) {
+    console.error(`Updater: ${err.message}`);
+    process.exit(1);
+  }
+  if (updater) {
+    result.config.bundle = { ...result.config.bundle, ...updater.config.bundle };
+    result.config.plugins = updater.config.plugins;
+  }
   if (args.includes("--print")) {
     console.warn(JSON.stringify({ apiUrl: result.apiUrl, dashboardUrl, keychainService: identity.keychainService, ...result.config }, null, 2));
     process.exit(0);
@@ -190,6 +249,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   if (process.platform === "win32") {
     console.warn(windowsSigning ? `Windows signing: ${windowsSigning.method}` : "Unsigned Windows installer: for testing only, SmartScreen will warn (docs/deployment.md)");
   }
+  console.warn(updater ? `In-app updates on: manifest ${result.apiUrl}${UPDATE_MANIFEST_PATH}, updater key ${updater.keyId}` : "In-app updates off (no WORKFOLIO_UPDATER_PUBKEY)");
   console.warn(signing.identity ? `Signing as ${signing.identity}; notarization ${signing.notarize ? "on" : "off"}` : "Unsigned build (no APPLE_SIGNING_IDENTITY): for testing only, Gatekeeper will block it");
   const run = spawnSync("pnpm", tauriBuildArgs(file, args), {
     cwd: DESKTOP,

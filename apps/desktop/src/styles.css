@@ -158,3 +158,12 @@ select, textarea {
 h3.sub { font-size: 0.9rem; margin: 1rem 0 0.4rem; }
 .row.wrap { flex-wrap: wrap; justify-content: flex-start; }
 .timer { margin: 0; font-size: 1.6rem; font-variant-numeric: tabular-nums; }
+
+/* App update card (src/updates-ui.ts) */
+.card.update { border-color: var(--button); }
+.card.update.mandatory { border-width: 2px; }
+.card.update .row { display: flex; gap: 0.5rem; flex-wrap: wrap; }
+.card.update .row button { flex: 1; }
+.card.update button.secondary { margin-top: 0; }
+.card.update progress { width: 100%; }
+.card.update .notes { white-space: pre-wrap; }

@@ -19,6 +19,7 @@ the head of an active team additionally reads their team members' records (see [
 | `screenshots:delete` | `DELETE /screenshots/:id` (reason required, stored in `screenshots.deleted_reason`); `DELETE /timelapses/:id`; `POST /screenshots/retention/run`, `POST /activity/retention/run`, `POST /websites/retention/run`; changing `retentionDays` or `retentionApproved` in the screenshot, activity-monitoring or website settings (`assertMayChangeRetention`, `apps/api/src/common/policy.ts`). Saving those forms with retention unchanged stays open to both admin identities. |
 | `storage:manage` | `GET /storage/onedrive/oauth/start`, `POST /storage/onedrive/disconnect`, `GET /storage/google-drive/oauth/start` |
 | `roles:manage` | `GET /roles/users`, `PATCH /roles/users/:id` (`platformRole`, `reason` 3–500 chars), `GET /roles/history` |
+| `updates:publish` | Desktop app releases: publish (`POST /desktop-updates/releases/:id/status` to `PUBLISHED`), move a published release back to Draft/Testing, and change a published release's policy, rollout or minimum version (`PATCH /desktop-updates/releases/:id`). Admin (IT) holds `updates:manage` (view releases and device update status, create and edit drafts, verify into Testing, **disable** any release). Employees hold only `updates:report` (their own device's update state). See docs/desktop/AUTO-UPDATE-ARCHITECTURE.md. |
 
 A Super Admin also manages Super Admin accounts: an Admin cannot edit, disable, reissue a setup link for,
 or revoke a device of a Super Admin (403 "Only a Super Admin can manage a Super Admin account").

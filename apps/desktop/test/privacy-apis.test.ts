@@ -65,7 +65,9 @@ test("Cargo and Tauri configuration: no input, clipboard, shortcut, shell or fil
   ];
   assert.deepEqual(hits(CONFIG, forbidden, false), []);
   const permissions = CONFIG.filter((p) => p.includes("capabilities")).flatMap((p) => (JSON.parse(read(p)) as { permissions: string[] }).permissions);
-  assert.deepEqual(permissions.sort(), ["core:default", "notification:allow-notify"], "the webview's permissions are exactly these");
+  // updater:default = check / download / install a minisign-verified package from the build's own endpoint
+  // (docs/desktop/AUTO-UPDATE-SECURITY.md). It reads nothing from the machine.
+  assert.deepEqual(permissions.sort(), ["core:default", "notification:allow-notify", "updater:default"], "the webview's permissions are exactly these");
 });
 
 test("TypeScript sources: no clipboard access and no document- or window-wide key or pointer capture", () => {

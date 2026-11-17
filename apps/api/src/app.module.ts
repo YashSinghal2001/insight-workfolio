@@ -1,3 +1,5 @@
+import { DesktopUpdatesController } from "./desktop-updates/desktop-updates.controller.js";
+import { DesktopUpdatesService } from "./desktop-updates/desktop-updates.service.js";
 import { randomUUID } from "node:crypto";
 import { Module } from "@nestjs/common";
 import { ConfigModule, ConfigService } from "@nestjs/config";
@@ -97,7 +99,7 @@ import { OneDriveController, OneDriveService } from "./storage/onedrive.js";
     }),
     DatabaseModule,
   ],
-  controllers: [AlertsController, HealthController, AuthController, EmployeesController, DevicesController, AttendanceController, CorrectionsController, ActivityController, MonitoringSettingsController, ScreenshotsController, ScreenshotSettingsController, TimelapseController, LeaveController, HolidaysController, TeamsController, ProjectsController, TaskTimeController, ReportsController, WebsitesController, RolesController, AuditController, ScheduleSettingsController, DailyAttendanceController, EmployeeTrackingController, GoogleDriveOAuthController, OneDriveController],
+  controllers: [AlertsController, HealthController, AuthController, EmployeesController, DevicesController, AttendanceController, CorrectionsController, ActivityController, MonitoringSettingsController, ScreenshotsController, ScreenshotSettingsController, TimelapseController, LeaveController, HolidaysController, TeamsController, ProjectsController, TaskTimeController, ReportsController, WebsitesController, RolesController, AuditController, ScheduleSettingsController, DailyAttendanceController, EmployeeTrackingController, GoogleDriveOAuthController, OneDriveController, DesktopUpdatesController],
   providers: [
     AlertsService,
     AuthService,
@@ -131,6 +133,7 @@ import { OneDriveController, OneDriveService } from "./storage/onedrive.js";
     AuditService,
     GoogleDriveOAuthService,
     OneDriveService,
+    DesktopUpdatesService,
     { provide: ONEDRIVE_AUTH, useExisting: OneDriveService },
     { provide: APP_GUARD, useClass: AuthGuard },
   ],

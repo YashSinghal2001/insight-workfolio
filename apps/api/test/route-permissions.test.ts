@@ -26,6 +26,7 @@ const PUBLIC_ALLOW_LIST = [
   "POST /websites/extension/disconnect", // extension token
   "GET /storage/google-drive/oauth/callback", // Google's redirect: single-use state + PKCE + browser-binding cookie
   "GET /storage/onedrive/oauth/callback", // Microsoft's redirect: single-use state + PKCE + browser-binding cookie
+  "GET /desktop-updates/manifest/:target/:arch/:version", // Tauri updater manifest: public metadata, packages are signed
 ].sort();
 
 /** Signed-in but no permission: open to every active account by design. Kept explicit so a new one fails. None today. */

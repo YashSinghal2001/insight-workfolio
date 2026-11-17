@@ -255,7 +255,7 @@ describe("unauthenticated requests", () => {
     const all = routes();
     const guarded = all.filter((r) => !r.isPublic);
     assert.ok(guarded.length > 120, `expected the whole API, found ${guarded.length} guarded routes`);
-    assert.equal(all.length - guarded.length, 12, "the public allow-list (route-permissions.test.ts) is 12 routes");
+    assert.equal(all.length - guarded.length, 13, "the public allow-list (route-permissions.test.ts) is 13 routes");
     const failures: string[] = [];
     for (const r of guarded) {
       const body = r.method === "GET" ? undefined : {};

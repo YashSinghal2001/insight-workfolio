@@ -35,6 +35,7 @@ export const ADMIN_NAV: readonly NavSection[] = [
       { label: "Settings", href: "/settings" },
       { label: "Work schedule", href: "/settings/schedule" },
       { label: "App labels", href: "/settings/labels" },
+      { label: "Desktop app updates", href: "/desktop-updates" },
       { label: "My account", href: "/account" },
     ],
   },

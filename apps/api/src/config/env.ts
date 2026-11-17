@@ -148,6 +148,12 @@ export const envSchema = z
     GOOGLE_DRIVE_PERMANENT_DELETE: z.enum(["true", "false"]).default("false").transform((v) => v === "true"),
     // Microsoft OneDrive of the dedicated IT storage account (docs/onedrive.md), delegated Files.ReadWrite only.
     // Entra app registration: "Web" platform, redirect URI = ONEDRIVE_REDIRECT_URI, no application permissions.
+    /**
+     * Desktop auto-update: the updater PUBLIC key (base64, exactly tauri.conf.json plugins.updater.pubkey of the
+     * builds this server updates). The API verifies every package with it before a release reaches anyone.
+     * Unset: releases cannot be tested or published. Never the private key (docs/desktop/AUTO-UPDATE-SECURITY.md).
+     */
+    DESKTOP_UPDATER_PUBKEY: z.string().optional().transform((v) => v?.trim() || undefined),
     ONEDRIVE_TENANT_ID: z.string().optional().transform((v) => v || undefined),
     ONEDRIVE_CLIENT_ID: z.string().optional().transform((v) => v || undefined),
     /** Server only; never logged, never sent to the dashboard or desktops. */

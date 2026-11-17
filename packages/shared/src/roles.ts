@@ -46,6 +46,12 @@ export const PERMISSIONS = {
   "sessions:own": ["ADMIN", "EMPLOYEE"],
   "devices:read": ["ADMIN"],
   "devices:manage": ["ADMIN"],
+  /** Desktop app releases (docs/desktop/AUTO-UPDATE-ARCHITECTURE.md): view, draft, move to Testing, disable. */
+  "updates:manage": ["ADMIN"],
+  /** Publish a release to employees, change a published release's rollout, policy or minimum version. Super Admin only. */
+  "updates:publish": ["ADMIN"],
+  /** The desktop app reports its own update state. */
+  "updates:report": ["ADMIN", "EMPLOYEE"],
   "attendance:read-all": ["ADMIN"],
   "attendance:review": ["ADMIN"],
   "corrections:request": ["ADMIN", "EMPLOYEE"],
@@ -86,7 +92,7 @@ export function hasPermission(role: Role, permission: Permission): boolean {
  * Permissions an Admin (IT) does not get: only the Super Admin identity holds them. Everything else is
  * shared by both admin identities (docs/roles.md).
  */
-export const SUPER_ADMIN_ONLY = ["screenshots:delete", "storage:manage", "roles:manage"] as const satisfies readonly Permission[];
+export const SUPER_ADMIN_ONLY = ["screenshots:delete", "storage:manage", "roles:manage", "updates:publish"] as const satisfies readonly Permission[];
 
 /**
  * Whether this user may do `permission`: the role check plus the Super Admin-only list. The API guard

@@ -34,6 +34,28 @@
         <button type="button" id="hidden-notice-dismiss" class="secondary">OK</button>
       </div>
 
+      <!-- App update (src/updates-ui.ts). Shown signed in or out: a required update must be findable before sign-in. -->
+      <section id="update-card" class="card update" aria-labelledby="update-title" hidden>
+        <h2 id="update-title">Update available</h2>
+        <p id="update-versions" class="muted"></p>
+        <p id="update-mandatory-note" class="hint" hidden>
+          Your organization requires this version. You can finish your current shift and clock out, but clocking in waits until the app is updated.
+        </p>
+        <details>
+          <summary>What's new</summary>
+          <p id="update-notes" class="notes"></p>
+        </details>
+        <progress id="update-progress" max="100" hidden></progress>
+        <p id="update-status" class="hint" role="status" aria-live="polite"></p>
+        <p id="update-error" class="error" role="alert" hidden></p>
+        <p id="update-confirm" class="hint" role="alert" hidden></p>
+        <div class="row">
+          <button type="button" id="update-now">Update now</button>
+          <button type="button" id="update-restart" hidden>Restart to update</button>
+          <button type="button" id="update-later" class="secondary">Later</button>
+        </div>
+      </section>
+
       <p id="auth-loading" class="muted" role="status">Checking sign-in…</p>
 
       <section id="login-view" class="card" aria-labelledby="login-heading" hidden>
@@ -535,6 +557,12 @@
                 <label class="check"><input type="checkbox" id="pref-launchAtLogin" aria-describedby="pref-launchAtLogin-hint" /> <span id="pref-launchAtLogin-label">Open at login</span></label>
                 <p id="pref-launchAtLogin-hint" class="hint">Starts Insight Workfolio when you log in to this Mac. It does not clock you in: you still clock in yourself.</p>
               </div>
+            </div>
+            <div class="stack" aria-labelledby="updates-heading">
+              <h3 id="updates-heading">App updates</h3>
+              <p class="hint">Installed version <span id="update-installed">—</span>. The app checks for updates when it starts and every few hours, and only installs one when you choose to.</p>
+              <button type="button" id="update-check" class="secondary">Check for updates</button>
+              <p id="update-check-status" class="hint" role="status" aria-live="polite"></p>
             </div>
             <p id="close-hint" class="hint">
               Closing this window keeps the app running in the menu bar. Quitting Insight Workfolio stops activity monitoring and

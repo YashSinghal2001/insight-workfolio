@@ -29,6 +29,7 @@ import { trayBridge, trayUpdate, type TrayState } from "./tray-bridge.ts";
 import { edgeNotifier } from "./notify.ts";
 import { applyStaticWording, platformOf, setPlatform, words } from "./platform.ts";
 import { initPrefs } from "./prefs-ui.ts";
+import { initUpdates } from "./updates-ui.ts";
 
 /** Set by vite.config.ts: "development" for `tauri dev` and debug bundles, "production" for release. */
 declare const __WORKFOLIO_API_MODE__: ApiUrlMode;
@@ -273,6 +274,7 @@ async function enter(profile: CachedProfile, online: boolean) {
   render();
   await activity.enter();
   await screenshots.enter();
+  updates?.reportNow();
 }
 
 async function loadDevice() {
@@ -497,7 +499,9 @@ function renderAttendance() {
   $("#att-preview").textContent = hint ?? "";
 
   for (const button of document.querySelectorAll<HTMLButtonElement>("[data-action]")) {
-    button.disabled = !p || !transition(p.state, button.dataset.action as AttendanceEventType);
+    const type = button.dataset.action as AttendanceEventType;
+    // A required update (below the minimum supported version) blocks starting work, never finishing it.
+    button.disabled = !p || !transition(p.state, type) || (type === "CLOCK_IN" && !!updates?.blocksClockIn());
   }
 }
 
@@ -653,8 +657,10 @@ async function checkApi() {
 
 async function showAppInfo() {
   if (IN_TAURI) {
-    const info = await invoke<{ version: string; trackingEnabled: boolean; platform: string }>("app_info");
+    const info = await invoke<{ version: string; trackingEnabled: boolean; platform: string; updatesEnabled: boolean }>("app_info");
     $("#version").textContent = `v${info.version}`;
+    $("#update-installed").textContent = info.version;
+    startUpdates(info.version, info.updatesEnabled);
     if (info.platform === "macos" || info.platform === "windows") app.platform = info.platform;
     // Wording follows the shell only; the browser keeps the macOS texts (headless suites assert them).
     setPlatform(platformOf(info.platform));
@@ -663,6 +669,33 @@ async function showAppInfo() {
     app.platform = navigator.userAgent.includes("Windows") ? "windows" : "macos";
   }
   $<HTMLInputElement>("#device-form input[name=deviceName]").value = app.platform === "macos" ? "My Mac" : "My PC";
+}
+
+// ---- App updates ----------------------------------------------------------------
+
+let updates: ReturnType<typeof initUpdates> | null = null;
+function startUpdates(version: string, enabled: boolean) {
+  updates = initUpdates({
+    enabled,
+    currentVersion: () => version,
+    installationId,
+    report: async (status) => {
+      if (!app.online || app.device?.status !== "ACTIVE") return;
+      await client.request("POST", "/desktop-updates/status", status, deviceHeaders());
+    },
+    working: () => {
+      const s = project(app.current, app.queued)?.state;
+      return s === "CLOCKED_IN" || s === "ON_BREAK";
+    },
+    resumeRecording: async () => {
+      await activity.enter();
+      await screenshots.enter();
+    },
+    kvGet,
+    kvSet,
+    onChange: () => app.profile && renderAttendance(),
+  });
+  updates.start();
 }
 
 window.addEventListener("online", () => void checkApi());

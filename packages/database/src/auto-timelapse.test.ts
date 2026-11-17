@@ -19,7 +19,7 @@ test("0028 keeps existing screenshot policies (auto off) and timelapses (manual)
     retention_approved, notice_version, reason, changed_by) VALUES (1, 300, 70, 1920, 'PRIMARY_DISPLAY', 30, 0, '2026-10-screenshots-draft-1', 'before 0028', 'a1')`);
   await db.execute("INSERT INTO timelapses (id, employee_id, attendance_session_id, requested_by, fps, status, frames_total) VALUES ('t1', 'p1', 's1', 'a1', 8, 'QUEUED', 10)");
 
-  assert.deepEqual(await migrate(db), ["0028_auto_timelapse", "0029_device_live_state", "0030_account_invitations", "0031_multi_device_single_session"]);
+  assert.deepEqual(await migrate(db), ["0028_auto_timelapse", "0029_device_live_state", "0030_account_invitations", "0031_multi_device_single_session", "0032_desktop_updates"]);
   const p = (await db.execute("SELECT interval_seconds, reason, auto_timelapse FROM screenshot_policies")).rows;
   assert.deepEqual(p.map((r) => ({ ...r })), [{ interval_seconds: 300, reason: "before 0028", auto_timelapse: 0 }]);
   const t = (await db.execute("SELECT id, status, frames_total, automatic FROM timelapses")).rows;

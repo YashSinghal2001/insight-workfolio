@@ -26,6 +26,8 @@ struct AppInfo {
     tracking_enabled: bool,
     /// "macos" | "windows" (others are not supported by the API).
     platform: &'static str,
+    /// Whether this build has the updater configured (signed release builds; see scripts/desktop-config.mjs).
+    updates_enabled: bool,
 }
 
 #[tauri::command]
@@ -34,7 +36,39 @@ fn app_info(app: tauri::AppHandle) -> AppInfo {
         version: app.package_info().version.to_string(),
         tracking_enabled: activity::platform::SUPPORTED,
         platform: std::env::consts::OS,
+        updates_enabled: updater_configured(&app.config().plugins),
     }
+}
+
+fn updater_configured(plugins: &tauri::utils::config::PluginConfig) -> bool {
+    plugins.0.contains_key("updater")
+}
+
+/// Stops activity sampling and screenshots now: the open activity interval is closed, so the next start
+/// does not report an unexpected close, and a capture in flight is discarded. Used on quit and before an
+/// update is installed (the Windows installer exits the process, macOS restarts it).
+fn stop_recording(app: &tauri::AppHandle) {
+    if let (Some(c), Some(db)) = (app.try_state::<Arc<Collector>>(), app.try_state::<Mutex<Connection>>()) {
+        c.configure(&db, "STOPPED".into(), None, activity::Config::new(15, 300));
+    }
+    if let Some(s) = app.try_state::<Arc<screenshot::Shooter>>() {
+        s.configure("STOPPED".into(), None, screenshot::Config::default());
+    }
+}
+
+/// Before installing an update. If installing then fails, the webview configures recording again.
+#[tauri::command]
+fn update_stop_recording(app: tauri::AppHandle) {
+    eprintln!("[update] stopping recording before install");
+    stop_recording(&app);
+}
+
+/// macOS (and Linux): the new bundle is in place; start it. Windows never gets here (the installer restarts the app).
+#[tauri::command]
+fn update_restart(app: tauri::AppHandle) {
+    eprintln!("[update] restarting into the installed version");
+    stop_recording(&app);
+    app.restart();
 }
 
 // The refresh token is the only persisted credential and lives in the OS credential store
@@ -384,8 +418,19 @@ fn allowed_download(url: &tauri::Url, destination: &std::path::Path, downloads: 
 fn single_instance(dir: &std::path::Path) -> std::io::Result<Option<std::fs::File>> {
     use std::os::fd::AsRawFd;
     let file = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(dir.join("instance.lock"))?;
-    let locked = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0;
-    Ok(locked.then_some(file))
+    // After an update the new version is launched (LaunchServices `open -n`) while the old copy is still
+    // exiting and holding the lock: wait for it briefly instead of quitting, or the app would vanish.
+    // ponytail: fixed 5 s; a genuine second copy (started outside LaunchServices) just exits 5 s later.
+    for attempt in 0..20 {
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+            return Ok(Some(file));
+        }
+        if attempt == 0 {
+            eprintln!("[lifecycle] another copy holds the instance lock; waiting up to 5 s in case it is exiting (update restart)");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+    Ok(None)
 }
 
 // Windows: tauri-plugin-single-instance (registered in `run`). It takes the named mutex
@@ -413,6 +458,8 @@ pub fn run() {
     builder
         .invoke_handler(tauri::generate_handler![
             app_info,
+            update_stop_recording,
+            update_restart,
             save_refresh_token,
             load_refresh_token,
             clear_refresh_token,
@@ -447,6 +494,10 @@ pub fn run() {
             e2e_exit
         ])
         .setup(|app| {
+            // Builds without plugins.updater (dev, CI test installers) have no updater: the app says so in Settings.
+            if updater_configured(&app.config().plugins) {
+                app.handle().plugin(tauri_plugin_updater::Builder::new().build())?;
+            }
             // Local (never roaming) app data: on Windows %LOCALAPPDATA%\com.insightworkfolio.desktop,
             // so the queue and screenshots are not synced to other machines by roaming profiles.
             // macOS: identical to app_data_dir (dirs 7: both are ~/Library/Application Support), so
@@ -563,15 +614,8 @@ pub fn run() {
             RunEvent::Reopen { .. } => tray::open_main(_app),
             RunEvent::Exit => {
                 eprintln!("[lifecycle] app exiting");
-                // A deliberate quit (or logout/shutdown) stops recording now: the open activity
-                // interval is closed here, so the next start does not report an unexpected close,
-                // and a capture in flight is discarded.
-                if let (Some(c), Some(db)) = (_app.try_state::<Arc<Collector>>(), _app.try_state::<Mutex<Connection>>()) {
-                    c.configure(&db, "STOPPED".into(), None, activity::Config::new(15, 300));
-                }
-                if let Some(s) = _app.try_state::<Arc<screenshot::Shooter>>() {
-                    s.configure("STOPPED".into(), None, screenshot::Config::default());
-                }
+                // A deliberate quit (or logout/shutdown) stops recording now.
+                stop_recording(_app);
             }
             _ => {}
         });

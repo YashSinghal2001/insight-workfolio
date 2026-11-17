@@ -18,6 +18,9 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = ["tray-icon", "image-png"] }
 # OS notifications for state changes only (sync blocked, screenshot uploads failing): src/notify.ts.
 tauri-plugin-notification = "=2.8.0"
+# In-app updates (docs/desktop/AUTO-UPDATE-ARCHITECTURE.md): minisign-verified packages from the API's manifest.
+# Registered only when the build config has plugins.updater (scripts/desktop-config.mjs adds it for signed releases).
+tauri-plugin-updater = "=2.14.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # OS credential store: macOS Keychain, Windows Credential Manager.

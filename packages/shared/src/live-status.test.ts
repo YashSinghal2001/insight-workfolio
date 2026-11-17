@@ -23,7 +23,7 @@ test("can: Super Admin-only permissions are refused to an Admin; everything else
   const superAdmin = { role: "ADMIN", platformRole: "SUPER_ADMIN" } as const;
   const admin = { role: "ADMIN", platformRole: "ADMIN" } as const;
   const employee = { role: "EMPLOYEE", platformRole: "EMPLOYEE" } as const;
-  assert.deepEqual([...SUPER_ADMIN_ONLY].sort(), ["roles:manage", "screenshots:delete", "storage:manage"]);
+  assert.deepEqual([...SUPER_ADMIN_ONLY].sort(), ["roles:manage", "screenshots:delete", "storage:manage", "updates:publish"]);
   for (const p of Object.keys(PERMISSIONS) as (keyof typeof PERMISSIONS)[]) {
     const superOnly = (SUPER_ADMIN_ONLY as readonly string[]).includes(p);
     assert.equal(can(superAdmin, p), hasPermission("ADMIN", p), p);
