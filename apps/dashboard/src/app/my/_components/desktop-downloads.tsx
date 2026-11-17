@@ -16,6 +16,8 @@ interface Release {
   /** YYYY-MM-DD */
   releasedAt: string;
   file: string;
+  /** Hosted on the VPS outside git (Caddy `/desktop-downloads/`), instead of public/downloads/<file>. */
+  href?: string;
   arch: string;
   sizeBytes: number;
   sha256: string;
@@ -78,7 +80,7 @@ export function DesktopDownloads() {
                       <dd>{mb(r.sizeBytes)}</dd>
                     </dl>
                     <div>
-                      <a href={`/downloads/${encodeURIComponent(r.file)}`} download={r.file} className={buttonClass}>
+                      <a href={r.href ?? `/downloads/${encodeURIComponent(r.file)}`} download={r.file} className={buttonClass}>
                         Download for {p.name} ({p.ext})
                       </a>
                     </div>

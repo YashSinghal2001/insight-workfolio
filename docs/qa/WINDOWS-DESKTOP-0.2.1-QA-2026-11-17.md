@@ -4,7 +4,7 @@
 
 ## Verdict
 
-**NOT PRODUCTION-READY — physical Windows QA not run.** Mac-side checks pass; the Windows build and the
+**NOT PRODUCTION-READY — physical Windows QA not run.** Mac-side checks and the Windows CI build pass; the
 on-PC tests are pending.
 
 ## Build record
@@ -12,10 +12,10 @@ on-PC tests are pending.
 | Item | Value |
 |---|---|
 | Base | `deploy/hostinger-vps` / `main` at `3a28114f3782f72bcfc2efcead60a737906dc348` |
-| Build commit | **PENDING** (version bump + docs, not yet committed) |
-| Builder | **PENDING**: GitHub Actions `CI` → `windows-desktop` job on `windows-latest`, `workflow_dispatch` with `desktop_api_url=https://189.72.144.117`, `desktop_dashboard_url=https://189.72.144.117` |
-| Artifact | **PENDING**: `insight-workfolio-windows-nsis-UNSIGNED` → `Insight Workfolio_0.2.1_x64-setup.exe` (7-day retention) |
-| Installer SHA-256 | **PENDING** (job log "Verify packaged API URL…" step, then recomputed after download) |
+| Build commit | `3a315bb` on branch `release/desktop-0.2.1` (= `3a28114` + version bump + these docs) |
+| Builder | GitHub Actions run 44042098660: `CI` → `windows-desktop` job on `windows-latest`, `workflow_dispatch` with `desktop_api_url=https://189.72.144.117`, `desktop_dashboard_url=https://189.72.144.117` |
+| Artifact | `insight-workfolio-windows-nsis-UNSIGNED` → `Insight Workfolio_0.2.1_x64-setup.exe`, 3,519,222 bytes (expires 2026-11-24) |
+| Installer SHA-256 | `241663ad540d02ce5da03efa658263540de80e2bc6ff5fd5c7cde6ee6febc273` (CI log and Mac download match) |
 | Signing | None (no Windows certificate configured) |
 | Updater | Off (no `WORKFOLIO_UPDATER_PUBKEY`) |
 
@@ -29,9 +29,9 @@ on-PC tests are pending.
 | Clippy `--all-targets -D warnings` | Mac | PASS |
 | Packager production config (`desktop-config.mjs --print`) | Mac | PASS: API and CSP `https://189.72.144.117`, identity `com.insightworkfolio.desktop` |
 | Packager refuses `http://localhost:4000` and `http://189.72.144.117` | Mac | PASS |
-| Rust tests incl. Windows native smoke tests, clippy, TS tests | Windows CI | PENDING |
-| Packaged exe names the production origin, not `localhost:4000` or `example.invalid` | Windows CI | PENDING |
-| Installer SHA-256 matches after download | Mac | PENDING |
+| Rust tests incl. Windows native smoke tests, clippy, TS tests | Windows CI | PASS: Rust 108, 1 ignored; clippy clean; TS 92/92 |
+| Packaged exe names the production origin, not `localhost:4000` or `example.invalid` | Windows CI | PASS (`packaged API origin: https://189.72.144.117`) |
+| Installer SHA-256 matches after download | Mac | PASS |
 
 ## Code verification (read on the Mac; runtime on Windows still required)
 

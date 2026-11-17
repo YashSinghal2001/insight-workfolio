@@ -64,7 +64,15 @@ try {
   // SHA-256, served as-is; and nothing sits in public/downloads that the manifest does not vouch for.
   const releases = JSON.parse(readFileSync(new URL("../src/lib/desktop-releases.json", import.meta.url), "utf8"));
   const dir = new URL("../public/downloads/", import.meta.url);
-  const listed = Object.values(releases).filter(Boolean);
+  const all = Object.values(releases).filter(Boolean);
+  // VPS-hosted (Caddy /desktop-downloads/, outside git): only the link shape is checkable here; the deploy
+  // runbook verifies size and SHA-256 on the server.
+  for (const r of all.filter((r) => r.href !== undefined)) {
+    assert.match(r.file, /^[A-Za-z0-9][\w.-]*\.(dmg|exe)$/, `installer file name: ${r.file}`);
+    assert.equal(r.href, `/desktop-downloads/${r.file}`, `${r.file} href`);
+    assert.match(r.sha256, /^[0-9a-f]{64}$/, `${r.file} sha256`);
+  }
+  const listed = all.filter((r) => r.href === undefined);
   for (const r of listed) {
     assert.match(r.file, /^[\w.-]+\.(dmg|exe)$/, `installer file name: ${r.file}`);
     const bytes = readFileSync(new URL(r.file, dir));
@@ -76,7 +84,7 @@ try {
   }
   const present = existsSync(dir) ? readdirSync(dir) : [];
   assert.deepEqual(present.sort(), listed.map((r) => r.file).sort(), "public/downloads must hold exactly the installers in desktop-releases.json");
-  console.log(`desktop installers: ${listed.length} verified (${listed.map((r) => r.file).join(", ") || "none published"})`);
+  console.log(`desktop installers: ${listed.length} verified in public/downloads (${listed.map((r) => r.file).join(", ") || "none"}); VPS-hosted: ${all.length - listed.length}`);
   console.log(`dashboard smoke test: PASS (${Object.keys(ROUTES).length} routes)`);
 } finally {
   server.kill();

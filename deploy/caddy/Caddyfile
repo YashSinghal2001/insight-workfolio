@@ -13,8 +13,24 @@
 }
 
 app.{$WORKFOLIO_DOMAIN} {
-	encode zstd gzip
-	reverse_proxy 127.0.0.1:3000
+	# Desktop installers hosted on the VPS (see Caddyfile.ip): top-level .exe/.dmg in /srv/workfolio-downloads only.
+	handle_path /desktop-downloads/* {
+		root * /srv/workfolio-downloads
+		@installer path_regexp ^/[A-Za-z0-9][A-Za-z0-9._-]*\.(exe|dmg)$
+		handle @installer {
+			header Content-Disposition attachment
+			header X-Content-Type-Options nosniff
+			header Cache-Control no-cache
+			file_server
+		}
+		handle {
+			respond 404
+		}
+	}
+	handle {
+		encode zstd gzip
+		reverse_proxy 127.0.0.1:3000
+	}
 	log {
 		output file /var/log/caddy/app.access.log {
 			roll_size 50MiB

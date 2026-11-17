@@ -8,11 +8,12 @@
     "sha256": "25c07a9fdbd9ccf425d9b6139b0a2c92b08bb544ca5e943ed094518f0817d4fb"
   },
   "windows": {
-    "version": "0.1.0",
-    "releasedAt": "2026-11-11",
-    "file": "Insight-Workfolio_0.1.0_x64-setup.exe",
+    "version": "0.2.1",
+    "releasedAt": "2026-11-17",
+    "file": "Insight-Workfolio_0.2.1_x64-setup.exe",
+    "href": "/desktop-downloads/Insight-Workfolio_0.2.1_x64-setup.exe",
     "arch": "64-bit (x64)",
-    "sizeBytes": 2674954,
-    "sha256": "9a496e363b7bc120e9294b916c5729f14a47fd646f690c7edf042353890fce4d"
+    "sizeBytes": 3519222,
+    "sha256": "241663ad540d02ce5da03efa658263540de80e2bc6ff5fd5c7cde6ee6febc273"
   }
 }

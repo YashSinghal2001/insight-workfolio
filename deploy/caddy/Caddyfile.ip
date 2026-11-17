@@ -46,6 +46,22 @@
 		}
 	}
 
+	# Desktop installers hosted on the VPS, kept out of the public git repository. Only top-level .exe/.dmg
+	# files in /srv/workfolio-downloads (root-owned, 755/644) are served; no listing, nothing else.
+	handle_path /desktop-downloads/* {
+		root * /srv/workfolio-downloads
+		@installer path_regexp ^/[A-Za-z0-9][A-Za-z0-9._-]*\.(exe|dmg)$
+		handle @installer {
+			header Content-Disposition attachment
+			header X-Content-Type-Options nosniff
+			header Cache-Control no-cache
+			file_server
+		}
+		handle {
+			respond 404
+		}
+	}
+
 	handle {
 		encode zstd gzip
 		reverse_proxy 127.0.0.1:3000
