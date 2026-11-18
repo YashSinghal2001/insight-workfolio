@@ -1,30 +1,64 @@
-# CI for the private repo. No secrets, no deploys, no network to Microsoft/Turso/Render/Vercel.
-# Browser suites (headless Chrome at the macOS path + FFmpeg) run only on manual dispatch.
+# CI: validation plus UNSIGNED desktop installers. No secrets, no environments, no deploys, no release, no
+# network to Microsoft/Turso/Render/Vercel/the VPS. The repository is public: logs and artifacts of every run
+# can be downloaded by any signed-in GitHub user, so nothing here may ever carry a secret.
+#
+# What runs when (docs/deployment.md, "CI installers"):
+#   push to ANY branch (`branches: ["**"]`: every branch name, no tags)
+#       checks + macOS + Windows, both installers, and the `installers` gate
+#   pull request (any branch)
+#       the same checks and tests on the merge result, no installers (validation only; installers come from
+#       pushes to branches of this repository)
+#   manual (Actions > CI > Run workflow, any branch)
+#       as a push, plus the browser suites; desktop_api_url packages a real server instead of the placeholder
+# No path filter: a push that changes only documentation builds both installers too.
+# A push runs the ci.yml of the pushed branch: a branch gets this behaviour once it contains this file.
+# Tags start nothing here (desktop-v* tags belong to desktop-publish.yml, the signed production path).
+#
+# Installers: one Windows x64 NSIS .exe and one macOS universal (Apple Silicon + Intel) .dmg per run, each in
+# its own artifact with <installer>.sha256 and build-metadata.json, kept 14 days:
+#   insight-workfolio_<version>_<platform>-<arch>_UNSIGNED-<TEST|QA>_run<run id>-<attempt>
+# The installer file inside carries the same _UNSIGNED-<TEST|QA> suffix.
+# TEST = the reserved placeholder https://api.example.invalid (RFC 2606): it can never resolve, so that
+# installer cannot talk to any server. It is a separate app, "Insight Workfolio Test"
+# (com.insightworkfolio.desktop.test: desktop-config.mjs gives every placeholder build that identity), with its
+# own install folder, data, credentials and sign-in entry, so installing it never touches a real install.
+# QA = the https API URL given to a manual run; it keeps the production identity, as before.
+# Both are unsigned, not notarized and have no in-app updater: for testing, never for distribution (signed
+# builds: desktop-build.yml).
 name: CI
 
 on:
   pull_request:
   push:
-    branches: [main]
+    branches: ["**"]
   workflow_dispatch:
     inputs:
-      # Set both to build the Windows installer for a real server instead of the placeholder (still unsigned).
+      # Set both to build the installers for a real server instead of the placeholder (still unsigned).
       # Public https URLs, not secrets. The browser suites are skipped on such a run.
       desktop_api_url:
-        description: "Windows installer: https API URL to package (empty = placeholder test build)"
+        description: "Desktop installers: https API URL to package (empty = placeholder test build)"
         required: false
         default: ""
       desktop_dashboard_url:
-        description: "Windows installer: https dashboard URL shown to administrators"
+        description: "Desktop installers: https dashboard URL shown to administrators"
         required: false
         default: ""
 
 permissions:
   contents: read
 
+# Pull requests: one group per PR, a newer commit cancels the older validation run.
+# Push and manual runs: a group of their own, so nothing ever cancels an installer build: not a manual run on
+# the same branch (that cancelled the push run of 0f6dd86 on 2026-11-18), not a newer push, not another branch.
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: ci-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # What the installers talk to. An API URL without its dashboard URL fails the build (desktop-config.mjs);
+  # the placeholder gets the placeholder dashboard there.
+  DESKTOP_API_URL: ${{ inputs.desktop_api_url || 'https://api.example.invalid' }}
+  DESKTOP_DASHBOARD_URL: ${{ inputs.desktop_api_url && inputs.desktop_dashboard_url || '' }}
 
 jobs:
   checks:
@@ -59,6 +93,10 @@ jobs:
         run: pnpm --filter @workfolio/browser-extension test
       - name: Test desktop (TypeScript only)
         run: pnpm --filter @workfolio/desktop exec node --test
+      - name: Installer script lint and gate self-test (the cases the `installers` job must reject)
+        run: |
+          shellcheck deploy/scripts/ci-desktop-installer.sh
+          bash deploy/scripts/ci-desktop-installer.sh selftest
 
       # Next 16.4 intermittently aborts the build with a SecurityFatalError nudge; one retry.
       - name: Build dashboard
@@ -70,10 +108,17 @@ jobs:
         working-directory: apps/dashboard
         run: node scripts/smoke.mjs
 
-  desktop-rust:
-    name: Desktop Rust (cargo test + clippy)
+  # macOS desktop: clippy and tests, then (not on pull requests) the UNSIGNED DMG. One job, like
+  # windows-desktop, so the macOS runner sets up, compiles and tests once.
+  # Universal = one app holding an arm64 and an x86_64 slice, the target desktop-publish.yml ships. Both slices
+  # are checked from the built bytes (lipo); neither is launched here, and the Intel slice has not been run on
+  # Intel hardware by CI.
+  macos-desktop:
+    name: macOS desktop (cargo test + clippy, unsigned universal DMG)
     runs-on: macos-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
+    outputs:
+      artifact: ${{ steps.installer.outputs.artifact }}
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -84,9 +129,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      # Every branch restores main's cache; only main saves (the 10 GB repository cache limit is close).
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: apps/desktop/src-tauri
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: pnpm install --frozen-lockfile
       - run: pnpm build:packages
       # tauri::generate_context! embeds frontendDist (apps/desktop/dist): it must exist to compile.
@@ -95,6 +143,31 @@ jobs:
         run: cargo clippy --manifest-path apps/desktop/src-tauri/Cargo.toml -- -D warnings
       - name: cargo test
         run: cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml
+      # No APPLE_* variables: ad-hoc linker signature only, not notarized. No WORKFOLIO_UPDATER_PUBKEY: no updater.
+      - name: Build UNSIGNED universal DMG (placeholder API URL unless desktop_api_url is given)
+        if: github.event_name != 'pull_request'
+        env:
+          WORKFOLIO_API_URL: ${{ env.DESKTOP_API_URL }}
+          WORKFOLIO_DASHBOARD_URL: ${{ env.DESKTOP_DASHBOARD_URL }}
+        run: pnpm --filter @workfolio/desktop package -- --bundles app,dmg --target universal-apple-darwin
+      # Version, app name, bundle identifier (the test one for a placeholder build), both architectures and the
+      # packaged API origin read from the app inside the DMG.
+      - name: Verify DMG from its bytes, write SHA-256 and build metadata
+        id: installer
+        if: github.event_name != 'pull_request'
+        env:
+          API_URL: ${{ env.DESKTOP_API_URL }}
+          MAC_TARGET: universal
+        run: bash deploy/scripts/ci-desktop-installer.sh macos
+      - name: Upload unsigned DMG, SHA-256 and metadata
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          # Run id + attempt: every run (and re-run) gets its own artifact; nothing is ever replaced.
+          name: ${{ steps.installer.outputs.artifact }}
+          path: qa/
+          if-no-files-found: error
+          retention-days: 14
 
   browser-suites:
     name: Browser suites (manual)
@@ -141,9 +214,11 @@ jobs:
   # Windows desktop: real Windows Server, so the cfg(windows) native smoke tests (activity sampling,
   # session-event thread, GDI capture in memory, EcoQoS opt-out) actually run here. MSVC toolchain.
   windows-desktop:
-    name: Windows desktop (cargo test + clippy, unsigned NSIS test installer)
+    name: Windows desktop (cargo test + clippy, unsigned NSIS installer)
     runs-on: windows-latest
     timeout-minutes: 60
+    outputs:
+      artifact: ${{ steps.installer.outputs.artifact }}
     defaults:
       run:
         shell: bash
@@ -157,9 +232,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable # x86_64-pc-windows-msvc on windows-latest
         with:
           components: clippy
+      # Every branch restores main's cache; only main saves (the 10 GB repository cache limit is close).
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: apps/desktop/src-tauri
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: pnpm install --frozen-lockfile
       - run: pnpm build:packages
       # tauri::generate_context! embeds frontendDist (apps/desktop/dist): it must exist to compile.
@@ -172,32 +249,64 @@ jobs:
         run: cargo test
       - name: Test desktop (TypeScript)
         run: pnpm --filter @workfolio/desktop exec node --test
-      # Default: placeholder API on the reserved .invalid TLD (RFC 2606): it can never resolve, so that
-      # installer cannot talk to any real server. A manual run with desktop_api_url packages that server
-      # instead. Unsigned either way (no WINDOWS_*/AZURE_* variables).
+      # No WINDOWS_*/AZURE_* variables: unsigned, SmartScreen warns. No WORKFOLIO_UPDATER_PUBKEY: no updater.
       - name: Build UNSIGNED NSIS installer (placeholder API URL unless desktop_api_url is given)
+        if: github.event_name != 'pull_request'
         env:
-          WORKFOLIO_API_URL: ${{ inputs.desktop_api_url || 'https://api.example.invalid' }}
-          WORKFOLIO_DASHBOARD_URL: ${{ inputs.desktop_dashboard_url || (inputs.desktop_api_url && 'missing') || 'https://app.example.invalid' }}
+          WORKFOLIO_API_URL: ${{ env.DESKTOP_API_URL }}
+          WORKFOLIO_DASHBOARD_URL: ${{ env.DESKTOP_DASHBOARD_URL }}
         run: pnpm --filter @workfolio/desktop package -- --bundles nsis
-      # The packaged front end and the app binary (CSP connect-src) must name the requested origin; the
-      # binary must name neither the dev API nor, on a real build, the placeholder.
-      - name: Verify packaged API URL, print size and SHA-256
+      # Installer and app version and x86_64 read from the built bytes (verify-windows-installer.ps1, as
+      # desktop-build.yml); the app binary must name the requested API origin, never the dev API, and hold the
+      # expected identifier (the test one for a placeholder build).
+      - name: Verify installer from its bytes, write SHA-256 and build metadata
+        id: installer
+        if: github.event_name != 'pull_request'
         env:
-          API_URL: ${{ inputs.desktop_api_url || 'https://api.example.invalid' }}
-        run: |
-          origin=$(node -e 'console.log(new URL(process.env.API_URL).origin)')
-          grep -rqF "$origin" apps/desktop/dist/assets
-          grep -aqF "$origin" apps/desktop/src-tauri/target/release/*.exe
-          ! grep -aqF "localhost:4000" apps/desktop/src-tauri/target/release/*.exe
-          if [ "$origin" != "https://api.example.invalid" ]; then ! grep -aqF "example.invalid" apps/desktop/src-tauri/target/release/*.exe; fi
-          echo "packaged API origin: $origin"
-          ls -l apps/desktop/src-tauri/target/release/bundle/nsis/*.exe
-          sha256sum apps/desktop/src-tauri/target/release/bundle/nsis/*.exe
-      - name: Upload unsigned NSIS installer
+          API_URL: ${{ env.DESKTOP_API_URL }}
+        run: bash deploy/scripts/ci-desktop-installer.sh windows
+      - name: Upload unsigned NSIS installer, SHA-256 and metadata
+        if: github.event_name != 'pull_request'
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ inputs.desktop_api_url && 'insight-workfolio-windows-nsis-UNSIGNED' || 'insight-workfolio-windows-nsis-UNSIGNED-TEST-ONLY' }}
-          path: apps/desktop/src-tauri/target/release/bundle/nsis/*.exe
+          name: ${{ steps.installer.outputs.artifact }}
+          path: qa/
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 14
+
+  # The run is green only when BOTH installers exist for this commit. A platform job that failed, was skipped by
+  # a condition or uploaded nothing fails this job, which downloads the two artifacts as a user would and
+  # re-checks commit, size and SHA-256 (the summary table lists them). Artifact names come from the job outputs,
+  # so "Re-run failed jobs" pairs the new artifact with the one the passing job uploaded earlier.
+  installers:
+    name: Installers (Windows + macOS present and verified)
+    needs: [macos-desktop, windows-desktop]
+    if: ${{ !cancelled() && github.event_name != 'pull_request' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      MACOS_RESULT: ${{ needs.macos-desktop.result }}
+      MACOS_ARTIFACT: ${{ needs.macos-desktop.outputs.artifact }}
+      WINDOWS_RESULT: ${{ needs.windows-desktop.result }}
+      WINDOWS_ARTIFACT: ${{ needs.windows-desktop.outputs.artifact }}
+    steps:
+      - name: Both platform jobs succeeded and named an artifact
+        run: |
+          echo "macOS: $MACOS_RESULT ${MACOS_ARTIFACT:-(no artifact)}"
+          echo "Windows: $WINDOWS_RESULT ${WINDOWS_ARTIFACT:-(no artifact)}"
+          if [ "$MACOS_RESULT" != success ] || [ "$WINDOWS_RESULT" != success ] || [ -z "$MACOS_ARTIFACT" ] || [ -z "$WINDOWS_ARTIFACT" ]; then
+            echo "::error::not every installer was built: macOS job $MACOS_RESULT, Windows job $WINDOWS_RESULT"; exit 1
+          fi
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: deploy/scripts
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.macos-desktop.outputs.artifact }}
+          path: installers/macos
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.windows-desktop.outputs.artifact }}
+          path: installers/windows
+      - name: Both installers built from this commit, sizes and SHA-256 match
+        run: bash deploy/scripts/ci-desktop-installer.sh gate installers

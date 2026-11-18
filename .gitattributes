@@ -1,0 +1,2 @@
+# Run by Git Bash on the Windows CI runner, whose git checks text files out with CRLF: keep it LF.
+/deploy/scripts/ci-desktop-installer.sh text eol=lf

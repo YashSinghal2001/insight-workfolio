@@ -25,6 +25,29 @@ test("WORKFOLIO_ENV: production keeps tauri.conf.json's identity, staging gets i
   for (const bad of ["Staging", "dev", "prod", "toString", "__proto__"]) assert.throws(() => environmentIdentity(bad), /staging or production/, bad);
 });
 
+test("a placeholder (.invalid) API always builds the separate test identity, and a real API never does", () => {
+  const conf = JSON.parse(readFileSync(new URL("../src-tauri/tauri.conf.json", import.meta.url), "utf8"));
+  const placeholder = "https://api.example.invalid";
+  const testIdentity = {
+    env: "test",
+    identifier: "com.insightworkfolio.desktop.test",
+    productName: "Insight Workfolio Test",
+    keychainService: "com.insightworkfolio.desktop.test",
+  };
+  for (const raw of [undefined, "", "test"]) assert.deepEqual(environmentIdentity(raw, placeholder), testIdentity, String(raw));
+  for (const env of ["production", "staging"]) assert.throws(() => environmentIdentity(env, placeholder), /always gets the test identity/, env);
+  // A real API: exactly as before, and "test" is refused.
+  assert.equal(environmentIdentity(undefined, "https://api.example.com").identifier, conf.identifier);
+  assert.equal(environmentIdentity("production", "https://api.example.com").productName, conf.productName);
+  assert.equal(environmentIdentity("staging", "https://api.example.com").identifier, "com.insightworkfolio.desktop.staging");
+  assert.throws(() => environmentIdentity("test", "https://api.example.com"), /placeholder API/);
+  assert.throws(() => environmentIdentity("test"), /placeholder API/);
+  assert.equal(environmentIdentity(undefined, "https://invalid.example.com").env, "production", "only the .invalid TLD is the placeholder");
+  // Three identities, no shared identifier, name or keychain service.
+  const all = [environmentIdentity("production"), environmentIdentity("staging"), testIdentity];
+  for (const key of ["identifier", "productName", "keychainService"]) assert.equal(new Set(all.map((i) => i[key])).size, 3, key);
+});
+
 test("release dashboard URL: https and required, except the CI placeholder API on the reserved .invalid TLD", () => {
   assert.equal(releaseDashboardUrl("https://app.example.com/", "https://api.example.com"), "https://app.example.com");
   assert.throws(() => releaseDashboardUrl(undefined, "https://api.example.com"), /not set/);

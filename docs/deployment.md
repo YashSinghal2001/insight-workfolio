@@ -356,6 +356,12 @@ WORKFOLIO_API_URL=https://api.example.com WORKFOLIO_DASHBOARD_URL=https://app.ex
   staging and a production install on one machine never share tokens, data directory or installation id.
   A staging build must go through `pnpm package` (the script applies the identity override); a bare
   `tauri build` produces the production identity.
+- A placeholder API on the reserved `.invalid` TLD (CI's test installers) always builds a third identity,
+  `test`: bundle id `com.insightworkfolio.desktop.test`, product name and window title "Insight Workfolio
+  Test", its own keychain / Credential Manager service, data directories, single-instance lock, Windows
+  install folder (`%LOCALAPPDATA%\Insight Workfolio Test`), uninstall entry and sign-in Run value. It is not
+  a choice: `WORKFOLIO_ENV=production|staging` with a placeholder API is refused, and `test` with a real
+  API is refused, so a test build can never install over, update or share data with a real one.
 
 `scripts/desktop-config.mjs` validates the URL, writes a temporary `tauri build --config` override
 whose CSP `connect-src` is `'self' ipc: http://ipc.localhost <API origin>` (the dev
@@ -372,6 +378,48 @@ hook, so they are never distributed). **Release builds are https only**: a relea
 through `pnpm package` (the CSP would not match). If a bundle is misconfigured anyway, the app
 shows the error on the sign-in screen and never contacts any server. The API's `CORS_ORIGINS`
 must include the desktop origins (see above).
+
+### CI installers (unsigned, every push)
+
+`.github/workflows/ci.yml` builds both desktop installers on every push to any branch and on a manual
+run, never on a tag. Pull requests get the same checks and tests but no installers (validation only).
+There is no path filter: a documentation-only push builds both installers too. A push runs the `ci.yml`
+of the pushed branch, so a branch gets this only once it contains this `ci.yml` (merge or rebase it in).
+
+| Platform | Job | Output |
+|---|---|---|
+| Windows x64 | `windows-desktop` | NSIS `Insight Workfolio Test_<version>_x64-setup_UNSIGNED-TEST.exe` |
+| macOS universal (Apple Silicon + Intel in one app) | `macos-desktop` | `Insight Workfolio Test_<version>_universal_UNSIGNED-TEST.dmg` |
+
+(A manual QA run for a real API: `Insight Workfolio_<version>_…_UNSIGNED-QA.<ext>`.)
+
+Each installer is its own artifact on the run page (Actions > the run > Artifacts), kept 14 days:
+`insight-workfolio_<version>_<platform>-<arch>_UNSIGNED-<TEST|QA>_run<run id>-<attempt>`. It holds the
+installer, `<installer>.sha256` and `build-metadata.json` (platform, arch, version, size, SHA-256, build
+type, identity, product name, bundle id, API URL, commit, branch, run). Builds are not byte-reproducible: the same commit built twice gives
+two SHA-256 values, so always quote the run id with a checksum.
+
+- **TEST** (every push): packaged for the placeholder `https://api.example.invalid`, which can never
+  resolve. Use it to test installing, the tray and uninstalling. It cannot sign in anywhere. It is the
+  separate app "Insight Workfolio Test" (`com.insightworkfolio.desktop.test`, see "Desktop API URL"
+  above): it installs beside a production or staging app and shares nothing with it. The job checks
+  that identity from the built bytes and fails if a TEST build carries the production one.
+- **QA** (manual run with `desktop_api_url` and `desktop_dashboard_url`): packaged for that server, with
+  the **production** identity (`com.insightworkfolio.desktop`), exactly as manual QA builds were before:
+  installing one replaces an installed production app on that machine.
+- Both are **unsigned**, not notarized and have no in-app updater: SmartScreen warns on Windows, and
+  Gatekeeper blocks the app on another Mac. The repository is public: anyone signed in to GitHub can
+  download these artifacts, so a QA build publishes the API URL it was built for. Never distribute them;
+  signed builds come from `desktop-build.yml` (`desktop-release.yml`, `desktop-publish.yml`).
+- The Intel half of the universal app is built and its architecture and packaged API origin are read
+  from the built bytes (`lipo`); CI does not launch it, and it has not been run on Intel hardware.
+
+The last job, `installers`, downloads both artifacts and fails the run unless there is one Windows and
+one macOS installer built from that commit whose size and SHA-256 match (`deploy/scripts/ci-desktop-installer.sh`;
+its header shows how to run the macOS check on a Mac). A failed or skipped platform job therefore never
+leaves a green run. Push and manual runs are never cancelled by another run; only a superseded
+pull-request run is. A plain manual run also runs the browser suites, so it can be red from those
+while both installers are fine; a manual run with `desktop_api_url` skips them.
 
 ### macOS bundle, signing and notarization
 
@@ -416,8 +464,9 @@ codesign -dv --verbose=4 apps/desktop/src-tauri/target/release/bundle/macos/Insi
 ```
 
 Universal binary (Apple silicon + Intel): `rustup target add x86_64-apple-darwin`, then add
-`--target universal-apple-darwin` to the `package` command. The x86_64 target is not installed
-on the current build Mac, so builds so far are Apple silicon only.
+`--target universal-apple-darwin` to the `package` command. Built this way on the build Mac
+(0.2.1, 2026-11-18: `lipo` shows arm64 and x86_64), and the CI `macos-desktop` job builds the same
+target. The Intel half has not been launched on Intel hardware.
 
 Launch at login uses `SMAppService.mainApp` (macOS 13+), which registers the signed `.app` itself;
 it appears in System Settings > General > Login Items. An unsigned or moved copy may fail to
@@ -429,8 +478,9 @@ Installer: NSIS, per user, no admin (`bundle.windows` in `tauri.conf.json`; deta
 docs/windows.md "App shell"). Built on Windows (CI `windows-latest`), not on the Mac.
 The CI job `windows-desktop` (.github/workflows/ci.yml) runs clippy and `cargo test` on Windows,
 including the native smoke tests. It also builds an **unsigned NSIS test installer** against the
-placeholder `https://api.example.invalid`, kept as a workflow artifact for 7 days. That installer
-can't reach any server; use it to test installing, the tray and uninstalling, never to distribute.
+placeholder `https://api.example.invalid`, kept as a workflow artifact for 14 days ("CI installers"
+above). That installer can't reach any server; use it to test installing, the tray and uninstalling,
+never to distribute.
 For a real build, run `pnpm package` with the production URL (and signing) on a Windows machine.
 
 **Unsigned (today).** `certificateThumbprint` is `null`, so the installer and exe are unsigned.
