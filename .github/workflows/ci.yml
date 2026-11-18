@@ -5,7 +5,8 @@ name: CI
 on:
   pull_request:
   push:
-    branches: [main]
+    # The feature branch gets an automatic unsigned Windows QA installer (windows-desktop job) on every push.
+    branches: [main, feature/windows-screen-lock-break]
   workflow_dispatch:
     inputs:
       # Set both to build the Windows installer for a real server instead of the placeholder (still unsigned).
@@ -189,8 +190,12 @@ jobs:
           origin=$(node -e 'console.log(new URL(process.env.API_URL).origin)')
           grep -rqF "$origin" apps/desktop/dist/assets
           grep -aqF "$origin" apps/desktop/src-tauri/target/release/*.exe
-          ! grep -aqF "localhost:4000" apps/desktop/src-tauri/target/release/*.exe
-          if [ "$origin" != "https://api.example.invalid" ]; then ! grep -aqF "example.invalid" apps/desktop/src-tauri/target/release/*.exe; fi
+          if grep -aqF "localhost:4000" apps/desktop/src-tauri/target/release/*.exe; then
+            echo "::error::app binary contains the dev API localhost:4000"; exit 1
+          fi
+          if [ "$origin" != "https://api.example.invalid" ] && grep -aqF "example.invalid" apps/desktop/src-tauri/target/release/*.exe; then
+            echo "::error::real-server build still contains the example.invalid placeholder"; exit 1
+          fi
           echo "packaged API origin: $origin"
           ls -l apps/desktop/src-tauri/target/release/bundle/nsis/*.exe
           sha256sum apps/desktop/src-tauri/target/release/bundle/nsis/*.exe
@@ -221,7 +226,8 @@ jobs:
       - name: Upload unsigned NSIS installer, checksum and metadata
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ inputs.desktop_api_url && 'insight-workfolio-windows-nsis-UNSIGNED' || 'insight-workfolio-windows-nsis-UNSIGNED-TEST-ONLY' }}
+          # Run id + attempt: every run (and re-run) gets its own artifact; nothing is ever replaced.
+          name: ${{ inputs.desktop_api_url && 'insight-workfolio-windows-nsis-UNSIGNED' || 'insight-workfolio-windows-nsis-UNSIGNED-TEST-ONLY' }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: qa/
           if-no-files-found: error
           retention-days: 14
