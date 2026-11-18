@@ -129,7 +129,7 @@ const { AppModule } = await import("../dist/app.module.js");
 const { configureApp } = await import("../dist/app.setup.js");
 const { DATABASE } = await import("../dist/database/database.module.js");
 const { hashPassword } = await import("../dist/auth/crypto.js");
-const { readOneDriveConnection, scopesAcceptable } = await import("../dist/storage/onedrive.js");
+const { readOneDriveConnection, scopesAcceptable, oneDriveScopes } = await import("../dist/storage/onedrive.js");
 const { SCREENSHOT_STORAGE, ONEDRIVE_AUTH } = await import("../dist/screenshots/storage.js");
 const { run: backupUpload } = await import("../dist/cli/backup-upload.js");
 const { TimelapseService } = await import("../dist/screenshots/timelapse.service.js");
@@ -209,12 +209,16 @@ after(async () => {
 });
 
 describe("OneDrive (IT storage account, delegated Files.ReadWrite) — MOCKED Microsoft", () => {
-  test("scope policy: Files.ReadWrite only; anything tenant-wide or site-wide is refused", () => {
+  test("scope policy: Files.ReadWrite required, delegated Mail.Send tolerated; anything tenant-wide, site-wide or other mail access is refused", () => {
     assert.ok(scopesAcceptable("Files.ReadWrite openid profile offline_access"));
     assert.ok(scopesAcceptable("https://graph.microsoft.com/Files.ReadWrite https://graph.microsoft.com/User.Read openid"));
-    for (const bad of ["openid profile", "Files.ReadWrite Files.ReadWrite.All", "Files.ReadWrite Sites.Selected", "Files.ReadWrite Sites.ReadWrite.All", "Files.ReadWrite Mail.Read", undefined]) {
-      assert.equal(scopesAcceptable(bad), false, String(bad));
-    }
+    assert.ok(scopesAcceptable("Files.ReadWrite Mail.Send openid profile offline_access"));
+    assert.ok(scopesAcceptable("https://graph.microsoft.com/Files.ReadWrite https://graph.microsoft.com/Mail.Send"));
+    const bad = ["openid profile", "Mail.Send openid offline_access", "Files.ReadWrite Files.ReadWrite.All", "Files.ReadWrite Sites.Selected", "Files.ReadWrite Sites.ReadWrite.All", "Files.ReadWrite Mail.Read", "Files.ReadWrite Mail.ReadWrite", "Files.ReadWrite Mail.Send.Shared", "Files.ReadWrite Mail.Send User.Read.All", undefined];
+    for (const scope of bad) assert.equal(scopesAcceptable(scope), false, String(scope));
+    // Mail.Send is requested only for graph-delegated invitations: a refresh naming an ungranted scope would fail.
+    assert.equal(oneDriveScopes(false), "offline_access openid profile Files.ReadWrite");
+    assert.equal(oneDriveScopes(true), "offline_access openid profile Files.ReadWrite Mail.Send");
   });
 
   test("before connecting: status says not connected, uploads fail safely, admin-only endpoints", async () => {

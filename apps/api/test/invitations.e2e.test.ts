@@ -20,7 +20,9 @@ const { configureApp } = await import("../dist/app.setup.js");
 const { DATABASE } = await import("../dist/database/database.module.js");
 const { hashPassword, sha256 } = await import("../dist/auth/crypto.js");
 const { AuthService } = await import("../dist/auth/auth.service.js");
-const { INVITATION_TRANSPORT, INVITATION_RETRY, INVITATION_SUBJECT, GraphMailTransport } = await import("../dist/employees/invitations.js");
+const { INVITATION_TRANSPORT, INVITATION_RETRY, INVITATION_SUBJECT, GraphMailTransport, DelegatedGraphMailTransport } = await import("../dist/employees/invitations.js");
+const { OneDriveService, writeOneDriveConnection, readOneDriveConnection } = await import("../dist/storage/onedrive.js");
+const { StorageError } = await import("../dist/screenshots/storage.js");
 type MailError = Error & { permanent: boolean };
 
 const ORIGIN = "http://localhost:3000";
@@ -307,5 +309,165 @@ describe("Microsoft Graph transport (fake fetch, nothing contacts Microsoft)", (
     assert.equal(f.calls.filter((c) => c.url.includes("/token")).length, 2, "a fresh token after 401");
     const bad = fake([Response.json({ error: "invalid_client" }, { status: 401 })]);
     await assert.rejects(new GraphMailTransport(cfg, bad.fn).send(message), (e: MailError) => e.permanent && /invalid_client/.test(e.message));
+  });
+});
+
+describe("Microsoft Graph DELEGATED transport (fake fetch and fake OneDrive connection, nothing contacts Microsoft)", () => {
+  const message = { to: "new@example.com", subject: "S", text: "T", html: "<p>H</p>" };
+  type Call = { url: string; init: RequestInit };
+  function fake(responses: (Response | Error)[]) {
+    const calls: Call[] = [];
+    const fn = (async (url: string, init: RequestInit) => {
+      calls.push({ url, init });
+      const r = responses.shift()!;
+      if (r instanceof Error) throw r;
+      return r;
+    }) as unknown as typeof fetch;
+    return { calls, fn };
+  }
+  /** Stands in for OneDriveService.token: records `fresh`, hands out the queued tokens (or throws the queued error). */
+  function auth(...tokens: (string | Error)[]) {
+    const asked: boolean[] = [];
+    return {
+      asked,
+      token: async (fresh: boolean) => {
+        asked.push(fresh);
+        const t = tokens.shift()!;
+        if (t instanceof Error) throw t;
+        return t;
+      },
+    };
+  }
+  const bearer = (c: Call) => (c.init.headers as Record<string, string>).authorization;
+  const noLeak = (e: MailError, ...tokens: string[]) => tokens.every((t) => !e.message.includes(t));
+
+  test("POST /me/sendMail with the OneDrive connection's token: HTML, one recipient, no Sent Items copy, recorded as graph", async () => {
+    const f = fake([new Response(null, { status: 202, headers: { "request-id": "req-9" } })]);
+    const a = auth("at-cached");
+    const t = new DelegatedGraphMailTransport(a, f.fn);
+    assert.deepEqual([t.name, t.delivers], ["graph", true]);
+    assert.deepEqual(await t.send(message), { messageId: "req-9" });
+    assert.deepEqual(a.asked, [false], "the cached token, no forced refresh");
+    assert.equal(f.calls.length, 1);
+    assert.equal(f.calls[0]!.url, "https://graph.microsoft.com/v1.0/me/sendMail", "/me: only the signed-in account can be the sender");
+    assert.equal(bearer(f.calls[0]!), "Bearer at-cached");
+    assert.deepEqual(JSON.parse(String(f.calls[0]!.init.body)), { message: { subject: "S", body: { contentType: "HTML", content: "<p>H</p>" }, toRecipients: [{ emailAddress: { address: "new@example.com" } }] }, saveToSentItems: false });
+  });
+
+  test("401: one fresh token and one retry; a second 401 is a permanent failure, never a loop", async () => {
+    const ok = fake([new Response(null, { status: 401 }), new Response(null, { status: 202 })]);
+    const a = auth("at-stale", "at-fresh");
+    await new DelegatedGraphMailTransport(a, ok.fn).send(message);
+    assert.deepEqual(a.asked, [false, true]);
+    assert.deepEqual(ok.calls.map(bearer), ["Bearer at-stale", "Bearer at-fresh"]);
+
+    const twice = fake([new Response(null, { status: 401 }), Response.json({ error: { code: "InvalidAuthenticationToken", message: "at-fresh is bad" } }, { status: 401 }), new Response(null, { status: 202 })]);
+    const b = auth("at-stale", "at-fresh", "at-third");
+    await assert.rejects(new DelegatedGraphMailTransport(b, twice.fn).send(message), (e: MailError) => e.permanent && /HTTP 401, InvalidAuthenticationToken/.test(e.message) && /reconnect OneDrive/.test(e.message) && noLeak(e, "at-stale", "at-fresh"));
+    assert.deepEqual([twice.calls.length, b.asked.length], [2, 2], "exactly two attempts");
+  });
+
+  test("failures: 403 says to grant Mail.Send and reconnect; 429/5xx/network transient; 4xx permanent; no token or response text in errors", async () => {
+    const cases: [Response | Error, boolean, RegExp][] = [
+      [Response.json({ error: { code: "ErrorAccessDenied", message: "secret detail at-1" } }, { status: 403 }), true, /HTTP 403, ErrorAccessDenied\); grant delegated Mail\.Send to the app, then reconnect OneDrive/],
+      [new Response(null, { status: 429 }), false, /HTTP 429/],
+      [new Response(null, { status: 503 }), false, /HTTP 503/],
+      [new TypeError("fetch failed at-1"), false, /could not be reached/],
+      [Response.json({ error: { code: "ErrorInvalidRecipients" } }, { status: 400 }), true, /HTTP 400, ErrorInvalidRecipients/],
+      [Response.json({ error: { code: "not a code; <script>" } }, { status: 400 }), true, /HTTP 400\)$/],
+    ];
+    for (const [res, permanent, text] of cases) {
+      const f = fake([res]);
+      await assert.rejects(new DelegatedGraphMailTransport(auth("at-1"), f.fn).send(message), (e: MailError) => {
+        assert.equal(e.permanent, permanent, e.message);
+        assert.match(e.message, text);
+        assert.ok(noLeak(e, "at-1", "secret detail"), e.message);
+        return true;
+      });
+    }
+  });
+
+  test("no usable token: not connected / revoked is permanent, an unreachable Microsoft is transient, an empty token is never sent", async () => {
+    const cases: [string | Error, boolean, RegExp][] = [
+      [new StorageError("OneDrive is not connected yet; an administrator connects it in Settings › Storage"), true, /not connected yet/],
+      [new StorageError("OneDrive authorization expired or was revoked; reconnect OneDrive"), true, /reconnect OneDrive/],
+      [new StorageError("OneDrive token carries a scope beyond Files.ReadWrite and Mail.Send; refusing to use it"), true, /refusing to use it/],
+      [new StorageError("Microsoft token request failed (timed out)"), false, /timed out/],
+      [new StorageError("Microsoft token request failed (unreachable)"), false, /unreachable/],
+      [new Error("boom with rt-secret"), true, /unexpected error/],
+      ["", true, /No Microsoft token/],
+    ];
+    for (const [token, permanent, text] of cases) {
+      const f = fake([]);
+      await assert.rejects(new DelegatedGraphMailTransport(auth(token), f.fn).send(message), (e: MailError) => e.permanent === permanent && text.test(e.message) && noLeak(e, "rt-secret"));
+      assert.equal(f.calls.length, 0, "sendMail never called without a token");
+    }
+  });
+
+  test("with the real OneDriveService: sign-in and refresh request Mail.Send only for graph-delegated; the rotated refresh token is persisted; a wider token is refused", async () => {
+    const { mkdtempSync, rmSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const dir = mkdtempSync(join(tmpdir(), "wf-delegated-mail-"));
+    try {
+      const key = Buffer.alloc(32, 9);
+      const env = (provider: string): Record<string, string> => ({
+        ONEDRIVE_TENANT_ID: "tenant-1",
+        ONEDRIVE_CLIENT_ID: "client-1",
+        ONEDRIVE_CLIENT_SECRET: "s3cret-value",
+        ONEDRIVE_REDIRECT_URI: "https://api.example.com/api/v1/storage/onedrive/oauth/callback",
+        ONEDRIVE_TOKEN_FILE: join(dir, "onedrive.json"),
+        ONEDRIVE_TOKEN_KEY: key.toString("base64"),
+        ONEDRIVE_ACCOUNT_EMAIL: "it@tffdigital.com",
+        ONEDRIVE_ROOT_FOLDER: "InsightWorkfolio",
+        INVITATION_MAIL_PROVIDER: provider,
+      });
+      const service = (provider: string) => new OneDriveService({ get: (k: string) => env(provider)[k] } as never);
+      const scopeOf = (url: string) => new URL(url).searchParams.get("scope");
+      assert.equal(scopeOf(service("none").begin("u").url), "offline_access openid profile Files.ReadWrite");
+      assert.equal(scopeOf(service("graph-delegated").begin("u").url), "offline_access openid profile Files.ReadWrite Mail.Send");
+
+      const connection = { tenantId: "tenant-1", clientId: "client-1", account: "it@tffdigital.com", userId: "oid-it", driveId: "drv", folderId: "fld", refreshToken: "rt-old", connectedAt: new Date().toISOString() };
+      await writeOneDriveConnection(env("x").ONEDRIVE_TOKEN_FILE!, key, connection);
+      const od = service("graph-delegated");
+      const f = fake([
+        Response.json({ access_token: "at-mail", expires_in: 3600, refresh_token: "rt-new", scope: "Files.ReadWrite Mail.Send openid profile" }),
+        new Response(null, { status: 202 }),
+        new Response(null, { status: 202 }),
+      ]);
+      od.fetchFn = f.fn;
+      const t = new DelegatedGraphMailTransport(od, f.fn);
+      await t.send(message);
+      await t.send(message);
+      assert.equal(f.calls.length, 3, "one refresh for two sends");
+      const form = f.calls[0]!.init.body as URLSearchParams;
+      assert.deepEqual([form.get("grant_type"), form.get("refresh_token"), form.get("scope")], ["refresh_token", "rt-old", "offline_access openid profile Files.ReadWrite Mail.Send"]);
+      assert.deepEqual([f.calls[1]!.url, bearer(f.calls[1]!)], ["https://graph.microsoft.com/v1.0/me/sendMail", "Bearer at-mail"]);
+      assert.equal((await readOneDriveConnection(env("x").ONEDRIVE_TOKEN_FILE!, key))!.refreshToken, "rt-new", "rotation written back to the shared encrypted file");
+
+      // storage-only configuration: the refresh does not ask for Mail.Send, yet tolerates a token that reports it
+      const plain = service("none");
+      const g = fake([Response.json({ access_token: "at-2", expires_in: 3600, refresh_token: "rt-3", scope: "Files.ReadWrite Mail.Send openid" })]);
+      plain.fetchFn = g.fn;
+      assert.equal(await plain.token(false), "at-2");
+      assert.equal((g.calls[0]!.init.body as URLSearchParams).get("scope"), "offline_access openid profile Files.ReadWrite");
+
+      // a token wider than Files.ReadWrite + Mail.Send is not used and nothing is sent
+      const wide = service("graph-delegated");
+      const h = fake([Response.json({ access_token: "at-wide", expires_in: 3600, refresh_token: "rt-4", scope: "Files.ReadWrite Mail.Send Mail.ReadWrite" })]);
+      wide.fetchFn = h.fn;
+      await assert.rejects(new DelegatedGraphMailTransport(wide, h.fn).send(message), (e: MailError) => e.permanent && /scope beyond Files\.ReadWrite and Mail\.Send/.test(e.message) && noLeak(e, "at-wide", "rt-4"));
+      assert.equal(h.calls.length, 1, "sendMail never called");
+
+      // the connection of another account is never used to send
+      await writeOneDriveConnection(env("x").ONEDRIVE_TOKEN_FILE!, key, { ...connection, account: "someone@tffdigital.com" });
+      const other = service("graph-delegated");
+      const i = fake([]);
+      other.fetchFn = i.fn;
+      await assert.rejects(new DelegatedGraphMailTransport(other, i.fn).send(message), (e: MailError) => e.permanent && /another app registration, tenant or account/.test(e.message));
+      assert.equal(i.calls.length, 0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

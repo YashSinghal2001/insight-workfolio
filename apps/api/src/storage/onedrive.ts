@@ -17,6 +17,8 @@ import { type GraphAuth, StorageError, teamFolder } from "../screenshots/storage
  * the account signs in once (authorization code + PKCE, confidential client) and grants only
  * Files.ReadWrite (its own files, nothing shared, no SharePoint sites) and offline_access. No application
  * permission, no tenant-wide access, no site or folder grant.
+ * - With INVITATION_MAIL_PROVIDER=graph-delegated the same sign-in also grants delegated Mail.Send (send as that
+ *   one account, docs/invitations.md); the invitation transport takes its access token from token() here.
  * - Only ONEDRIVE_ACCOUNT_EMAIL in ONEDRIVE_TENANT_ID is accepted; any other sign-in is discarded.
  * - The refresh token lives only in ONEDRIVE_TOKEN_FILE on the API host, AES-256-GCM encrypted with
  *   ONEDRIVE_TOKEN_KEY (0600, never in a response, URL or log). Microsoft rotates it on every use; the
@@ -29,8 +31,18 @@ import { type GraphAuth, StorageError, teamFolder } from "../screenshots/storage
 const LOGIN = "https://login.microsoftonline.com";
 const GRAPH = "https://graph.microsoft.com/v1.0";
 export const ONEDRIVE_SCOPES = "offline_access openid profile Files.ReadWrite";
-/** Scopes the token may report (Microsoft lists every scope consented for the app). Anything else, e.g. *.All or Sites.*, is refused. */
-const ALLOWED_SCOPES = new Set(["files.readwrite", "openid", "profile", "email", "offline_access", "user.read"]);
+/**
+ * Scopes requested at sign-in and on every refresh. Mail.Send is requested only when invitations are sent through
+ * this connection: Microsoft refuses a refresh that names a scope the app has not been granted, so asking for it
+ * unconditionally would stop storage and backups wherever the permission is absent.
+ */
+export const oneDriveScopes = (mailSend: boolean) => (mailSend ? `${ONEDRIVE_SCOPES} Mail.Send` : ONEDRIVE_SCOPES);
+/**
+ * Scopes the token may report (Microsoft lists every scope consented for the app). mail.send (delegated: send as
+ * the signed-in account only) is tolerated whether or not it was requested, so granting it in Entra cannot stop
+ * storage. Anything else, e.g. *.All, Sites.*, Mail.Read or Mail.Send.Shared, is refused.
+ */
+const ALLOWED_SCOPES = new Set(["files.readwrite", "mail.send", "openid", "profile", "email", "offline_access", "user.read"]);
 const STATE_TTL_MS = 10 * 60_000;
 const MAX_PENDING = 20;
 const TIMEOUT_MS = 30_000;
@@ -50,6 +62,8 @@ export interface OneDriveConfig {
   /** The one account allowed to connect (lowercase UPN). */
   account: string;
   rootFolder: string;
+  /** Also request delegated Mail.Send (INVITATION_MAIL_PROVIDER=graph-delegated). */
+  mailSend: boolean;
 }
 
 export function oneDriveConfigFrom(config: ConfigService<Env, true>): OneDriveConfig | null {
@@ -64,6 +78,7 @@ export function oneDriveConfigFrom(config: ConfigService<Env, true>): OneDriveCo
     tokenKey: Buffer.from(config.get("ONEDRIVE_TOKEN_KEY", { infer: true })!, "base64"),
     account: config.get("ONEDRIVE_ACCOUNT_EMAIL", { infer: true })!,
     rootFolder: config.get("ONEDRIVE_ROOT_FOLDER", { infer: true }),
+    mailSend: config.get("INVITATION_MAIL_PROVIDER", { infer: true }) === "graph-delegated",
   };
 }
 
@@ -124,7 +139,7 @@ interface TokenResponse {
   scope?: string;
 }
 
-/** Only allow-listed scopes (Graph's "https://graph.microsoft.com/" prefix ignored); Files.ReadWrite required. */
+/** Only allow-listed scopes (Graph's "https://graph.microsoft.com/" prefix ignored); Files.ReadWrite required, Mail.Send optional. */
 export function scopesAcceptable(scope: unknown): boolean {
   if (typeof scope !== "string") return false;
   const s = scope.split(" ").filter(Boolean).map((x) => x.replace(/^https:\/\/graph\.microsoft\.com\//i, "").toLowerCase());
@@ -196,6 +211,8 @@ export class OneDriveService implements GraphAuth {
   /** Bumped by connect/disconnect: a refresh that started before must not write its token back. */
   private generation = 0;
   private lastCheck: { at: string; ok: boolean; error: string | null; quota: OneDriveHealth["quota"] } | null = null;
+  /** Whether the last token Microsoft issued reports Mail.Send; null until one was issued with a scope list. */
+  mailSendGranted: boolean | null = null;
   /** Replaced in tests. */
   fetchFn: typeof fetch = (...a) => fetch(...a);
 
@@ -245,13 +262,14 @@ export class OneDriveService implements GraphAuth {
       client_secret: cfg.clientSecret,
       grant_type: "refresh_token",
       refresh_token: c.refreshToken,
-      scope: ONEDRIVE_SCOPES,
+      scope: oneDriveScopes(cfg.mailSend),
     }).catch((err: unknown) => {
       this.access = null;
       throw err;
     });
-    if (t.scope !== undefined && !scopesAcceptable(t.scope)) throw new StorageError("OneDrive token carries a scope beyond Files.ReadWrite; refusing to use it");
+    if (t.scope !== undefined && !scopesAcceptable(t.scope)) throw new StorageError("OneDrive token carries a scope beyond Files.ReadWrite and Mail.Send; refusing to use it");
     if (gen !== this.generation) throw new StorageError("OneDrive was reconnected or disconnected meanwhile; try again");
+    if (t.scope !== undefined) this.mailSendGranted = /(^|[\s/])mail\.send(\s|$)/i.test(t.scope);
     if (t.refresh_token && t.refresh_token !== c.refreshToken) {
       const next = { ...c, refreshToken: t.refresh_token };
       await writeOneDriveConnection(cfg.tokenFile, cfg.tokenKey, next).catch(() => {
@@ -279,7 +297,7 @@ export class OneDriveService implements GraphAuth {
       redirect_uri: this.cfg.redirectUri,
       response_type: "code",
       response_mode: "query",
-      scope: ONEDRIVE_SCOPES,
+      scope: oneDriveScopes(this.cfg.mailSend),
       state,
       login_hint: this.cfg.account,
       prompt: "select_account",
@@ -328,11 +346,11 @@ export class OneDriveService implements GraphAuth {
       code,
       redirect_uri: cfg.redirectUri,
       code_verifier: verifier,
-      scope: ONEDRIVE_SCOPES,
+      scope: oneDriveScopes(cfg.mailSend),
     });
     // Refused grants are simply not kept (Microsoft has no endpoint to revoke one refresh token).
     if (!t.refresh_token || !t.id_token) throw new StorageError("Microsoft did not return offline access");
-    if (!scopesAcceptable(t.scope)) throw new StorageError("Microsoft granted scopes beyond Files.ReadWrite; not kept");
+    if (!scopesAcceptable(t.scope)) throw new StorageError("Microsoft granted scopes beyond Files.ReadWrite and Mail.Send; not kept");
     // The ID token comes straight from the token endpoint over TLS (OIDC Core 3.1.3.7): its claims are trusted as is.
     const claims = decodeJwt(t.id_token);
     const account = String(claims.preferred_username ?? "").toLowerCase();
@@ -364,6 +382,7 @@ export class OneDriveService implements GraphAuth {
     this.generation++;
     this.conn = c;
     this.access = { value: t.access_token, expiresAt: Date.now() + t.expires_in * 1000 };
+    this.mailSendGranted = /(^|[\s/])mail\.send(\s|$)/i.test(t.scope ?? "");
     this.lastCheck = null;
     return c;
   }
@@ -419,6 +438,7 @@ export class OneDriveService implements GraphAuth {
     await rm(cfg.tokenFile, { force: true });
     this.conn = null;
     this.access = null;
+    this.mailSendGranted = null;
     this.lastCheck = null;
     this.log.log({ by: userId }, "OneDrive disconnected");
   }

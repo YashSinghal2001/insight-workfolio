@@ -49,6 +49,16 @@ privilege are product requirements, not afterthoughts.
 - The only intended permission is `Sites.Selected` with a grant on the dedicated storage site.
   Before and after any consent or grant change, run an app-only probe and confirm 403 outside the target.
 - Details and the remaining manual cleanup: docs/onedrive.md.
+- **Delegated `Mail.Send` on the OneDrive app (2026-11-18, `INVITATION_MAIL_PROVIDER=graph-delegated`).** The
+  OneDrive registration may additionally hold delegated `Mail.Send`, nothing else. Consequences accepted with it:
+  the encrypted OneDrive refresh token (`ONEDRIVE_TOKEN_FILE` + `ONEDRIVE_TOKEN_KEY` + the client secret, all
+  three needed) can then send mail **as `IT@TFFDigital.com` only**; it cannot read mail or send as anyone else
+  (`/me/sendMail`, delegated). The API refuses any token reporting a scope beyond `Files.ReadWrite` and
+  `Mail.Send` (so `Mail.Read*`, `Mail.Send.Shared`, `*.All`, `Sites.*` stop storage and mail rather than being
+  used), still accepts only `ONEDRIVE_ACCOUNT_EMAIL` in `ONEDRIVE_TENANT_ID`, and requires `MAIL_SENDER` to be
+  that account. Sending is bounded per admin (30 per 15 minutes) and audited. **Order matters:** deploy the code
+  that tolerates `Mail.Send` *before* granting it in Entra; older builds refuse such a token and storage and the
+  off-site backup stop until the grant is removed (docs/invitations.md §4).
 
 #### Microsoft app re-consent guard
 

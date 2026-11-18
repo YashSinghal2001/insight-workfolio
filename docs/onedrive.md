@@ -15,6 +15,13 @@ report (fake Microsoft only): [status/ONEDRIVE-INTEGRATION-REPORT.md](status/ONE
   for the sign-in name). That is the account's own files only: no SharePoint sites, no other users, nothing
   shared with it, no application permission, no admin consent for tenant-wide access, no site or folder grant.
   A token reporting any other scope (e.g. `*.All`, `Sites.*`) is refused; another account or tenant is refused.
+- **Invitation emails (2026-11-18, optional):** with `INVITATION_MAIL_PROVIDER=graph-delegated` the same sign-in
+  also requests delegated **`Mail.Send`** (send as the signed-in account only) and invitations go out through this
+  connection's token ([invitations.md](invitations.md) §2 to §4). `Mail.Send` is requested **only** in that mode
+  (Microsoft refuses a refresh naming a scope the app does not hold), but a token that reports it is accepted in
+  every mode, so granting it in Entra does not stop storage or backups. Other mail scopes (`Mail.Read`,
+  `Mail.ReadWrite`, `Mail.Send.Shared`) are still refused. After `Mail.Send` is granted, **reconnect** once
+  (Settings › Microsoft OneDrive › Reconnect) so the stored refresh token carries it.
 - **Tokens:** the refresh token is kept only in `ONEDRIVE_TOKEN_FILE` (persistent disk, 0600), AES-256-GCM
   encrypted with `ONEDRIVE_TOKEN_KEY`. Microsoft rotates it on every refresh; the new one is written back
   atomically, so the connection survives restarts. Access tokens live in memory (refreshed 5 minutes
@@ -42,7 +49,8 @@ report (fake Microsoft only): [status/ONEDRIVE-INTEGRATION-REPORT.md](status/ONE
 1. **New** Entra app registration (not the Sites.Selected app: see the SEC-11 guard below): single tenant,
    platform **Web**, redirect URI `https://<API host>/api/v1/storage/onedrive/oauth/callback`
    (and `http://localhost:4000/...` for a local test), a client secret.
-2. API permissions: Microsoft Graph **delegated** `Files.ReadWrite`, `offline_access`, `openid`, `profile`.
+2. API permissions: Microsoft Graph **delegated** `Files.ReadWrite`, `offline_access`, `openid`, `profile`
+   (plus delegated `Mail.Send` only when invitations are sent through this connection, see above).
    No application permissions. If the tenant blocks user consent, an admin consents to exactly these.
 3. Optional hardening: Enterprise app › Properties › *Assignment required* = Yes, assign only `IT@TFFDigital.com`.
 4. Set the `ONEDRIVE_*` variables on the API, then an admin opens Settings › Microsoft OneDrive › Connect
