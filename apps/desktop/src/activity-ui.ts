@@ -38,6 +38,8 @@ interface CollectorStatus {
   idleSeconds?: number | null;
   idleThresholdSeconds?: number;
   sampleSeconds?: number;
+  /** Windows only: the screen was locked by hand and a break is starting (collector.rs). */
+  lockBreak?: boolean;
   /** App Nap opt-out in force (only while recording). */
   appNapPrevented?: boolean;
   error: string | null;
@@ -290,7 +292,7 @@ export function initActivity(ctx: ActivityContext) {
     $("#mon-app").textContent = collectorStateText(collector, decision.mode === "ACTIVE", clock);
     // The threshold in force in the collector while recording, otherwise the organization's policy.
     const idleAfter = (collector.collecting && collector.idleThresholdSeconds) || policy().idleThresholdSeconds;
-    $("#mon-idle-after").textContent = `${idleAfter % 60 ? `${idleAfter} s` : `${idleAfter / 60} min`} without keyboard or mouse input, or as soon as the screen is locked`;
+    $("#mon-idle-after").textContent = `${idleAfter % 60 ? `${idleAfter} s` : `${idleAfter / 60} min`} without keyboard or mouse input, or as soon as the screen is locked${s.platform === "windows" ? ". Locking the screen yourself (Win+L) starts a break instead; unlocking ends it" : ""}`;
 
     const today = status && status.today.date === todayIn(s.profile!.timezone) ? status.today : { activeMs: 0, idleMs: 0 };
     $("#mon-today-active").textContent = formatDuration(today.activeMs + unsynced.activeMs);

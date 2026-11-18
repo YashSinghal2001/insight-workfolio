@@ -30,6 +30,7 @@ import { edgeNotifier } from "./notify.ts";
 import { applyStaticWording, platformOf, setPlatform, words } from "./platform.ts";
 import { initPrefs } from "./prefs-ui.ts";
 import { initUpdates } from "./updates-ui.ts";
+import { lockBreakStep, type LockBreakMarker, type LockInput } from "./lock-break.ts";
 
 /** Set by vite.config.ts: "development" for `tauri dev` and debug bundles, "production" for release. */
 declare const __WORKFOLIO_API_MODE__: ApiUrlMode;
@@ -272,6 +273,7 @@ async function enter(profile: CachedProfile, online: boolean) {
   await startSync();
   show("signed-in");
   render();
+  checkScreenLock(); // restarted while a lock break runs: keep it if still locked, end it if not
   await activity.enter();
   await screenshots.enter();
   updates?.reportNow();
@@ -546,31 +548,63 @@ const STATE_ACTION = { CLOCK_IN: "Clock in", BREAK_START: "Break start", BREAK_E
 
 // ---- Actions ------------------------------------------------------------------
 
+/** Queues one attendance event (button or screen lock) at `occurredAt`; false when the state does not allow it. */
+async function recordAttendance(type: AttendanceEventType, occurredAt = new Date().toISOString()): Promise<boolean> {
+  const p = project(app.current, app.queued);
+  if (!app.queue || !app.engine || !p || !transition(p.state, type)) return false;
+  // Screenshots stop before the break / clock-out time is taken: nothing can be captured after it.
+  // A failure here does not block attendance; the update() after queuing pauses capture as well.
+  const halting = type === "BREAK_START" || type === "CLOCK_OUT";
+  if (halting) await screenshots.halt().catch((err) => console.error("screenshot halt failed", err));
+  try {
+    // Durable queue first; the upload happens afterwards (now, or when back online).
+    await app.queue.add({
+      id: crypto.randomUUID(),
+      userId: app.profile!.userId,
+      deviceId: app.device!.device!.id,
+      type,
+      occurredAt,
+      status: "PENDING",
+    });
+    await reloadQueue();
+  } finally {
+    if (halting) screenshots.release();
+  }
+  void app.engine.kick().then(reloadQueue);
+  return true;
+}
+
 for (const button of document.querySelectorAll<HTMLButtonElement>("[data-action]")) {
-  button.addEventListener("click", async () => {
-    const type = button.dataset.action as AttendanceEventType;
-    const p = project(app.current, app.queued);
-    if (!app.queue || !app.engine || !p || !transition(p.state, type)) return;
-    // Screenshots stop before the break / clock-out time is taken: nothing can be captured after it.
-    // A failure here does not block attendance; the update() after queuing pauses capture as well.
-    const halting = type === "BREAK_START" || type === "CLOCK_OUT";
-    if (halting) await screenshots.halt().catch((err) => console.error("screenshot halt failed", err));
-    try {
-      // Durable queue first; the upload happens afterwards (now, or when back online).
-      await app.queue.add({
-        id: crypto.randomUUID(),
-        userId: app.profile!.userId,
-        deviceId: app.device!.device!.id,
-        type,
-        occurredAt: new Date().toISOString(),
-        status: "PENDING",
-      });
-      await reloadQueue();
-    } finally {
-      if (halting) screenshots.release();
-    }
-    void app.engine.kick().then(reloadQueue);
-  });
+  button.addEventListener("click", () => void recordAttendance(button.dataset.action as AttendanceEventType));
+}
+
+// ---- Screen lock → break (lock-break.ts) ----------------------------------------------
+// One at a time, in arrival order, so overlapping lock/unlock/check steps cannot both start a break.
+let lockChain: Promise<void> = Promise.resolve();
+function onScreenLock(input: LockInput) {
+  lockChain = lockChain
+    .then(async () => {
+      // Windows only (Win+L). macOS never emits a hand lock; this also keeps a stale marker inert there.
+      if (app.platform !== "windows" || !app.profile || !app.queue || !app.engine) return;
+      const key = cacheKey("lock_break");
+      const marker = await kvGet<LockBreakMarker>(key);
+      const step = lockBreakStep(project(app.current, app.queued)?.state ?? null, marker, input);
+      // Marker before a BREAK_START (a restart in between still knows the break is the lock's); cleared
+      // after a BREAK_END (a failed queue write is retried by the next check).
+      if (step.marker && step.marker.lockedAtMs !== marker?.lockedAtMs) await kvSet(key, step.marker);
+      if (step.event) await recordAttendance(step.event.type, new Date(step.event.atMs).toISOString());
+      if (!step.marker && marker) await kvSet(key, null);
+    })
+    .catch((err) => console.error("screen lock break failed", err));
+}
+const checkScreenLock = () => {
+  if (IN_TAURI && app.platform === "windows" && app.profile) void invoke<boolean>("screen_locked").then((locked) => onScreenLock({ kind: "check", locked, nowMs: Date.now() }), () => undefined);
+};
+if (IN_TAURI) {
+  void listen<{ locked: boolean; atMs: number }>("screen-lock", ({ payload }) =>
+    onScreenLock(payload.locked ? { kind: "locked", atMs: payload.atMs } : { kind: "unlocked", atMs: payload.atMs }),
+  );
+  setInterval(checkScreenLock, POLL_MS);
 }
 
 $<HTMLFormElement>("#login-form").addEventListener("submit", async (e) => {

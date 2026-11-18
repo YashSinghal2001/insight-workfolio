@@ -8,6 +8,8 @@ test("live state: idle or locked is IDLE, asleep or another user is UNOBSERVED, 
   assert.equal(liveState(c, true, true), "ACTIVE");
   assert.equal(liveState({ ...c, idle: true }, true, true), "IDLE");
   assert.equal(liveState({ ...c, locked: true }, true, true), "IDLE", "a locked screen counts as idle (employee notice)");
+  assert.equal(liveState({ ...c, locked: true, lockBreak: false }, true, true), "IDLE", "macOS (lockBreak never set): unchanged");
+  assert.equal(liveState({ ...c, locked: true, lockBreak: true }, true, true), "UNOBSERVED", "Windows Win+L: a break, never idle");
   assert.equal(liveState({ ...c, locked: true, asleep: true }, true, true), "UNOBSERVED");
   assert.equal(liveState({ ...c, idle: true, sessionInactive: true }, true, true), "UNOBSERVED");
 });
