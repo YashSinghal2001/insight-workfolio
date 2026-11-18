@@ -97,6 +97,82 @@ jobs:
       - name: cargo test
         run: cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml
 
+  # macOS QA DMG, manual runs only. Apple Silicon, unsigned (ad-hoc), not notarized, no in-app updater
+  # (no WORKFOLIO_UPDATER_PUBKEY), so nothing here can be published. Same URL inputs as windows-desktop.
+  macos-desktop:
+    name: macOS desktop (unsigned aarch64 QA DMG)
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/desktop/src-tauri
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build:packages
+      - run: pnpm --filter @workfolio/desktop build
+      - name: Tests (TypeScript + Rust)
+        run: |
+          pnpm --filter @workfolio/desktop exec node --test
+          cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml
+      - name: Build UNSIGNED DMG (placeholder API URL unless desktop_api_url is given)
+        env:
+          WORKFOLIO_API_URL: ${{ inputs.desktop_api_url || 'https://api.example.invalid' }}
+          WORKFOLIO_DASHBOARD_URL: ${{ inputs.desktop_dashboard_url || (inputs.desktop_api_url && 'missing') || 'https://app.example.invalid' }}
+        run: pnpm --filter @workfolio/desktop package -- --bundles app,dmg
+      # Version, bundle identifier and architecture read from the app inside the built DMG (as desktop-build.yml).
+      - name: Verify DMG, write checksum and build metadata
+        env:
+          API_URL: ${{ inputs.desktop_api_url || 'https://api.example.invalid' }}
+          COMMIT: ${{ github.sha }}
+          REF: ${{ github.ref_name }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          v=$(node -p 'require("./apps/desktop/src-tauri/tauri.conf.json").version')
+          want_id=$(node -p 'require("./apps/desktop/src-tauri/tauri.conf.json").identifier')
+          dmgs=(apps/desktop/src-tauri/target/release/bundle/dmg/*_"$v"_aarch64.dmg)
+          [ ${#dmgs[@]} = 1 ] && [ -f "${dmgs[0]}" ] || { echo "expected exactly one aarch64 DMG for $v: ${dmgs[*]}"; exit 1; }
+          mnt=$(mktemp -d); hdiutil attach -nobrowse -readonly -mountpoint "$mnt" "${dmgs[0]}" >/dev/null
+          trap 'hdiutil detach "$mnt" -quiet || true' EXIT
+          apps=("$mnt"/*.app); [ ${#apps[@]} = 1 ] || { echo "expected one .app in the DMG"; exit 1; }
+          plist="${apps[0]}/Contents/Info.plist"
+          ver=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$plist")
+          id=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$plist")
+          exe=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$plist")
+          archs=$(lipo -archs "${apps[0]}/Contents/MacOS/$exe")
+          echo "app version $ver, identifier $id, architectures: $archs"
+          [ "$ver" = "$v" ] || { echo "app is $ver, not $v"; exit 1; }
+          [ "$id" = "$want_id" ] || { echo "identifier $id, expected $want_id"; exit 1; }
+          [ "$archs" = arm64 ] || { echo "architectures '$archs', expected arm64"; exit 1; }
+          codesign -dv "${apps[0]}" 2>&1 | grep -E 'Signature|Authority|TeamIdentifier' || true
+          mkdir -p qa && cp "${dmgs[0]}" qa/
+          cd qa && f=$(basename "${dmgs[0]}")
+          shasum -a 256 "$f" | tee "$f.sha256"
+          VERSION=$v FILE=$f BUNDLE_ID=$id ARCHS=$archs node -e '
+            const fs = require("fs"), crypto = require("crypto"), e = process.env;
+            const bytes = fs.readFileSync(e.FILE);
+            fs.writeFileSync("build-metadata.json", JSON.stringify({ platform: "macos", file: e.FILE, version: e.VERSION,
+              bundleId: e.BUNDLE_ID, arch: e.ARCHS, sizeBytes: bytes.length,
+              sha256: crypto.createHash("sha256").update(bytes).digest("hex"), signed: false, notarized: false,
+              updater: false, apiUrl: e.API_URL, commit: e.COMMIT, ref: e.REF, runId: e.RUN_ID, runAttempt: e.RUN_ATTEMPT },
+              null, 2) + "\n");'
+          cat build-metadata.json | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Upload unsigned DMG, checksum and metadata
+        uses: actions/upload-artifact@v4
+        with:
+          name: insight-workfolio-macos-dmg-UNSIGNED-${{ github.run_id }}-${{ github.run_attempt }}
+          path: qa/
+          if-no-files-found: error
+          retention-days: 14
+
   browser-suites:
     name: Browser suites (manual)
     if: github.event_name == 'workflow_dispatch' && inputs.desktop_api_url == ''
