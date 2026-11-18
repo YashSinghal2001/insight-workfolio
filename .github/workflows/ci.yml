@@ -194,10 +194,34 @@ jobs:
           echo "packaged API origin: $origin"
           ls -l apps/desktop/src-tauri/target/release/bundle/nsis/*.exe
           sha256sum apps/desktop/src-tauri/target/release/bundle/nsis/*.exe
-      - name: Upload unsigned NSIS installer
+      # Version and x86_64 read from the built bytes (same verifier as desktop-build.yml), then the installer,
+      # its SHA-256 file and build metadata go into one artifact.
+      - name: Verify installer version and x64, write checksum and build metadata
+        env:
+          API_URL: ${{ inputs.desktop_api_url || 'https://api.example.invalid' }}
+          COMMIT: ${{ github.sha }}
+          REF: ${{ github.ref_name }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          v=$(node -p 'require("./apps/desktop/src-tauri/tauri.conf.json").version')
+          exes=(apps/desktop/src-tauri/target/release/bundle/nsis/*_"$v"_x64-setup.exe)
+          [ ${#exes[@]} = 1 ] && [ -f "${exes[0]}" ] || { echo "expected exactly one x64 installer for $v: ${exes[*]}"; exit 1; }
+          pwsh -NoProfile -File deploy/scripts/verify-windows-installer.ps1 -Installer "${exes[0]}" \
+            -App apps/desktop/src-tauri/target/release/insight-workfolio-desktop.exe -Version "$v"
+          mkdir -p qa && cp "${exes[0]}" qa/
+          cd qa && f=$(basename "${exes[0]}")
+          sha256sum "$f" | tee "$f.sha256"
+          VERSION=$v FILE=$f node -e '
+            const fs = require("fs"), crypto = require("crypto"), e = process.env;
+            const bytes = fs.readFileSync(e.FILE);
+            fs.writeFileSync("build-metadata.json", JSON.stringify({ platform: "windows", file: e.FILE, version: e.VERSION,
+              arch: "x86_64", sizeBytes: bytes.length, sha256: crypto.createHash("sha256").update(bytes).digest("hex"),
+              signed: false, apiUrl: e.API_URL, commit: e.COMMIT, ref: e.REF, runId: e.RUN_ID }, null, 2) + "\n");'
+          cat build-metadata.json | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Upload unsigned NSIS installer, checksum and metadata
         uses: actions/upload-artifact@v4
         with:
           name: ${{ inputs.desktop_api_url && 'insight-workfolio-windows-nsis-UNSIGNED' || 'insight-workfolio-windows-nsis-UNSIGNED-TEST-ONLY' }}
-          path: apps/desktop/src-tauri/target/release/bundle/nsis/*.exe
+          path: qa/
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 14
