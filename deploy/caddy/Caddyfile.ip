@@ -46,12 +46,14 @@
 		}
 	}
 
-	# Desktop installers hosted on the VPS, kept out of the public git repository. Only top-level .exe/.dmg
-	# files in /srv/workfolio-downloads (folder root:workfolio-publisher 1775, files 644) and its
-	# desktop-releases.json manifest are served; no listing, nothing else.
+	# Desktop releases hosted on the VPS, kept out of the public git repository. Served from
+	# /srv/workfolio-downloads (folder root:workfolio-publisher 1775, files 644): installers (.exe/.dmg), in-app
+	# updater packages and signatures (.app.tar.gz/.sig) and the desktop-releases.json manifest, at the top level
+	# (production) and in test/ (unsigned TEST builds, never linked from the dashboard). No listing, nothing
+	# else: not the audit log, the lock or the .incoming staging folder.
 	handle_path /desktop-downloads/* {
 		root * /srv/workfolio-downloads
-		@installer path_regexp ^/[A-Za-z0-9][A-Za-z0-9._-]*\.(exe|dmg)$
+		@installer path_regexp ^/(test/)?[A-Za-z0-9][A-Za-z0-9._-]*\.(exe|dmg|sig|tar\.gz)$
 		handle @installer {
 			header Content-Disposition attachment
 			header X-Content-Type-Options nosniff
@@ -59,7 +61,7 @@
 			file_server
 		}
 		# Runtime release manifest the dashboard reads (written atomically by the publisher receiver).
-		@manifest path /desktop-releases.json
+		@manifest path /desktop-releases.json /test/desktop-releases.json
 		handle @manifest {
 			header X-Content-Type-Options nosniff
 			header Cache-Control no-cache

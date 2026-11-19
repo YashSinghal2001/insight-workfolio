@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# Real-sshd test of the desktop publish identity, for a DISPOSABLE Linux machine only (GitHub runner in
-# .github/workflows/desktop-publish-test.yml). As root it runs the real install-desktop-publisher.sh (creates
-# workfolio-publisher, sshd Match block, /srv/workfolio-downloads 1775), then attacks and uses that identity
-# through real ssh, with Caddy serving the production route block over https. Needs: sshd, caddy, jq, curl.
+# Real-sshd test of the desktop publish identities, for a DISPOSABLE Linux machine only (GitHub runner in
+# .github/workflows/desktop-publish-test.yml). As root it runs the real install-desktop-publisher.sh for both
+# channels (workfolio-publisher on /srv/workfolio-downloads, workfolio-publisher-test on its test/ folder, sshd
+# Match blocks, 1775 folders), then attacks and uses those identities through real ssh, with Caddy serving the
+# production route block over https. Needs: sshd, caddy, jq, curl.
 #
 #   sudo DESKTOP_PUBLISH_SSHTEST_DISPOSABLE=yes deploy/scripts/desktop-publish-sshtest.sh
 set -euo pipefail
@@ -20,7 +21,9 @@ check() { local m=$1; shift; if "$@" >"$tmp/out" 2>&1; then ok "$m"; else bad "$
 refused() { local m=$1; shift; if "$@" >"$tmp/out" 2>&1; then bad "$m (was accepted)"; sed 's/^/      | /' "$tmp/out" >&2; else ok "$m"; fi; }
 sha() { sha256sum "$1" | cut -d' ' -f1; }
 dir=/srv/workfolio-downloads user=workfolio-publisher receiver=/usr/local/lib/workfolio/desktop-downloads-receiver
+tuser=workfolio-publisher-test tdir=$dir/test tforced="$receiver --dir $dir/test --test"
 as_pub() { sudo -u "$user" "$@"; }
+as_test() { sudo -u "$tuser" "$@"; }
 
 echo "VPS-like starting state: root-owned folder with a root-owned rollback installer"
 install -d -m 755 -o root -g root "$dir"
@@ -45,10 +48,22 @@ done
 check "other users unaffected (forcecommand none for root)" bash -c "sshd -T -C user=root,host=localhost,addr=127.0.0.1 | grep -qx 'forcecommand none'"
 check "re-running the installer is safe" bash "$here/install-desktop-publisher.sh" "$tmp/key.pub"
 
+echo "install the TEST channel (its own key and user)"
+ssh-keygen -q -t ed25519 -N '' -C test-channel -f "$tmp/tkey"
+check "install-desktop-publisher.sh test succeeds" bash "$here/install-desktop-publisher.sh" "$tmp/tkey.pub" test
+check "test folder is root:$tuser 1775" test "$(stat -c '%U:%G %a' "$tdir")" = "root:$tuser 1775"
+check "production folder still root:$user 1775" test "$(stat -c '%U:%G %a' "$dir")" = "root:$user 1775"
+check "test manifest seeded empty, owned by $tuser" bash -c "[ \"\$(stat -c '%U %a' $tdir/desktop-releases.json)\" = '$tuser 644' ] && jq -e '. == {}' $tdir/desktop-releases.json"
+check "test authorized_keys forces the receiver with the test options" grep -q "^restrict,command=\"$tforced\" ssh-ed25519 " "/var/lib/$tuser/.ssh/authorized_keys"
+check "sshd effective for $tuser: forcecommand with the test options" bash -c "sshd -T -C user=$tuser,host=localhost,addr=127.0.0.1 | grep -qx 'forcecommand $tforced'"
+check "production forced command unchanged" bash -c "sshd -T -C user=$user,host=localhost,addr=127.0.0.1 | grep -qx 'forcecommand $receiver'"
+
 ssh-keyscan -t ed25519 127.0.0.1 > "$tmp/known_hosts" 2>/dev/null
 check "host key scanned" test -s "$tmp/known_hosts"
 S=(ssh -i "$tmp/key" -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$tmp/known_hosts" -o ConnectTimeout=10)
 T="$user@127.0.0.1"
+ST=(ssh -i "$tmp/tkey" -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$tmp/known_hosts" -o ConnectTimeout=10)
+TT="$tuser@127.0.0.1"
 
 echo "what the key can and cannot do over real ssh"
 check "status works" bash -c "$(printf '%q ' "${S[@]}") $T status | jq -e .windows"
@@ -65,6 +80,14 @@ refused "local port forwarding carries no data" timeout 5 bash -c 'exec 3<>/dev/
 kill "$fwd" 2>/dev/null || true
 check "pty request denied" bash -c "$(printf '%q ' "${S[@]}") -tt $T status 2>&1 | grep -qi 'PTY allocation request failed'"
 
+echo "the two keys are separate identities"
+check "test key: status of the test channel" bash -c "$(printf '%q ' "${ST[@]}") $TT status | jq -e '. == {}'"
+refused "test key cannot log in as the production publisher" "${ST[@]}" "$T" status
+refused "production key cannot log in as the test publisher" "${S[@]}" "$TT" status
+refused "test key: arbitrary command refused" "${ST[@]}" "$TT" id
+refused "test key: a production file name is refused" bash -c "printf x | $(printf '%q ' "${ST[@]}") $TT upload insight-workfolio_9.9.9_windows-x86_64-setup.exe 1 2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881"
+refused "production key: a TEST file name is refused" bash -c "printf x | $(printf '%q ' "${S[@]}") $T upload insight-workfolio-test_9.9.9_r1-1_windows-x86_64-setup.exe 1 2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881"
+
 echo "sticky bit: even a shell as $user cannot touch root-owned rollback installers"
 refused "rm refused" as_pub rm -f "$dir/$legacy"
 refused "mv away refused" as_pub mv "$dir/$legacy" "$dir/moved.exe"
@@ -74,6 +97,12 @@ refused "write into it refused" as_pub sh -c "printf evil >> '$dir/$legacy'"
 refused "chmod refused" as_pub chmod 666 "$dir/$legacy"
 check "rollback installer unchanged" test "$(sha "$dir/$legacy")" = "$legacy_sha"
 refused "cannot change folder permissions" as_pub chmod 777 "$dir"
+refused "production publisher cannot remove the test folder" as_pub rmdir "$tdir"
+refused "production publisher cannot rename the test folder" as_pub mv "$tdir" "$dir/gone"
+refused "test publisher cannot write into the production folder" as_test sh -c "printf evil > '$dir/x.exe'"
+refused "test publisher cannot replace the production manifest" as_test sh -c "printf '{}' > '$dir/desktop-releases.json'"
+refused "test publisher cannot remove the production manifest" as_test rm -f "$dir/desktop-releases.json"
+check "production manifest intact" jq -e .windows "$dir/desktop-releases.json"
 
 echo "Caddy (official build) with the production route block"
 port=8443
@@ -101,41 +130,75 @@ export CURL_CA_BUNDLE="$tmp/caddy/pki/authorities/local/root.crt"
 check "legacy installer served" curl -fsS -o /dev/null "https://localhost:$port/desktop-downloads/$legacy"
 
 echo "publishing through real ssh with the CI client"
-export DESKTOP_DOWNLOADS_ORIGIN="https://localhost:$port" DESKTOP_PUBLISH_SSH_TARGET="$T" \
-  DESKTOP_PUBLISH_SSH_KEY_FILE="$tmp/key" DESKTOP_PUBLISH_KNOWN_HOSTS_FILE="$tmp/known_hosts" \
+export DESKTOP_DOWNLOADS_ORIGIN="https://localhost:$port" DESKTOP_PUBLISH_KNOWN_HOSTS_FILE="$tmp/known_hosts" \
   COMMIT=0123456789abcdef0123456789abcdef01234567
-mk() { # platform version file content
-  local d="$tmp/in/$1-$2-$RANDOM"; mkdir -p "$d"; printf '%s' "$4" > "$d/$3"
-  jq -n --arg p "$1" --arg f "$3" --arg v "$2" --arg s "$(sha "$d/$3")" --argjson n "$(stat -c %s "$d/$3")" --arg c "$COMMIT" \
-    '{platform:$p, file:$f, version:$v, arch:"x", sizeBytes:$n, sha256:$s, commit:$c}' > "$d/installer.json"; echo "$d"
+# artifact <dir> <platform> <version> <installer> <content> [updater-file...]: as desktop-build.yml writes it
+artifact() {
+  local d=$1 platform=$2 version=$3 name=$4 content=$5 extra='[]' e; shift 5
+  mkdir -p "$d"; printf '%s' "$content" > "$d/$name"
+  for e in "$@"; do
+    printf 'updater file %s %s' "$e" "$content" > "$d/$e"
+    extra=$(jq -c --arg f "$e" --arg s "$(sha "$d/$e")" --argjson n "$(stat -c %s "$d/$e")" '. + [{file:$f, sizeBytes:$n, sha256:$s}]' <<<"$extra")
+  done
+  jq -n --arg p "$platform" --arg f "$name" --arg v "$version" --arg s "$(sha "$d/$name")" --argjson n "$(stat -c %s "$d/$name")" --arg c "$COMMIT" \
+    --argjson extra "$extra" '{platform:$p, file:$f, version:$v, arch:"x", sizeBytes:$n, sha256:$s, commit:$c, extra:$extra}' > "$d/installer.json"
 }
-pub() { EXPECTED_PLATFORM=$1 EXPECTED_VERSION=$2 bash "$here/desktop-publish.sh" "$3/installer.json" "$3/$4" "$3/result.json"; }
-w=insight-workfolio_0.2.2_windows-x86_64-setup.exe m=insight-workfolio_0.2.2_macos-universal.dmg
-dw=$(mk windows 0.2.2 "$w" "windows 0.2.2 $RANDOM") dm=$(mk macos 0.2.2 "$m" "mac 0.2.2 $RANDOM")
-# Both platforms at once: the manifest lock must keep both updates.
-pub windows 0.2.2 "$dw" "$w" >"$tmp/pw.log" 2>&1 & p1=$!
-pub macos 0.2.2 "$dm" "$m" >"$tmp/pm.log" 2>&1 & p2=$!
+release() { # <stem> <version> <tag>
+  local st=$1 v=$2 r="$tmp/in/$3"
+  artifact "$r/windows" windows "$v" "${st}_windows-x86_64-setup.exe" "windows $3 $RANDOM" "${st}_windows-x86_64-setup.exe.sig"
+  artifact "$r/macos" macos "$v" "${st}_macos-universal.dmg" "macos $3 $RANDOM" "${st}_darwin-universal.app.tar.gz" "${st}_darwin-universal.app.tar.gz.sig"
+  echo "$r"
+}
+pub() { # <channel> <version> <release-dir>
+  local key=$tmp/key target=$T
+  [ "$1" = production ] || { key=$tmp/tkey; target=$TT; }
+  CHANNEL=$1 EXPECTED_VERSION=$2 DESKTOP_PUBLISH_SSH_KEY_FILE=$key DESKTOP_PUBLISH_SSH_TARGET=$target \
+    bash "$here/desktop-publish.sh" "$3/result.json" "$3/windows" "$3/macos"
+}
+w=insight-workfolio_0.2.2_windows-x86_64-setup.exe
+tw=insight-workfolio-test_0.2.1_r100-1_windows-x86_64-setup.exe
+r=$(release insight-workfolio_0.2.2 0.2.2 r022) t=$(release insight-workfolio-test_0.2.1_r100-1 0.2.1 t100)
+# A production release and a TEST release at the same time: separate folders, locks and manifests.
+pub production 0.2.2 "$r" >"$tmp/pp.log" 2>&1 & p1=$!
+pub test 0.2.1 "$t" >"$tmp/pt.log" 2>&1 & p2=$!
 r1=0; r2=0; wait $p1 || r1=$?; wait $p2 || r2=$?
-check "concurrent windows publish ok" test "$r1" = 0
-check "concurrent macos publish ok" test "$r2" = 0
+check "production release ok" bash -c "cat $tmp/pp.log; test $r1 = 0"
+check "concurrent TEST release ok" bash -c "cat $tmp/pt.log; test $r2 = 0"
 man() { jq -r "$1" "$dir/desktop-releases.json"; }
 check "manifest has both 0.2.2 entries" test "$(man '.windows.version + " " + .macos.version')" = "0.2.2 0.2.2"
 check "windows previous = 0.2.1 (rollback)" test "$(man .windows.previous.version)" = 0.2.1
-check "public manifest matches" bash -c "curl -fsS https://localhost:$port/desktop-downloads/desktop-releases.json | jq -e '.windows.sha256 == \"$(sha "$dw/$w")\"'"
+check "production manifest holds no TEST entry" bash -c "! grep -q insight-workfolio-test $dir/desktop-releases.json"
+check "public manifest matches" bash -c "curl -fsS https://localhost:$port/desktop-downloads/desktop-releases.json | jq -e '.windows.sha256 == \"$(sha "$r/windows/$w")\"'"
 check "published installer is $user-owned, 644" test "$(stat -c '%U %a' "$dir/$w")" = "$user 644"
-check "client logs contain no private key material" bash -c "! grep -qF \"$(sed -n 2p "$tmp/key")\" $tmp/pw.log $tmp/pm.log"
-check "re-run is a no-op" pub windows 0.2.2 "$dw" "$w"
-d2=$(mk windows 0.2.2 "$w" "different bytes")
-refused "same version, other bytes refused" pub windows 0.2.2 "$d2" "$w"
-d3=$(mk windows 0.2.0 insight-workfolio_0.2.0_windows-x86_64-setup.exe old)
-refused "downgrade refused" pub windows 0.2.0 "$d3" insight-workfolio_0.2.0_windows-x86_64-setup.exe
-check "published bytes unchanged" test "$(sha "$dir/$w")" = "$(sha "$dw/$w")"
+check "updater package and signatures stored, 644" test "$(stat -c '%a' "$dir/$w.sig" "$dir/insight-workfolio_0.2.2_darwin-universal.app.tar.gz" | xargs)" = "644 644"
+check "updater signature served over https" curl -fsS -o /dev/null "https://localhost:$port/desktop-downloads/$w.sig"
+check "TEST installer is $tuser-owned, in the test folder" test "$(stat -c '%U %a' "$tdir/$tw")" = "$tuser 644"
+check "TEST manifest served, lists the TEST installer" bash -c "curl -fsS https://localhost:$port/desktop-downloads/test/desktop-releases.json | jq -e '.windows.href == \"/desktop-downloads/test/$tw\"'"
+check "TEST installer served with the uploaded bytes" bash -c "curl -fsS https://localhost:$port/desktop-downloads/test/$tw | sha256sum | grep -q $(sha "$t/windows/$tw")"
+check "audit log written, not served" bash -c "[ -s $dir/desktop-release-history.jsonl ] && [ \"\$(curl -s -o /dev/null -w '%{http_code}' https://localhost:$port/desktop-downloads/desktop-release-history.jsonl)\" = 404 ]"
+check "history over ssh lists the activations" bash -c "$(printf '%q ' "${S[@]}") $T history | jq -s -e '[.[] | select(.action == \"activate\")] | length == 2'"
+check "client logs contain no private key material" bash -c "! grep -qF \"$(sed -n 2p "$tmp/key")\" $tmp/pp.log $tmp/pt.log && ! grep -qF \"$(sed -n 2p "$tmp/tkey")\" $tmp/pp.log $tmp/pt.log"
+check "re-run is a no-op" pub production 0.2.2 "$r"
+r2d=$(release insight-workfolio_0.2.2 0.2.2 r022-other)
+refused "same version, other bytes refused" pub production 0.2.2 "$r2d"
+r0=$(release insight-workfolio_0.2.0 0.2.0 r020)
+refused "downgrade refused" pub production 0.2.0 "$r0"
+check "published bytes unchanged" test "$(sha "$dir/$w")" = "$(sha "$r/windows/$w")"
+t2=$(release insight-workfolio-test_0.2.1_r101-1 0.2.1 t101)
+check "a second TEST run publishes" pub test 0.2.1 "$t2"
+check "the previous TEST installer stays downloadable" bash -c "curl -fsS https://localhost:$port/desktop-downloads/test/$tw | sha256sum | grep -q $(sha "$t/windows/$tw")"
 
 echo "rollback (root on the server)"
 check "rollback windows" as_pub "$receiver" rollback windows
 check "windows back on 0.2.1, served from the root-owned file" bash -c "[ \"\$(jq -r .windows.href $dir/desktop-releases.json)\" = /desktop-downloads/$legacy ] && curl -fsS https://localhost:$port/desktop-downloads/$legacy | sha256sum | grep -q $legacy_sha"
 check "roll forward" as_pub "$receiver" rollback windows
 check "rollback installer still intact" test "$(sha "$dir/$legacy")" = "$legacy_sha"
+r3=$(release insight-workfolio_0.2.3 0.2.3 r023)
+check "release 0.2.3" pub production 0.2.3 "$r3"
+check "restore 0.2.2 by version from the audit log" as_pub "$receiver" rollback windows 0.2.2
+check "windows on 0.2.2, 0.2.3 kept as previous and on disk" bash -c "[ \"\$(jq -r '.windows.version + \" \" + .windows.previous.version' $dir/desktop-releases.json)\" = '0.2.2 0.2.3' ] && [ -f $dir/insight-workfolio_0.2.3_windows-x86_64-setup.exe ]"
+check "TEST rollback (its own receiver options)" as_test "$receiver" --dir "$tdir" --test rollback windows
+check "TEST manifest back on run 100" test "$(jq -r .windows.file "$tdir/desktop-releases.json")" = "$tw"
 
 echo "desktop publish ssh test: $pass passed, $fail failed"
 [ "$fail" = 0 ]

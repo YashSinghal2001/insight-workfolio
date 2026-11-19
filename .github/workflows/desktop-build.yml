@@ -4,10 +4,17 @@
 #
 # Platforms are independent (fail-fast off): a failed macOS build does not cancel Windows, and vice versa.
 # Each platform uploads artifact desktop-<environment>-<version>-<os> holding the renamed packages plus
-# installer.json: { platform, file, version, arch, sizeBytes, sha256, commit } of the downloadable installer,
-# written only after its version and architecture were checked from the built bytes.
+# installer.json: { platform, file, version, arch, sizeBytes, sha256, commit, channel, codeSigned, extra } of the
+# downloadable installer, written only after its version and architecture were checked from the built bytes.
+# `extra` lists the in-app updater packages and their signatures the same way (file, sizeBytes, sha256).
 #
-# Secrets/variables come from the GitHub Environment `environment` (see desktop-release.yml for the list).
+# environment = staging | production: secrets/variables come from that GitHub Environment (see
+# desktop-release.yml for the list); the caller passes `secrets: inherit`.
+# environment = test: NO GitHub Environment and the caller passes NO secrets. The build is the unsigned
+# "Insight Workfolio Test" app for the placeholder API https://api.example.invalid (it can reach no server and
+# installs beside a real app, never over it), named insight-workfolio-test_<version>_r<run>-<attempt>_*. Its
+# updater packages are signed with a key pair generated in the job and thrown away with the runner, so the
+# whole chain (updater artifacts, signatures, verification, publishing) is exercised without any real key.
 name: Desktop build (reusable)
 
 on:
@@ -29,7 +36,7 @@ permissions:
 jobs:
   build:
     name: Build ${{ matrix.os }}
-    environment: ${{ inputs.environment }}
+    environment: ${{ inputs.environment != 'test' && inputs.environment || '' }}
     strategy:
       fail-fast: false
       matrix:
@@ -42,12 +49,15 @@ jobs:
     env:
       VERSION: ${{ inputs.version }}
       WORKFOLIO_ENV: ${{ inputs.environment }}
-      WORKFOLIO_API_URL: ${{ vars.WORKFOLIO_API_URL }}
-      WORKFOLIO_DASHBOARD_URL: ${{ vars.WORKFOLIO_DASHBOARD_URL }}
-      WORKFOLIO_UPDATER_PUBKEY: ${{ vars.WORKFOLIO_UPDATER_PUBKEY }}
+      WORKFOLIO_API_URL: ${{ inputs.environment == 'test' && 'https://api.example.invalid' || vars.WORKFOLIO_API_URL }}
+      WORKFOLIO_DASHBOARD_URL: ${{ inputs.environment != 'test' && vars.WORKFOLIO_DASHBOARD_URL || '' }}
+      WORKFOLIO_UPDATER_PUBKEY: ${{ inputs.environment != 'test' && vars.WORKFOLIO_UPDATER_PUBKEY || '' }}
       TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
       TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
       MAC_TARGET: ${{ inputs.macos_universal && 'universal' || 'aarch64' }}
+      # File names up to and including the version. A TEST name also carries the run that built it: the
+      # version does not change between test builds, and published files are never overwritten.
+      STEM: ${{ inputs.environment == 'test' && format('insight-workfolio-test_{0}_r{1}-{2}', inputs.version, github.run_id, github.run_attempt) || format('insight-workfolio_{0}', inputs.version) }}
     steps:
       - uses: actions/checkout@v4
       - name: Version and configuration checks
@@ -57,7 +67,11 @@ jobs:
           [ "$v" = "$VERSION" ] || { echo "tauri.conf.json is $v, not $VERSION"; exit 1; }
           [ "$(node -p 'require("./apps/desktop/package.json").version')" = "$v" ] || { echo "package.json version differs"; exit 1; }
           grep -q "^version = \"$v\"" apps/desktop/src-tauri/Cargo.toml || { echo "Cargo.toml version differs"; exit 1; }
-          if [ -z "$WORKFOLIO_UPDATER_PUBKEY" ] || [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then echo "Updater key pair missing in environment $WORKFOLIO_ENV"; exit 1; fi
+          if [ "$WORKFOLIO_ENV" = test ]; then
+            if [ -n "$TAURI_SIGNING_PRIVATE_KEY" ]; then echo "a TEST build must not be given a real updater key (the caller passed secrets)"; exit 1; fi
+          elif [ -z "$WORKFOLIO_UPDATER_PUBKEY" ] || [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then
+            echo "Updater key pair missing in environment $WORKFOLIO_ENV"; exit 1
+          fi
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
@@ -76,6 +90,22 @@ jobs:
         run: |
           pnpm --filter @workfolio/desktop exec node --test
           cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml
+      # Generated here, used by this job's build, gone with the runner. Never printed (masked), never uploaded.
+      # It is NOT a release key: nothing signed with it can update a real installation, whose public key differs.
+      - name: Throwaway updater key pair (TEST builds only)
+        if: inputs.environment == 'test'
+        run: |
+          pw=$(node -e 'console.log(require("crypto").randomBytes(24).toString("hex"))')
+          echo "::add-mask::$pw"
+          pnpm --filter @workfolio/desktop exec tauri signer generate --ci -p "$pw" -w "$RUNNER_TEMP/test-updater.key" >/dev/null
+          key=$(cat "$RUNNER_TEMP/test-updater.key")
+          echo "::add-mask::$key"
+          {
+            echo "TAURI_SIGNING_PRIVATE_KEY=$key"
+            echo "TAURI_SIGNING_PRIVATE_KEY_PASSWORD=$pw"
+            echo "WORKFOLIO_UPDATER_PUBKEY=$(cat "$RUNNER_TEMP/test-updater.key.pub")"
+          } >> "$GITHUB_ENV"
+          rm -f "$RUNNER_TEMP/test-updater.key"
       - name: macOS notarization key (if configured)
         if: matrix.os == 'macos-latest'
         env:
@@ -114,54 +144,94 @@ jobs:
             t=$MAC_TARGET
             dir=apps/desktop/src-tauri/target/$([ "$t" = universal ] && echo universal-apple-darwin/)release/bundle
             tgz=$(one "$dir"/macos/*.app.tar.gz)
-            cp "$tgz" "$out/insight-workfolio_${v}_darwin-$t.app.tar.gz"
-            cp "$tgz.sig" "$out/insight-workfolio_${v}_darwin-$t.app.tar.gz.sig"
+            cp "$tgz" "$out/${STEM}_darwin-$t.app.tar.gz"
+            cp "$tgz.sig" "$out/${STEM}_darwin-$t.app.tar.gz.sig"
             dmg=$(one "$dir"/dmg/*_"${v}"_"$t".dmg)
-            cp "$dmg" "$out/insight-workfolio_${v}_macos-$t.dmg"
+            cp "$dmg" "$out/${STEM}_macos-$t.dmg"
           else
             dir=apps/desktop/src-tauri/target/release/bundle/nsis
             exe=$(one "$dir"/*_"${v}"_x64-setup.exe)
-            cp "$exe" "$out/insight-workfolio_${v}_windows-x86_64-setup.exe"
-            cp "$exe.sig" "$out/insight-workfolio_${v}_windows-x86_64-setup.exe.sig"
+            cp "$exe" "$out/${STEM}_windows-x86_64-setup.exe"
+            cp "$exe.sig" "$out/${STEM}_windows-x86_64-setup.exe.sig"
           fi
           ls -l "$out"
           (cd "$out" && (sha256sum -- ./* 2>/dev/null || shasum -a 256 -- ./*)) | tee -a "$GITHUB_STEP_SUMMARY"
-      # Read version and CPU architecture from the built bytes, not from configuration.
+      # Read version, CPU architecture, identity and code signature from the built bytes, not from configuration.
       - name: Verify installer (macOS)
         if: matrix.os == 'macos-latest'
         run: |
-          dmg=release/insight-workfolio_${VERSION}_macos-$MAC_TARGET.dmg
+          dmg=release/${STEM}_macos-$MAC_TARGET.dmg
           mnt=$(mktemp -d); hdiutil attach -nobrowse -readonly -mountpoint "$mnt" "$dmg" >/dev/null
           trap 'hdiutil detach "$mnt" -quiet || true' EXIT
           apps=("$mnt"/*.app); [ ${#apps[@]} = 1 ] || { echo "expected one .app in the dmg"; exit 1; }
           plist="${apps[0]}/Contents/Info.plist"
           ver=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$plist")
+          bid=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$plist")
           exe=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$plist")
           archs=$(lipo -archs "${apps[0]}/Contents/MacOS/$exe" | tr ' ' '\n' | sort | xargs)
-          echo "dmg app version $ver, architectures: $archs"
+          echo "dmg app version $ver, identifier $bid, architectures: $archs"
           [ "$ver" = "$VERSION" ] || { echo "app in dmg is $ver, not $VERSION"; exit 1; }
           want=$([ "$MAC_TARGET" = universal ] && echo "arm64 x86_64" || echo arm64)
           [ "$archs" = "$want" ] || { echo "architectures '$archs', expected '$want'"; exit 1; }
+          # A TEST build is the separate test app, and only a TEST build is.
+          if [ "$WORKFOLIO_ENV" = test ]; then want_id=com.insightworkfolio.desktop.test; elif [ "$WORKFOLIO_ENV" = staging ]; then want_id=com.insightworkfolio.desktop.staging; else want_id=com.insightworkfolio.desktop; fi
+          [ "$bid" = "$want_id" ] || { echo "identifier $bid, expected $want_id for a $WORKFOLIO_ENV build"; exit 1; }
+          # Developer ID signature: when present it must be valid, notarized and accepted by Gatekeeper.
+          sig=$(codesign -dv --verbose=2 "${apps[0]}" 2>&1 || true)
+          if grep -q '^Authority=Developer ID Application' <<<"$sig"; then
+            codesign --verify --deep --strict --verbose=2 "${apps[0]}"
+            grep -q 'flags=.*runtime' <<<"$sig" || { echo "signed without the hardened runtime"; exit 1; }
+            xcrun stapler validate "${apps[0]}"
+            spctl --assess --type execute --verbose=2 "${apps[0]}"
+            echo "CODE_SIGNED=true" >> "$GITHUB_ENV"
+          else
+            echo "::warning::macOS build is NOT signed with a Developer ID (ad-hoc signature only): Gatekeeper blocks it on other Macs; for testing only"
+            echo "CODE_SIGNED=false" >> "$GITHUB_ENV"
+          fi
       - name: Verify installer (Windows)
         if: matrix.os == 'windows-latest'
         shell: pwsh
-        run: >-
-          ./deploy/scripts/verify-windows-installer.ps1
-          -Installer "release/insight-workfolio_$($env:VERSION)_windows-x86_64-setup.exe"
-          -App apps/desktop/src-tauri/target/release/insight-workfolio-desktop.exe
-          -Version $env:VERSION
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $installer = "release/$($env:STEM)_windows-x86_64-setup.exe"
+          ./deploy/scripts/verify-windows-installer.ps1 -Installer $installer -App apps/desktop/src-tauri/target/release/insight-workfolio-desktop.exe -Version $env:VERSION
+          # Authenticode: a signature, when present, must be valid (certificate chain and hash).
+          $s = Get-AuthenticodeSignature $installer
+          if ($s.Status -eq 'Valid') {
+            Write-Host "Authenticode: valid, signer $($s.SignerCertificate.Subject), timestamped: $($null -ne $s.TimeStamperCertificate)"
+            if ($null -eq $s.TimeStamperCertificate) { throw "the signature has no timestamp: it would expire with the certificate" }
+            "CODE_SIGNED=true" >> $env:GITHUB_ENV
+          } elseif ($s.Status -eq 'NotSigned') {
+            Write-Host "::warning::Windows installer is NOT Authenticode-signed: SmartScreen warns; for testing only"
+            "CODE_SIGNED=false" >> $env:GITHUB_ENV
+          } else { throw "Authenticode signature is not valid: $($s.Status) $($s.StatusMessage)" }
+      # What the API checks before a release reaches anyone and the desktop updater before it installs anything.
+      - name: Verify updater packages (signed by this build's key, bound to this version)
+        run: |
+          pkgs=(); for sig in release/*.sig; do pkgs+=("${sig%.sig}"); done
+          node deploy/scripts/verify-updater-signature.mjs "$VERSION" "${pkgs[@]}"
+          # The check must be able to fail: a package with one byte added is refused.
+          cp "${pkgs[0]}" "$RUNNER_TEMP/tampered"; cp "${pkgs[0]}.sig" "$RUNNER_TEMP/tampered.sig"; printf x >> "$RUNNER_TEMP/tampered"
+          if node deploy/scripts/verify-updater-signature.mjs "$VERSION" "$RUNNER_TEMP/tampered" 2>/dev/null; then
+            echo "::error::a tampered package passed signature verification"; exit 1
+          fi
+          echo "tampered copy rejected, as it must be"
       - name: Installer metadata
         env:
           PLATFORM: ${{ matrix.os == 'macos-latest' && 'macos' || 'windows' }}
           ARCH: ${{ matrix.os == 'macos-latest' && (inputs.macos_universal && 'universal' || 'aarch64') || 'x86_64' }}
-          FILE: ${{ matrix.os == 'macos-latest' && format('insight-workfolio_{0}_macos-{1}.dmg', inputs.version, inputs.macos_universal && 'universal' || 'aarch64') || format('insight-workfolio_{0}_windows-x86_64-setup.exe', inputs.version) }}
+          KIND: ${{ matrix.os == 'macos-latest' && format('macos-{0}.dmg', inputs.macos_universal && 'universal' || 'aarch64') || 'windows-x86_64-setup.exe' }}
+          CHANNEL: ${{ inputs.environment == 'test' && 'test' || inputs.environment }}
           COMMIT: ${{ github.sha }}
         run: |
           node -e '
             const fs = require("fs"), crypto = require("crypto"), e = process.env;
-            const bytes = fs.readFileSync("release/" + e.FILE);
-            const meta = { platform: e.PLATFORM, file: e.FILE, version: e.VERSION, arch: e.ARCH, sizeBytes: bytes.length,
-              sha256: crypto.createHash("sha256").update(bytes).digest("hex"), commit: e.COMMIT };
+            const describe = (file) => { const bytes = fs.readFileSync("release/" + file);
+              return { file, sizeBytes: bytes.length, sha256: crypto.createHash("sha256").update(bytes).digest("hex") }; };
+            const file = e.STEM + "_" + e.KIND;
+            const extra = fs.readdirSync("release").filter((f) => f !== file).sort().map(describe);
+            const meta = { platform: e.PLATFORM, ...describe(file), version: e.VERSION, arch: e.ARCH, commit: e.COMMIT,
+              channel: e.CHANNEL, codeSigned: e.CODE_SIGNED === "true", extra };
             fs.writeFileSync("release/installer.json", JSON.stringify(meta, null, 2) + "\n");
             console.log(meta);'
       - uses: actions/upload-artifact@v4

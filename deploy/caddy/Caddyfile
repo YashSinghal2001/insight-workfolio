@@ -16,7 +16,7 @@ app.{$WORKFOLIO_DOMAIN} {
 	# Desktop installers hosted on the VPS (see Caddyfile.ip): top-level .exe/.dmg and desktop-releases.json in /srv/workfolio-downloads only.
 	handle_path /desktop-downloads/* {
 		root * /srv/workfolio-downloads
-		@installer path_regexp ^/[A-Za-z0-9][A-Za-z0-9._-]*\.(exe|dmg)$
+		@installer path_regexp ^/(test/)?[A-Za-z0-9][A-Za-z0-9._-]*\.(exe|dmg|sig|tar\.gz)$
 		handle @installer {
 			header Content-Disposition attachment
 			header X-Content-Type-Options nosniff
@@ -24,7 +24,7 @@ app.{$WORKFOLIO_DOMAIN} {
 			file_server
 		}
 		# Runtime release manifest the dashboard reads (written atomically by the publisher receiver).
-		@manifest path /desktop-releases.json
+		@manifest path /desktop-releases.json /test/desktop-releases.json
 		handle @manifest {
 			header X-Content-Type-Options nosniff
 			header Cache-Control no-cache

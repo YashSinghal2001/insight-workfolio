@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useState, useSyncExternalStore, type ReactNode } from "react";
 import { Button, StatusBadge } from "@/components/kit";
 import { dayLabel } from "@/components/my-ui";
 import { Card, Notice, buttonClass } from "@/components/ui";
@@ -23,6 +23,8 @@ interface Release {
   arch: string;
   sizeBytes: number;
   sha256: string;
+  /** Plain-text release notes (the release tag's message), when the release has any. */
+  notes?: string;
 }
 
 const PLATFORMS: { id: "macos" | "windows"; name: string; ext: string; requires: string; unsigned: string; steps: ReactNode[] }[] = [
@@ -69,8 +71,9 @@ function asRelease(x: unknown): Release | null {
     (r.href === undefined || (typeof r.href === "string" && HREF.test(r.href))) &&
     typeof r.arch === "string" && r.arch.length <= 80 &&
     typeof r.sizeBytes === "number" && Number.isSafeInteger(r.sizeBytes) && r.sizeBytes > 0 &&
-    typeof r.sha256 === "string" && /^[0-9a-f]{64}$/.test(r.sha256);
-  return ok ? { version: r.version, releasedAt: r.releasedAt, file: r.file, href: r.href, arch: r.arch, sizeBytes: r.sizeBytes, sha256: r.sha256 } as Release : null;
+    typeof r.sha256 === "string" && /^[0-9a-f]{64}$/.test(r.sha256) &&
+    (r.notes === undefined || (typeof r.notes === "string" && r.notes.length <= 4000));
+  return ok ? { version: r.version, releasedAt: r.releasedAt, file: r.file, href: r.href, arch: r.arch, sizeBytes: r.sizeBytes, sha256: r.sha256, notes: r.notes } as Release : null;
 }
 
 /** The published manifest when reachable and valid per platform; the bundled copy otherwise. */
@@ -90,9 +93,21 @@ function useReleases(): Record<string, Release | null> {
 
 const mb = (bytes: number) => `${(bytes / 1_048_576).toFixed(1)} MB`;
 
+const noSubscription = () => () => {};
+/** The computer this page is open on, from the browser; null when unknown (server render, phones, Linux). */
+function detectPlatform(): "macos" | "windows" | null {
+  const ua = navigator.userAgent;
+  if (/Windows/.test(ua)) return "windows";
+  // iPadOS reports "Macintosh" too; it has touch points, a Mac does not.
+  return /Macintosh/.test(ua) && navigator.maxTouchPoints < 2 ? "macos" : null;
+}
+
 /** Desktop app downloads on the employee dashboard: one card per platform, from the verified release manifest. */
 export function DesktopDownloads() {
   const releases = useReleases();
+  const here = useSyncExternalStore(noSubscription, detectPlatform, () => null);
+  // The installer for this computer comes first; the other one stays available for a second machine.
+  const platforms = [...PLATFORMS].sort((a, b) => Number(b.id === here) - Number(a.id === here));
   return (
     <section aria-label="Desktop app" className="mb-6">
       <h2 className="text-lg font-semibold">Desktop app</h2>
@@ -101,10 +116,19 @@ export function DesktopDownloads() {
         Your account works on one computer at a time: to move to another, ask an administrator to release the current one first.
       </p>
       <div className="grid gap-4 md:grid-cols-2">
-        {PLATFORMS.map((p) => {
+        {platforms.map((p) => {
           const r = releases[p.id] ?? null;
           return (
-            <Card key={p.id} title={p.name} actions={<StatusBadge tone={r ? "success" : "neutral"}>{r ? `Version ${r.version}` : "Not available yet"}</StatusBadge>}>
+            <Card
+              key={p.id}
+              title={p.name}
+              actions={
+                <span className="flex flex-wrap items-center gap-2">
+                  {p.id === here && <StatusBadge tone="info">This computer</StatusBadge>}
+                  <StatusBadge tone={r ? "success" : "neutral"}>{r ? `Latest version ${r.version}` : "Not available yet"}</StatusBadge>
+                </span>
+              }
+            >
               <div data-platform={p.id} className="flex flex-col gap-3 text-sm">
                 {r ? (
                   <>
@@ -121,6 +145,12 @@ export function DesktopDownloads() {
                         Download for {p.name} ({p.ext})
                       </a>
                     </div>
+                    {r.notes && (
+                      <div>
+                        <p className="font-medium">What&apos;s new in {r.version}</p>
+                        <p className="mt-1 whitespace-pre-line text-muted">{r.notes}</p>
+                      </div>
+                    )}
                     <Notice tone="warning">{p.unsigned} Only install a copy downloaded from this page.</Notice>
                     <details>
                       <summary className="cursor-pointer font-medium text-brand">How to install</summary>
