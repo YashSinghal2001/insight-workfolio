@@ -18,3 +18,4 @@ export * from "./schedule.js";
 export * from "./alerts.js";
 export * from "./teams.js";
 export * from "./desktop-updates.js";
+export * from "./notifications.js";

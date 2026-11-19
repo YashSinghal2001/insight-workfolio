@@ -59,6 +59,7 @@ import type { DeviceContext } from "../devices/devices.service.js";
 import { MonitoringSettingsService } from "../settings/monitoring-settings.service.js";
 import { ScreenshotSettingsService } from "./screenshot-settings.service.js";
 import { quickXorHash, SCREENSHOT_STORAGE, screenshotKey, StorageError, type ScreenshotStorage } from "./storage.js";
+import { NotificationsService } from "../notifications/notifications.service.js";
 import { TimelapseService } from "./timelapse.service.js";
 
 const DAY_MS = 86_400_000;
@@ -129,6 +130,7 @@ export class ScreenshotsService implements OnModuleInit, OnModuleDestroy {
     private readonly locks: EmployeeLocks,
     private readonly config: ConfigService<Env, true>,
     private readonly timelapses: TimelapseService,
+    private readonly notifications: NotificationsService,
   ) {}
 
   onModuleInit() {
@@ -295,6 +297,7 @@ export class ScreenshotsService implements OnModuleInit, OnModuleDestroy {
       } catch (err) {
         if (!(err instanceof StorageError)) throw err;
         this.logger.warn({ screenshotId: row.id, err: err.message }, "Screenshot storage failed");
+        await this.notifications.storageFailed(err.message);
         throw new BadGatewayException("Screenshot storage is unavailable; the upload will be retried");
       }
       if (!confirmed || confirmed.size !== body.length || (confirmed.quickXorHash && confirmed.quickXorHash !== quickXorHash(body))) {

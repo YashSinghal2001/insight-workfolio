@@ -60,6 +60,9 @@ import { timelapseEncoderProvider } from "./screenshots/timelapse-encoder.js";
 import { TimelapseService } from "./screenshots/timelapse.service.js";
 import { GoogleDriveOAuthController, GoogleDriveOAuthService } from "./storage/google-drive-oauth.js";
 import { OneDriveController, OneDriveService } from "./storage/onedrive.js";
+import { EmailService } from "./notifications/email.service.js";
+import { NotificationsController } from "./notifications/notifications.controller.js";
+import { NotificationsService } from "./notifications/notifications.service.js";
 
 @Module({
   imports: [
@@ -99,7 +102,7 @@ import { OneDriveController, OneDriveService } from "./storage/onedrive.js";
     }),
     DatabaseModule,
   ],
-  controllers: [AlertsController, HealthController, AuthController, EmployeesController, DevicesController, AttendanceController, CorrectionsController, ActivityController, MonitoringSettingsController, ScreenshotsController, ScreenshotSettingsController, TimelapseController, LeaveController, HolidaysController, TeamsController, ProjectsController, TaskTimeController, ReportsController, WebsitesController, RolesController, AuditController, ScheduleSettingsController, DailyAttendanceController, EmployeeTrackingController, GoogleDriveOAuthController, OneDriveController, DesktopUpdatesController],
+  controllers: [AlertsController, HealthController, AuthController, EmployeesController, DevicesController, AttendanceController, CorrectionsController, ActivityController, MonitoringSettingsController, ScreenshotsController, ScreenshotSettingsController, TimelapseController, LeaveController, HolidaysController, TeamsController, ProjectsController, TaskTimeController, ReportsController, WebsitesController, RolesController, AuditController, ScheduleSettingsController, DailyAttendanceController, EmployeeTrackingController, GoogleDriveOAuthController, OneDriveController, DesktopUpdatesController, NotificationsController],
   providers: [
     AlertsService,
     AuthService,
@@ -127,6 +130,8 @@ import { OneDriveController, OneDriveService } from "./storage/onedrive.js";
     ProjectsService,
     mailTransportProvider,
     invitationTransportProvider,
+    EmailService,
+    NotificationsService,
     ReportsService,
     WebsitesService,
     RolesService,

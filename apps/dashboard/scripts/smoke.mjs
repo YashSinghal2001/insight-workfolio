@@ -28,6 +28,7 @@ const ROUTES = {
   "/websites": ["Checking your session"],
   "/roles": ["Checking your session"],
   "/audit": ["Checking your session"],
+  "/notifications": ["Checking your session"],
   "/account": ["Checking your session"],
   "/my": ["Checking your session"],
   "/my/attendance": ["Checking your session"],

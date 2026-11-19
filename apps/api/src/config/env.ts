@@ -217,8 +217,8 @@ export const envSchema = z
     WEBSITE_RETENTION_APPROVED: z.enum(["true", "false"]).default("false").transform((v) => v === "true"),
     /** Base of password-setup links: printed by the admin bootstrap CLI and put in invitation emails. */
     DASHBOARD_URL: z.url().default("http://localhost:3000"),
-    // Employee invitation emails (docs/invitations.md). Separate from REPORT_MAIL_PROVIDER: configuring it
-    // emails invitations only. none = the admin hands the setup link over (as before); mock = in memory,
+    // Employee invitation emails (docs/invitations.md) and notifications (docs/notifications.md). Separate from
+    // REPORT_MAIL_PROVIDER: configuring it does not email reports. none = the admin hands the setup link over (as before); mock = in memory,
     // development and tests only; graph = Microsoft Graph sendMail, app-only, from MAIL_SENDER;
     // graph-delegated = Microsoft Graph sendMail with the OneDrive connection's delegated token (Mail.Send),
     // as ONEDRIVE_ACCOUNT_EMAIL: needs the ONEDRIVE_* settings, none of the MAIL_GRAPH_* ones.

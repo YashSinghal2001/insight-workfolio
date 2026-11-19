@@ -6,6 +6,7 @@ import type { AuthContext } from "../auth/auth.service.js";
 import { sha256 } from "../auth/crypto.js";
 import { activeDeviceOf, claimDeviceSession, deviceRevoked } from "../auth/device-session.js";
 import { DATABASE } from "../database/database.module.js";
+import { NotificationsService } from "../notifications/notifications.service.js";
 import { accountAudit } from "../audit/account-audit.js";
 
 const NOW = "strftime('%Y-%m-%dT%H:%M:%fZ', 'now')";
@@ -55,7 +56,10 @@ export interface DeviceContext {
  */
 @Injectable()
 export class DevicesService {
-  constructor(@Inject(DATABASE) private readonly db: DatabaseClient) {}
+  constructor(
+    @Inject(DATABASE) private readonly db: DatabaseClient,
+    private readonly notifications: NotificationsService,
+  ) {}
 
   /** The caller's employee profile id. Accounts without a profile (bootstrap admins) cannot clock. */
   async employeeIdFor(caller: AuthContext): Promise<string> {
@@ -102,6 +106,12 @@ export class DevicesService {
       // No silent ownership transfer: an installation still authorized for someone else stays theirs.
       const owned = await this.db.execute({ sql: "SELECT 1 FROM devices WHERE device_identifier = ? AND employee_id <> ? AND revoked_at IS NULL", args: [ident, employeeId] });
       if (owned.rows.length) {
+        await this.notifications.emit({
+          type: "DEVICE_ISSUE",
+          subjectUserId: caller.id,
+          description: "A computer could not be registered: it is still registered to another employee. Revoke it there first if it changed hands.",
+          dedupeKey: `device-owned:${employeeId}:${new Date().toISOString().slice(0, 10)}`,
+        });
         throw new ConflictException({
           error: "Conflict",
           message: "This computer is registered to another employee. An administrator must revoke it there first.",

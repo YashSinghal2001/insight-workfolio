@@ -24,6 +24,7 @@ import { str } from "../attendance/sessions.js";
 import { jwtVerify, SignJWT } from "jose";
 import type { Env } from "../config/env.js";
 import { DATABASE } from "../database/database.module.js";
+import { NotificationsService } from "../notifications/notifications.service.js";
 import { claimDeviceSession, deviceRevoked, rejectedAudit } from "./device-session.js";
 import {
   DUMMY_PASSWORD_HASH,
@@ -76,6 +77,7 @@ export class AuthService {
   constructor(
     @Inject(DATABASE) private readonly db: DatabaseClient,
     config: ConfigService<Env, true>,
+    private readonly notifications: NotificationsService,
   ) {
     const secret = config.get("JWT_SECRET", { infer: true });
     if (!secret) this.logger.warn("JWT_SECRET not set: using an ephemeral key (access tokens reset on restart)");
@@ -150,6 +152,7 @@ export class AuthService {
           "write",
         );
         this.logger.warn({ sessionId }, "Refresh token reuse detected; session revoked");
+        await this.notifications.emit({ type: "SECURITY_ALERT", subjectUserId: String(row.id), description: "A sign-in session was ended because an old refresh token was presented again (possible token theft).", dedupeKey: `session-reuse:${sessionId}` });
       }
       throw new UnauthorizedException();
     }
@@ -225,7 +228,11 @@ export class AuthService {
     const ownerArgs = [sha256(token), now];
     // Who the link belongs to (for the audit row). The batch below re-checks the link itself.
     const link = (
-      await this.db.execute({ sql: "SELECT id, user_id FROM account_setup_tokens WHERE token_hash = ? AND used_at IS NULL AND expires_at > ?", args: ownerArgs })
+      await this.db.execute({
+        sql: `SELECT t.id, t.user_id, u.password_hash IS NULL AS first FROM account_setup_tokens t JOIN users u ON u.id = t.user_id
+              WHERE t.token_hash = ? AND t.used_at IS NULL AND t.expires_at > ?`,
+        args: ownerArgs,
+      })
     ).rows[0];
     if (!link) throw new BadRequestException("This setup link is invalid or has expired");
     const userId = String(link.user_id);
@@ -241,6 +248,12 @@ export class AuthService {
       "write",
     );
     if (setPassword?.rowsAffected !== 1) throw new BadRequestException("This setup link is invalid or has expired");
+    // First password = activation; a later one (admin-issued reset link) = a password change the owner should hear about.
+    await this.notifications.emit(
+      Number(link.first)
+        ? { type: "ACCOUNT_ACTIVATED", subjectUserId: userId, description: "The account was activated: its owner chose a password.", dedupeKey: `activated:${String(link.id)}` }
+        : { type: "PASSWORD_CHANGED", subjectUserId: userId, description: "The account password was changed through a setup link.", dedupeKey: `password:${String(link.id)}` },
+    );
   }
 
   /** The caller's live sessions, newest first. Never selects token hashes. */

@@ -115,7 +115,9 @@ Variables: `INVITATION_MAIL_PROVIDER=graph`, `MAIL_GRAPH_TENANT_ID`, `MAIL_GRAPH
 | `ONEDRIVE_*` | Already set for storage; all seven are required. No `MAIL_GRAPH_*` value is used |
 | `DASHBOARD_URL` | Already set; base of the activation link. Must be `https://` |
 
-`REPORT_MAIL_PROVIDER` is separate: this does not turn on report emails.
+`REPORT_MAIL_PROVIDER` is separate: this does not turn on report emails. The same provider and sender also carry
+the role-based notifications ([notifications.md](notifications.md)), which additionally need migration
+`0033_notifications`.
 
 Production rollout, each step only after the owner's approval. The order keeps OneDrive storage and the nightly
 off-site backup working throughout:

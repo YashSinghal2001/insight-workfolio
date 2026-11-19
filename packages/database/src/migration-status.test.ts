@@ -8,6 +8,7 @@ const PENDING_AFTER_0016 = [
   "0017_work_schedule_and_app_categories", "0019_screenshot_blur_policy", "0021_leave_types", "0022_holidays", "0023_session_device",
   "0024_teams", "0025_person_overrides", "0026_alert_rules", "0027_team_labels_self_view", "0028_auto_timelapse",
   "0029_device_live_state", "0030_account_invitations", "0031_multi_device_single_session", "0032_desktop_updates",
+  "0033_notifications",
 ];
 
 /** A database migrated by a build that ended at 0016 (staging today). MIGRATIONS is restored afterwards. */
@@ -51,7 +52,7 @@ test("fresh database: everything pending and nothing is created", async () => {
   db.close();
 });
 
-test("database at 0016: exactly the 14 later ids are pending", async () => {
+test("database at 0016: exactly the 15 later ids are pending", async () => {
   const db = await at0016();
   const status = await migrationStatus(db);
   assert.deepEqual(status.applied, ids.slice(0, 16));
@@ -104,7 +105,7 @@ test("schema_migrations from before checksums (no checksum column): read, not ed
   db.close();
 });
 
-test("0016 with data -> migrate applies exactly the 14, re-run none; defaults, integrity, 56/68/93", async () => {
+test("0016 with data -> migrate applies exactly the 15, re-run none; defaults, integrity, 58/71/93", async () => {
   const db = await at0016();
   const q = (sql: string, args: (string | number)[] = []) => db.execute({ sql, args });
   const notice = String((await db.execute("SELECT version FROM monitoring_notices LIMIT 1")).rows[0]!.version);
@@ -155,7 +156,7 @@ test("0016 with data -> migrate applies exactly the 14, re-run none; defaults, i
   await assert.rejects(q("UPDATE screenshots SET blurred = 1"), /screenshot_immutable/);
 
   await healthy(db);
-  assert.deepEqual(await counts(db), { table: 56, index: 68, trigger: 93 }); // 0032: +4 tables, +1 index, +2 triggers
+  assert.deepEqual(await counts(db), { table: 58, index: 71, trigger: 93 }); // 0032: +4 tables, +1 index, +2 triggers; 0033: +2 tables, +3 indexes
   db.close();
 });
 

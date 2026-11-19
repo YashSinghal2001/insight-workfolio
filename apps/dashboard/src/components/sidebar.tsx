@@ -32,6 +32,7 @@ export const ADMIN_NAV: readonly NavSection[] = [
     title: "Administration",
     items: [
       { label: "Audit", href: "/audit" },
+      { label: "Notifications", href: "/notifications" },
       { label: "Settings", href: "/settings" },
       { label: "Work schedule", href: "/settings/schedule" },
       { label: "App labels", href: "/settings/labels" },

@@ -1362,6 +1362,45 @@ export const MIGRATIONS: Migration[] = [
       ) STRICT`,
     ],
   },
+  {
+    id: "0033_notifications",
+    statements: [
+      // Email notifications (docs/notifications.md). One row per event; critical ones are the incident record
+      // and stay here whatever happens to their emails. description is a short sanitized text, never a secret,
+      // a token, a screenshot or employee activity. dedupe_key makes a repeated event a no-op.
+      `CREATE TABLE notification_events (
+        id              TEXT PRIMARY KEY,
+        type            TEXT NOT NULL CHECK (length(type) BETWEEN 1 AND 40),
+        severity        TEXT NOT NULL CHECK (severity IN ('INFO', 'WARNING', 'CRITICAL')),
+        subject_user_id TEXT REFERENCES users(id) ON DELETE RESTRICT,
+        description     TEXT NOT NULL CHECK (length(description) BETWEEN 1 AND 500),
+        dedupe_key      TEXT UNIQUE CHECK (dedupe_key IS NULL OR length(dedupe_key) BETWEEN 1 AND 200),
+        created_at      TEXT NOT NULL DEFAULT ${NOW}
+      ) STRICT`,
+      "CREATE INDEX notification_events_created ON notification_events(created_at)",
+      // One row per recipient: delivery is tracked, retried and failed per recipient, so one group's failure
+      // never hides or blocks another's. recipient_user_id NULL = the group had no active account (FAILED).
+      // The address is read from users at send time; the message itself is never stored.
+      `CREATE TABLE notification_deliveries (
+        id                  TEXT PRIMARY KEY,
+        event_id            TEXT NOT NULL REFERENCES notification_events(id) ON DELETE RESTRICT,
+        recipient_role      TEXT NOT NULL CHECK (recipient_role IN ('EMPLOYEE', 'IT', 'SUPER_ADMIN')),
+        recipient_user_id   TEXT REFERENCES users(id) ON DELETE RESTRICT,
+        status              TEXT NOT NULL DEFAULT 'PENDING' CHECK (status IN ('PENDING', 'PROCESSING', 'SENT', 'FAILED', 'RETRYING')),
+        attempts            INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+        next_attempt_at     TEXT NOT NULL DEFAULT ${NOW},
+        sent_at             TEXT,
+        provider_message_id TEXT CHECK (provider_message_id IS NULL OR length(provider_message_id) <= 200),
+        last_error          TEXT CHECK (last_error IS NULL OR length(last_error) <= 300),
+        created_at          TEXT NOT NULL DEFAULT ${NOW},
+        updated_at          TEXT NOT NULL DEFAULT ${NOW},
+        UNIQUE (event_id, recipient_role, recipient_user_id),
+        CHECK ((status = 'SENT') = (sent_at IS NOT NULL))
+      ) STRICT`,
+      "CREATE INDEX notification_deliveries_due ON notification_deliveries(status, next_attempt_at)",
+      "CREATE INDEX notification_deliveries_event ON notification_deliveries(event_id)",
+    ],
+  },
 ];
 
 const checksum = (m: Migration) => createHash("sha256").update(JSON.stringify(m.statements)).digest("hex");
