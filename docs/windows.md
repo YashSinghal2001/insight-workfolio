@@ -92,8 +92,15 @@ This needs the owner's explicit sign-off; until then `GetLastInputInfo` stays as
   `Default` (`Winlogon`: lock screen, UAC prompt, Ctrl+Alt+Del; screen saver) means locked.
   Access denied (error 5) when opening also means locked. Any other failure is treated as unknown
   and counts as unlocked, as on macOS, so a broken query never stops monitoring by itself.
-- **A locked screen is IDLE**, from the lock to the unlock, on macOS and Windows alike: the
-  employee notice says idle time includes a locked screen. With the `WTS_SESSION_LOCK` event the
+- **A screen locked by hand (Win+L) is a BREAK** (Windows only: `LOCK_BREAKS = cfg!(windows)`; macOS keeps
+  every lock IDLE as before. `collector.rs` `manual_lock`,
+  `src/lock-break.ts`): while monitoring, a lock with input in the last 30 s, displays on, not going
+  to sleep and not within 10 s of a wake, still locked 2 s later, queues an attendance `BREAK_START`
+  at the lock time; the unlock queues `BREAK_END` (only for a break a lock opened). Nothing is
+  attributed while locked, so no IDLE. A missed unlock or a restart is settled by the 15 s
+  `screen_locked` check. Suspend/resume (`PBT_APMSUSPEND`) and display sleep keep their own handling.
+- **A screen that locks after inactivity is IDLE**, from the lock to the unlock (screen saver,
+  display sleep, lock screen at wake). With the `WTS_SESSION_LOCK` event the
   active interval ends at the lock; if only the poll sees it, it ends at the last unlocked sample.
   Input at the lock screen never counts, and activity never resumes before the screen was last
   seen locked (so a face or fingerprint unlock cannot turn the locked time active).

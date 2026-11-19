@@ -12,6 +12,8 @@ export interface LiveInputs {
   locked: boolean;
   asleep?: boolean;
   sessionInactive?: boolean;
+  /** Windows only (collector.rs): a hand lock is a break, never idle. Absent/false on macOS. */
+  lockBreak?: boolean;
   lastSampleMs: number | null;
 }
 
@@ -22,7 +24,7 @@ export interface LiveInputs {
  */
 export function liveState(c: LiveInputs, monitoring: boolean, reachable: boolean): LiveState | null {
   if (!monitoring || !reachable || !c.collecting || c.lastSampleMs === null) return null;
-  if (c.asleep || c.sessionInactive) return "UNOBSERVED";
+  if (c.asleep || c.sessionInactive || c.lockBreak) return "UNOBSERVED";
   return c.idle || c.locked ? "IDLE" : "ACTIVE";
 }
 

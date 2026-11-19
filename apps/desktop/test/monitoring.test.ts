@@ -53,6 +53,7 @@ test("employee-facing collector states: locked, asleep, session inactive, idle, 
   assert.equal(collectorStateText(on, true, clock), "Code");
   assert.equal(collectorStateText(on, false, clock), "—", "nothing shown while not recording");
   assert.match(collectorStateText({ ...on, locked: true }, true, clock), /^Screen locked\. This time counts as idle/);
+  assert.equal(collectorStateText({ ...on, locked: true, lockBreak: true }, true, clock), "Screen locked. Starting a break until you unlock.", "Windows Win+L");
   assert.match(collectorStateText({ ...on, asleep: true }, true, clock), /^Mac asleep/);
   assert.equal(collectorStateText({ ...on, locked: true, sessionInactive: true }, true, clock), "Session inactive (another user or logged out). Nothing is recorded.");
   assert.equal(collectorStateText({ ...on, idle: true }, true, clock), "Idle since 09:30 (no keyboard or mouse input)");

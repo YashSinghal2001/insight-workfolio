@@ -168,6 +168,13 @@ fn activity_status(collector: State<Arc<Collector>>) -> CollectorStatus {
     collector.status()
 }
 
+/// Whether the screen is locked now (event state, then the OS level check): the webview ends a break a
+/// lock opened if the unlock notification was missed, or after a restart (lock_break.ts).
+#[tauri::command]
+fn screen_locked() -> bool {
+    session_events::unobservable_now().0
+}
+
 #[tauri::command]
 fn activity_list(db: Db, user_id: String, device_id: String, limit: i64) -> Result<Vec<queue::ActivityRow>, String> {
     with_db(db, |c| queue::activity_list(c, &user_id, &device_id, limit))
@@ -476,6 +483,7 @@ pub fn run() {
             tray_update,
             activity_configure,
             activity_status,
+            screen_locked,
             activity_list,
             activity_ack,
             activity_reject,

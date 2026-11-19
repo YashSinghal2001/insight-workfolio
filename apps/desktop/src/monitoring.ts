@@ -64,6 +64,8 @@ export interface CollectorView {
   locked: boolean;
   asleep?: boolean;
   sessionInactive?: boolean;
+  /** Windows only: a hand lock is starting a break. */
+  lockBreak?: boolean;
   idleSeconds?: number | null;
   idleThresholdSeconds?: number;
   appNapPrevented?: boolean;
@@ -74,6 +76,7 @@ export function collectorStateText(c: CollectorView, active: boolean, clock: (ms
   if (!active || !c.collecting) return "—";
   if (c.sessionInactive) return "Session inactive (another user or logged out). Nothing is recorded.";
   if (c.asleep) return w.asleep;
+  if (c.locked && c.lockBreak) return "Screen locked. Starting a break until you unlock.";
   if (c.locked) return "Screen locked. This time counts as idle until you unlock.";
   if (c.idle) return `Idle since ${clock(c.idleSinceMs)} (no keyboard or mouse input)`;
   const name = c.currentApp?.name ?? "—";

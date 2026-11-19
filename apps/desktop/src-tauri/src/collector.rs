@@ -9,7 +9,39 @@ use serde::Serialize;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
+
+/// Screen lock by hand = break is a Windows feature (Win+L). On macOS a lock stays IDLE as it always was.
+const LOCK_BREAKS: bool = cfg!(windows);
+
+/// A lock counts as by hand only with keyboard/mouse input this recent (the lock shortcut, the menu, a
+/// hot corner): a screen saver or display-sleep lock comes after inactivity and stays IDLE as before.
+const MANUAL_LOCK_INPUT_MS: i64 = 30_000;
+/// A lock this soon after a wake is the wake's lock screen (sleep handling), not a break.
+const WAKE_LOCK_MS: i64 = 10_000;
+/// A hand lock becomes a break only if the screen is still locked and the computer is not going to
+/// sleep this long after it: closing the lid also locks, and a quick lock/unlock is not a break.
+const LOCK_CONFIRM_MS: i64 = 2_000;
+
+/// Sent to the webview (event `screen-lock`): a confirmed hand lock (`locked`, the break starts at
+/// `at_ms`) or any unlock (the webview ends the break only if a lock opened it).
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ScreenLock {
+    pub locked: bool,
+    pub at_ms: i64,
+}
+
+/// Whether a lock at `at_ms` was made by hand while working: displays on, not going to sleep, this
+/// user's session in front, not just woken, not already idle, and recent input.
+fn manual_lock(session: &SessionState, idle_ms: i64, tracker_idle: bool, last_wake_ms: Option<i64>, at_ms: i64) -> bool {
+    !session.asleep
+        && !session.display_asleep
+        && !session.session_inactive
+        && !tracker_idle
+        && (0..MANUAL_LOCK_INPUT_MS).contains(&idle_ms)
+        && !last_wake_ms.is_some_and(|w| at_ms - w < WAKE_LOCK_MS)
+}
 
 #[derive(Serialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -39,6 +71,9 @@ pub struct CollectorStatus {
     pub idle_since_ms: Option<i64>,
     /// Latest unobserved stretch while monitoring (sleep, suspended app, clock change): [start, end] ms.
     pub last_gap_ms: Option<(i64, i64)>,
+    /// Windows: a hand lock is a break (from the lock until unlock; set while it is being confirmed
+    /// too). Nothing is attributed meanwhile. Always false on macOS.
+    pub lock_break: bool,
 }
 
 impl CollectorStatus {
@@ -61,6 +96,7 @@ impl CollectorStatus {
             last_sample_ms: None,
             idle_since_ms: None,
             last_gap_ms: None,
+            lock_break: false,
         }
     }
 }
@@ -70,6 +106,10 @@ struct State {
     scope: Option<(String, String)>,
     tracker: Tracker,
     status: CollectorStatus,
+    /// Lock time of a hand lock waiting for LOCK_CONFIRM_MS before it becomes a break.
+    pending_lock: Option<i64>,
+    /// Last wake (wall ms), so the lock screen at wake is not taken for a hand lock.
+    last_wake_ms: Option<i64>,
 }
 
 pub struct Collector {
@@ -77,6 +117,8 @@ pub struct Collector {
     started: Instant,
     /// Set by `configure` to take the first sample right away instead of one period later.
     wake: AtomicBool,
+    /// Whether a hand lock is a break (LOCK_BREAKS; tests set it to cover the Windows behaviour anywhere).
+    lock_breaks: bool,
 }
 
 fn now_ms() -> i64 {
@@ -91,9 +133,12 @@ impl Collector {
                 scope: None,
                 tracker: Tracker::new(Config::new(15, 300)),
                 status: CollectorStatus::new("STOPPED", None),
+                pending_lock: None,
+                last_wake_ms: None,
             }),
             started: Instant::now(),
             wake: AtomicBool::new(false),
+            lock_breaks: LOCK_BREAKS,
         }
     }
 
@@ -109,7 +154,13 @@ impl Collector {
                 loop {
                     std::thread::sleep(Duration::from_millis(250));
                     for t in transitions.try_iter() {
-                        worker.on_transition(&app.state::<Mutex<Connection>>(), t, session_events::current());
+                        worker.on_transition(&app.state::<Mutex<Connection>>(), t, session_events::current(), platform::idle_ms());
+                        if t.event == session_events::Event::Unlocked {
+                            let _ = app.emit("screen-lock", ScreenLock { locked: false, at_ms: t.at_ms });
+                        }
+                    }
+                    if let Some(at_ms) = worker.due_lock_break(now_ms(), session_events::current()) {
+                        let _ = app.emit("screen-lock", ScreenLock { locked: true, at_ms });
                     }
                     let period = worker.lock_state().tracker.cfg.sample_ms;
                     if worker.wake.swap(false, Ordering::SeqCst) || last.elapsed() >= Duration::from_millis(period as u64) {
@@ -149,11 +200,33 @@ impl Collector {
     /// A lock, sleep or session switch from the OS (session_events): attribution stops at the moment
     /// it happened, not at the next sample. Unlock, wake or the session coming back takes a sample
     /// right away (it is unobserved until the screen is actually unlocked and this session in front).
-    fn on_transition(&self, db: &Mutex<Connection>, t: Transition, session: SessionState) {
+    ///
+    /// A lock by hand while working (`manual_lock`) is a break, not idle: activity ends at the lock and
+    /// nothing is attributed while locked; `due_lock_break` then tells the webview to start the break.
+    fn on_transition(&self, db: &Mutex<Connection>, t: Transition, session: SessionState, idle_ms: i64) {
+        use session_events::Event::*;
         let mut st = self.lock_state();
         st.status.locked = session.locked;
         st.status.asleep = session.asleep;
         st.status.session_inactive = session.session_inactive;
+        match t.event {
+            Unlocked => {
+                st.pending_lock = None;
+                if std::mem::take(&mut st.status.lock_break) {
+                    // The locked stretch was a break, not an unobserved gap: nothing to explain.
+                    st.tracker.last_gap = None;
+                    st.status.last_gap_ms = None;
+                }
+            }
+            WillSleep | SessionResigned => {
+                // A lock still being confirmed was the sleep's or the switch's: not a break.
+                if st.pending_lock.take().is_some() {
+                    st.status.lock_break = false;
+                }
+            }
+            DidWake => st.last_wake_ms = Some(t.at_ms),
+            _ => {}
+        }
         if st.mode != "ACTIVE" {
             return;
         }
@@ -161,9 +234,21 @@ impl Collector {
             self.wake.store(true, Ordering::SeqCst);
             return;
         }
-        // A locked screen is idle from the lock (the employee notice says so); sleep and a session
-        // switch are unobserved: everything closes and nothing stays open.
-        let closed = if t.event == session_events::Event::Locked { st.tracker.lock(t.at_ms) } else { st.tracker.interrupt(t.at_ms) };
+        // A hand lock is a break (unobserved here; attendance records it). Any other lock (after
+        // inactivity, at wake) is idle from the lock as before; sleep and a session switch are
+        // unobserved: everything closes and nothing stays open.
+        let tracker_idle = st.tracker.open.as_ref().is_some_and(|o| o.kind == Kind::Idle);
+        let closed = if t.event != Locked {
+            st.tracker.interrupt(t.at_ms)
+        } else if st.status.lock_break {
+            Vec::new() // a repeated lock notification: the break is already under way
+        } else if self.lock_breaks && manual_lock(&session, idle_ms, tracker_idle, st.last_wake_ms, t.at_ms) {
+            st.pending_lock = Some(t.at_ms);
+            st.status.lock_break = true;
+            st.tracker.interrupt(t.at_ms)
+        } else {
+            st.tracker.lock(t.at_ms)
+        };
         st.status.current_app = None;
         st.status.idle = st.tracker.open.as_ref().is_some_and(|o| o.kind == Kind::Idle);
         st.status.idle_since_ms = st.tracker.open.as_ref().filter(|o| o.kind == Kind::Idle).map(|o| o.start_ms);
@@ -173,6 +258,20 @@ impl Collector {
                 st.status.error = Some(format!("Could not save activity locally: {e}"));
             }
         }
+    }
+
+    /// The lock time of a hand lock that has lasted LOCK_CONFIRM_MS while monitoring, still locked and
+    /// awake: from now on it is a break (once; `None` otherwise). A lock cancelled by an unlock, sleep
+    /// or the end of monitoring meanwhile is dropped.
+    fn due_lock_break(&self, now_ms: i64, session: SessionState) -> Option<i64> {
+        let mut st = self.lock_state();
+        let at_ms = st.pending_lock.filter(|at| now_ms - at >= LOCK_CONFIRM_MS)?;
+        st.pending_lock = None;
+        if st.mode != "ACTIVE" || !session.locked || session.asleep || session.session_inactive {
+            st.status.lock_break = false;
+            return None;
+        }
+        Some(at_ms)
     }
 
     fn tick(&self, db: &Mutex<Connection>) {
@@ -195,7 +294,15 @@ impl Collector {
         if session.asleep {
             return; // between WillSleep and the actual sleep: nothing to observe
         }
-        let sample = self.take_sample();
+        let mut sample = self.take_sample();
+        if st.status.lock_break {
+            // During a lock break nothing is attributed until the webview pauses monitoring: never IDLE.
+            if sample.locked {
+                sample.away = true;
+            } else {
+                st.status.lock_break = false; // unlocked without a notification
+            }
+        }
         st.status.locked = platform::screen_locked() || session.locked;
         st.status.session_inactive = !platform::on_console() || session.session_inactive;
         st.status.asleep = false;
@@ -387,11 +494,15 @@ mod tests {
         crate::queue::tests::remove_db(&path);
     }
 
-    /// FakeOs: transitions delivered the way session_events would, at chosen times.
+    /// FakeOs: transitions delivered the way session_events would, at chosen times. The idle counter
+    /// reads 10 minutes (no recent input), so a lock here is the inactivity kind (see `deliver_input`).
     fn deliver(c: &Collector, db: &Mutex<Connection>, session: &mut SessionState, event: session_events::Event, at_s: i64) {
+        deliver_input(c, db, session, event, at_s, 600_000);
+    }
+    fn deliver_input(c: &Collector, db: &Mutex<Connection>, session: &mut SessionState, event: session_events::Event, at_s: i64, idle_ms: i64) {
         let t = Transition { event, at_ms: at_s * 1000 };
         *session = session.apply(t);
-        c.on_transition(db, t, *session);
+        c.on_transition(db, t, *session, idle_ms);
     }
     fn feed(c: &Collector, db: &Mutex<Connection>, s: Sample) {
         Collector::record(&mut c.state.lock().unwrap(), db, "user-1", "device-1", s);
@@ -403,9 +514,8 @@ mod tests {
         Sample { away: true, ..sample(t, "loginwindow", 0) }
     }
 
-    /// A locked screen is IDLE from the lock to the unlock, as the employee notice says ("Idle
-    /// time: … or the screen is locked", packages/shared/src/activity.ts); sleep and another
-    /// user's session record nothing.
+    /// A screen that locks after inactivity is IDLE from the lock to the unlock, as before (a lock by
+    /// hand is a break: see the lock_break tests); sleep and another user's session record nothing.
     #[test]
     fn lock_is_idle_while_sleep_and_user_switch_record_nothing_and_all_close_at_the_transition() {
         use session_events::Event::*;
@@ -504,6 +614,143 @@ mod tests {
         // The app dies here; at the next start OPEN rows end at their last checkpoint.
         assert_eq!(queue::activity_recover(&db.lock().unwrap()).unwrap(), 2);
         assert_eq!(rows(&db, "PENDING"), vec![("ACTIVE".into(), Some("Code".into()), 0, 142), ("ACTIVE".into(), Some("Mail".into()), 142, 165)]);
+        crate::queue::tests::remove_db(&path);
+    }
+
+    // ---- Screen lock by hand = break (synthetic OS events, temporary database) ----------------
+
+    fn db() -> (std::path::PathBuf, Mutex<Connection>) {
+        let path = std::env::temp_dir().join(format!("wf-collector-test-{}.db", uuid::Uuid::new_v4()));
+        let db = Mutex::new(queue::open(&path).unwrap());
+        (path, db)
+    }
+    /// What the webview does on the `screen-lock` event: the break pauses monitoring, the unlock resumes it.
+    fn set_mode(c: &Collector, db: &Mutex<Connection>, mode: &str) {
+        c.configure(db, mode.into(), Some(("user-1".into(), "device-1".into())), Config::new(15, 300));
+    }
+
+    /// The Windows collector, on any host: WTS_SESSION_LOCK/UNLOCK, PBT_APMSUSPEND/RESUME and the console
+    /// display state arrive as these Event values (win/session.rs `event_for`, tested there).
+    fn windows_collector() -> Collector {
+        Collector { lock_breaks: true, ..Collector::new() }
+    }
+
+    #[test]
+    fn windows_win_l_is_a_break_never_idle_and_activity_resumes_only_after_the_unlock() {
+        use session_events::Event::*;
+        let (path, db) = db();
+        let c = windows_collector();
+        active(&c);
+        let mut os = SessionState::default();
+        feed(&c, &db, sample(0, "Code", 0));
+        feed(&c, &db, sample(15, "Code", 0));
+        deliver_input(&c, &db, &mut os, Locked, 20, 400); // the lock shortcut was the last input
+        assert_eq!(rows(&db, "PENDING"), vec![("ACTIVE".into(), Some("Code".into()), 0, 20)], "activity ends at the lock");
+        assert!(rows(&db, "OPEN").is_empty(), "no IDLE interval opens");
+        assert!(!c.status().idle && c.status().locked);
+        assert_eq!(c.due_lock_break(21_000, os), None, "not before LOCK_CONFIRM_MS");
+        assert_eq!(c.due_lock_break(22_000, os), Some(20_000), "break starts at the lock time");
+        assert_eq!(c.due_lock_break(30_000, os), None, "reported once");
+        assert!(c.status().lock_break);
+        // Repeated lock notifications while locked: still one break, still nothing idle.
+        deliver_input(&c, &db, &mut os, Locked, 25, 0);
+        assert_eq!(c.due_lock_break(40_000, os), None, "no duplicate break");
+        // Locked samples before the webview pauses monitoring: unobserved, never IDLE.
+        feed(&c, &db, Sample { away: true, ..locked(30) });
+        assert!(rows(&db, "OPEN").is_empty() && rows(&db, "PENDING").len() == 1);
+        set_mode(&c, &db, "PAUSED_BREAK");
+        deliver_input(&c, &db, &mut os, Unlocked, 600, 0);
+        assert!(!c.status().lock_break && !c.status().locked);
+        set_mode(&c, &db, "ACTIVE"); // BREAK_END queued by the webview
+        // Activity detection resumes from the first sample after the unlock; nothing assumed before it.
+        feed(&c, &db, sample(601, "Mail", 0));
+        feed(&c, &db, sample(616, "Mail", 0));
+        assert_eq!(rows(&db, "OPEN"), vec![("ACTIVE".into(), Some("Mail".into()), 601, 616)]);
+        assert_eq!(c.status().last_gap_ms, None, "a break is not an unobserved gap");
+        assert!(rows(&db, "PENDING").iter().all(|r| r.0 != "IDLE"), "no idle anywhere");
+        crate::queue::tests::remove_db(&path);
+    }
+
+    #[test]
+    fn windows_suspend_resume_display_off_and_screen_saver_locks_are_not_breaks() {
+        use session_events::Event::*;
+        let (path, db) = db();
+        let c = windows_collector();
+        active(&c);
+        let mut os = SessionState::default();
+        feed(&c, &db, sample(0, "Code", 0));
+        // Lid closed right after typing: lock, then sleep within LOCK_CONFIRM_MS → sleep handling, no break.
+        deliver_input(&c, &db, &mut os, Locked, 10, 200);
+        deliver_input(&c, &db, &mut os, WillSleep, 11, 200);
+        assert_eq!(c.due_lock_break(20_000, os), None, "system sleep is not a break");
+        assert!(!c.status().lock_break, "the lock being confirmed was the sleep's");
+        // Wake into the lock screen: the lock right after the wake is not a break either.
+        deliver_input(&c, &db, &mut os, DidWake, 3_600, 0);
+        deliver_input(&c, &db, &mut os, Unlocked, 3_601, 0);
+        deliver_input(&c, &db, &mut os, Locked, 3_605, 0);
+        assert_eq!(c.due_lock_break(3_700_000, os), None, "lock at wake");
+        deliver_input(&c, &db, &mut os, Unlocked, 3_700, 0);
+        // Display slept after inactivity, then the screen locked: idle as before.
+        feed(&c, &db, Sample { mono_ms: 3_000, ..sample(3_701, "Code", 0) });
+        deliver_input(&c, &db, &mut os, ScreensSlept, 3_710, 0);
+        deliver_input(&c, &db, &mut os, Locked, 3_711, 0);
+        assert_eq!(c.due_lock_break(3_800_000, os), None, "display sleep lock");
+        assert!(rows(&db, "OPEN").iter().any(|r| r.0 == "IDLE"), "idle from the lock, as before");
+        deliver_input(&c, &db, &mut os, ScreensWoke, 3_800, 0);
+        deliver_input(&c, &db, &mut os, Unlocked, 3_800, 0);
+        // Screen saver lock after 2 minutes without input: not by hand, idle as before.
+        deliver_input(&c, &db, &mut os, Locked, 3_900, 120_000);
+        assert_eq!(c.due_lock_break(4_000_000, os), None, "inactivity lock");
+        deliver_input(&c, &db, &mut os, Unlocked, 3_950, 0);
+        // A lock-unlock flap shorter than LOCK_CONFIRM_MS: no break.
+        deliver_input(&c, &db, &mut os, Locked, 4_000, 100);
+        deliver_input(&c, &db, &mut os, Unlocked, 4_001, 0);
+        assert_eq!(c.due_lock_break(4_010_000, os), None, "quick lock/unlock");
+        // While not monitoring (clocked out, on a break, no consent): never a break from a lock.
+        set_mode(&c, &db, "STOPPED");
+        deliver_input(&c, &db, &mut os, Locked, 5_000, 100);
+        assert_eq!(c.due_lock_break(5_010_000, os), None, "not monitoring");
+        crate::queue::tests::remove_db(&path);
+    }
+
+    #[test]
+    fn hand_lock_classification() {
+        let awake = SessionState::default();
+        assert!(manual_lock(&awake, 500, false, None, 100_000));
+        assert!(manual_lock(&awake, 29_999, false, Some(80_000), 100_000), "woke 20 s before");
+        assert!(!manual_lock(&awake, 30_000, false, None, 100_000), "no recent input");
+        assert!(!manual_lock(&awake, -1, false, None, 100_000), "idle counter unreadable: not assumed");
+        assert!(!manual_lock(&awake, 500, true, None, 100_000), "already idle");
+        assert!(!manual_lock(&awake, 500, false, Some(95_000), 100_000), "just woke");
+        assert!(!manual_lock(&SessionState { asleep: true, ..awake }, 500, false, None, 100_000));
+        assert!(!manual_lock(&SessionState { display_asleep: true, ..awake }, 500, false, None, 100_000));
+        assert!(!manual_lock(&SessionState { session_inactive: true, ..awake }, 500, false, None, 100_000));
+    }
+
+    /// macOS keeps its behaviour: a lock is IDLE from the lock to the unlock, even right after input,
+    /// and nothing is ever sent to start a break (com.apple.screenIsLocked is the same Locked event).
+    #[test]
+    fn macos_lock_stays_idle_and_never_starts_a_break() {
+        use session_events::Event::*;
+        #[cfg(target_os = "macos")]
+        assert!(!Collector::new().lock_breaks, "lock breaks are off in the macOS build");
+        let (path, db) = db();
+        let c = Collector { lock_breaks: false, ..Collector::new() };
+        active(&c);
+        let mut os = SessionState::default();
+        feed(&c, &db, sample(0, "Code", 0));
+        feed(&c, &db, sample(15, "Code", 0));
+        deliver_input(&c, &db, &mut os, Locked, 20, 400); // Ctrl+Cmd+Q, right after typing
+        assert_eq!(rows(&db, "OPEN"), vec![("IDLE".into(), None, 20, 20)], "idle starts at the lock, as before");
+        assert_eq!(c.due_lock_break(30_000, os), None, "no break");
+        assert!(!c.status().lock_break && c.status().idle && c.status().locked);
+        for t in (30..=90).step_by(15) {
+            feed(&c, &db, locked(t));
+        }
+        assert_eq!(rows(&db, "OPEN"), vec![("IDLE".into(), None, 20, 90)], "IDLE while locked");
+        deliver_input(&c, &db, &mut os, Unlocked, 95, 0);
+        feed(&c, &db, sample(95, "Code", 0));
+        assert_eq!(rows(&db, "PENDING"), vec![("ACTIVE".into(), Some("Code".into()), 0, 20), ("IDLE".into(), None, 20, 95)]);
         crate::queue::tests::remove_db(&path);
     }
 }
