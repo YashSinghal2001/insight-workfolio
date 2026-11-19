@@ -61,6 +61,30 @@ test("invitation emails: off by default, mock refused in production, graph needs
   assert.equal(validateEnv({ ...production, REPORT_MAIL_PROVIDER: "none", ...graph }).REPORT_MAIL_PROVIDER, "none", "reports are not emailed by this setting");
 });
 
+test("invitation emails, graph-delegated: needs the OneDrive settings and MAIL_SENDER = the OneDrive account; no MAIL_GRAPH_* values", () => {
+  const onedrive = {
+    ONEDRIVE_TENANT_ID: "tenant",
+    ONEDRIVE_CLIENT_ID: "client",
+    ONEDRIVE_CLIENT_SECRET: SECRET,
+    ONEDRIVE_REDIRECT_URI: "https://api.example.com/api/v1/storage/onedrive/oauth/callback",
+    ONEDRIVE_TOKEN_FILE: "/var/lib/workfolio/secrets/onedrive.json",
+    ONEDRIVE_TOKEN_KEY: Buffer.alloc(32, 7).toString("base64"),
+    ONEDRIVE_ACCOUNT_EMAIL: "IT@TFFDigital.com",
+  };
+  const delegated = { ...onedrive, INVITATION_MAIL_PROVIDER: "graph-delegated", MAIL_SENDER: "IT@TFFDigital.com" };
+  const env = validateEnv({ ...production, ...delegated });
+  assert.deepEqual([env.INVITATION_MAIL_PROVIDER, env.MAIL_SENDER, env.MAIL_GRAPH_CLIENT_SECRET], ["graph-delegated", "IT@TFFDigital.com", undefined]);
+  refused({ INVITATION_MAIL_PROVIDER: "graph-delegated", MAIL_SENDER: "IT@TFFDigital.com" }, "INVITATION_MAIL_PROVIDER"); // no OneDrive at all
+  refused({ ...delegated, ONEDRIVE_CLIENT_SECRET: undefined }, "ONEDRIVE_CLIENT_ID");
+  refused({ ...delegated, ONEDRIVE_TOKEN_KEY: undefined }, "ONEDRIVE_CLIENT_ID");
+  refused({ ...delegated, MAIL_SENDER: undefined }, "INVITATION_MAIL_PROVIDER");
+  refused({ ...delegated, MAIL_SENDER: "someone.else@TFFDigital.com" }, "INVITATION_MAIL_PROVIDER");
+  refused({ ...delegated, MAIL_SENDER: "not-an-address" }, "MAIL_SENDER");
+  // the other providers are untouched by the OneDrive settings being present
+  assert.equal(validateEnv({ ...production, ...onedrive }).INVITATION_MAIL_PROVIDER, "none");
+  assert.equal(validateEnv({ ...production, ...onedrive, INVITATION_MAIL_PROVIDER: "graph", MAIL_GRAPH_TENANT_ID: "t", MAIL_GRAPH_CLIENT_ID: "c", MAIL_GRAPH_CLIENT_SECRET: SECRET, MAIL_SENDER: "IT@TFFDigital.com" }).INVITATION_MAIL_PROVIDER, "graph");
+});
+
 test("website tracking: production collection is blocked until the operator sets WEBSITE_TRACKING_APPROVED=true", () => {
   assert.equal(validateEnv(production).WEBSITE_TRACKING_APPROVED, false);
   assert.equal(validateEnv({ ...production, WEBSITE_TRACKING_APPROVED: "true" }).WEBSITE_TRACKING_APPROVED, true);

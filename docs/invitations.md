@@ -4,10 +4,10 @@ When an IT Admin or Super Admin creates an employee, the API emails a welcome me
 (`IT@TFFDigital.com`) with a one-time account activation link. The employee opens it, chooses a password and can
 then sign in. No password is ever emailed: the account has none until the employee sets one.
 
-Status (2026-11-12): **implemented and tested locally with a mock provider; not active anywhere.** Real sending
-needs the Microsoft configuration in section 3, done by a Microsoft 365 administrator, and the environment
-variables in section 4. Until then `INVITATION_MAIL_PROVIDER=none` (the default) keeps the previous behaviour:
-the admin receives the link and hands it over.
+Status (2026-11-18): **implemented and tested locally (mock provider and a fake Microsoft); not active anywhere.**
+Real sending needs the Microsoft configuration in section 3 and the rollout in section 4. Until then
+`INVITATION_MAIL_PROVIDER=none` (the default) keeps the previous behaviour: the admin receives the link and
+hands it over.
 
 ## 1. Behaviour
 
@@ -45,70 +45,117 @@ Security notes:
 - Audit (`account_audit`): `ACCOUNT_CREATED`, `SETUP_LINK_ISSUED`, then `INVITATION_SENT` or `INVITATION_FAILED`
   (invitation id, provider, attempts; never the link or the message).
 
-## 2. Can the existing Microsoft app send mail?
+## 2. How mail is sent: two Microsoft Graph modes
 
-**Not today.** The existing "Insight Workfolio" registration (state recorded 2026-11-11; not re-checked in the
-portal for this change) has only delegated `Files.ReadWrite`, `offline_access`, `openid`, `profile`, used by the
-OneDrive connection of `IT@TFFDigital.com`. It has no `Mail.Send` of any kind. OneDrive permissions do not
-authorise sending mail.
+**Chosen (owner decision 2026-11-18): delegated `Mail.Send` through the existing OneDrive connection**
+(`INVITATION_MAIL_PROVIDER=graph-delegated`). Implemented and tested against a fake Microsoft only; **not
+deployed, no real email sent.**
 
-Ways to add sending, and why the implementation uses app-only with Exchange scoping:
+| Mode | How it authenticates | Needs | State |
+|---|---|---|---|
+| `graph-delegated` | The OneDrive connection of `IT@TFFDigital.com` (authorization code + PKCE, encrypted refresh token, `apps/api/src/storage/onedrive.ts`). `POST /me/sendMail` with that connection's access token, so the sender can only be the signed-in account | Delegated `Mail.Send` on the existing app registration, and one OneDrive reconnect after it is granted | **Chosen** |
+| `graph` | App-only client credentials, `POST /users/<MAIL_SENDER>/sendMail`. The right to send comes from Exchange Online RBAC for Applications scoped to the one mailbox; a token carrying any Entra application permission is refused | An Exchange Administrator (section 3b) | Kept, unchanged, unused |
 
-| Option | Effect | Verdict |
-|---|---|---|
-| Add **delegated** `Mail.Send` to the existing app | Microsoft lists every consented delegated scope in the app's tokens. The OneDrive code refuses any token with a scope beyond `Files.ReadWrite` (`apps/api/src/storage/onedrive.ts`, `scopesAcceptable`), so **OneDrive storage and the nightly off-site backup would stop**. Would also need a second sign-in flow and token store | Not used |
-| Add **application** `Mail.Send` in Entra with admin consent | Tenant-wide: the app's secret could send as **any** mailbox in the tenant. Exchange scoping does not narrow an Entra grant (the grants are additive) | Refused by the code: a token carrying any application permission is not used |
-| **Exchange Online RBAC for Applications**: role "Application Mail.Send" assigned to the app's service principal with a management scope containing only `IT@TFFDigital.com` | App-only token with no Entra application permission; Exchange allows sending as that one mailbox only. No change to the app's Entra permissions, so OneDrive's delegated tokens are unaffected | **Implemented** |
+An Entra **application** `Mail.Send` (tenant-wide: the secret could send as any mailbox) is supported by neither
+mode and must not be granted.
 
-The scoped option can use the existing registration (same tenant ID, client ID and secret). Consequence to accept:
-that client secret, which today is useless without the encrypted OneDrive token file, would on its own be able to
-send mail as `IT@TFFDigital.com`. A dedicated registration would isolate rotation and revocation but not reduce
-what its own secret can do; creating one needs your approval and was not done.
+What `graph-delegated` reuses, and what changes in the OneDrive code:
 
-## 3. Microsoft configuration required (administrator approval)
+- No second OAuth flow, token store or credential: `OneDriveService.token()` supplies the access token (cached,
+  one refresh at a time, rotated refresh token written back atomically to `ONEDRIVE_TOKEN_FILE`, shared with the
+  backup uploader).
+- `Mail.Send` is added to the scopes requested at sign-in and refresh **only** when the provider is
+  `graph-delegated`. A token that reports `mail.send` is accepted in every mode; any other extra scope is still
+  refused.
+- On HTTP 401 the transport asks for one fresh token and retries once; a second 401, or a 403, is a permanent
+  failure whose message says to grant `Mail.Send` and reconnect OneDrive. 429/5xx/network errors are retried by
+  the invitation flow (twice, as before). There is no fallback to another provider: a failed send is `FAILED`
+  and the admin gets the hand-over link.
+- Invitations are recorded with provider `graph` in both modes (no migration; `0030` is unchanged).
 
-Done by an **Exchange Administrator** (and an Entra admin only for the object ID lookup). Nothing here was done
-by this change.
+Consequence to accept: whoever holds the encrypted token file, its key and the client secret together can send
+mail as `IT@TFFDigital.com` (and nobody else), in addition to reading that account's OneDrive.
 
-1. Confirm `IT@TFFDigital.com` is a mailbox that can send (licensed user mailbox or shared mailbox).
-2. Entra admin center › Enterprise applications › "Insight Workfolio" (the existing registration, or a dedicated
-   one if you choose that): note the **Application (client) ID** and the enterprise application's **Object ID**.
-   Do **not** add or consent any API permission. Follow the SEC-11 re-consent guard in `docs/security.md` before
-   touching the registration at all.
-3. Exchange Online PowerShell (`Connect-ExchangeOnline` as an Exchange Administrator):
+## 3. Microsoft configuration required
 
-   ```powershell
-   New-ServicePrincipal -AppId <client-id> -ObjectId <enterprise-app-object-id> -DisplayName "Insight Workfolio invitations"
-   New-ManagementScope -Name "Insight Workfolio sender" -RecipientRestrictionFilter "PrimarySmtpAddress -eq 'IT@TFFDigital.com'"
-   New-ManagementRoleAssignment -App <client-id> -Role "Application Mail.Send" -CustomResourceScope "Insight Workfolio sender"
-   ```
+### 3a. `graph-delegated` (chosen)
 
-4. Verify the scope (expect `InScope: True` for the IT mailbox and `False` for any other mailbox):
+Done by an Entra administrator, **only in the order given in section 4** (a build without this change refuses a
+token that reports `Mail.Send`, which stops OneDrive storage and the off-site backup).
 
-   ```powershell
-   Test-ServicePrincipalAuthorization -Identity <client-id> -Resource IT@TFFDigital.com
-   Test-ServicePrincipalAuthorization -Identity <client-id> -Resource <any-other-mailbox>
-   ```
+1. Entra admin center › App registrations › "Insight Workfolio" › API permissions › Add › Microsoft Graph ›
+   **Delegated** › `Mail.Send`. Grant admin consent. Resulting list: `Files.ReadWrite`, `Mail.Send`,
+   `offline_access`, `openid`, `profile`. No application permission. Follow the SEC-11 re-consent guard in
+   `docs/security.md`.
+2. No new secret, redirect URI or platform change: the existing Web platform, callback and client secret are used.
+3. Confirm `IT@TFFDigital.com` is a mailbox that can send, and that SPF, DKIM and DMARC for `TFFDigital.com` cover
+   Microsoft 365, or invitations may land in spam.
 
-5. Mail authentication for `TFFDigital.com` (SPF, DKIM, DMARC) should already cover Microsoft 365; confirm, or
-   invitations may land in spam.
+### 3b. `graph` (app-only, not used)
 
-Check Microsoft's current documentation for these cmdlets at setup time
-([RBAC for Applications in Exchange Online](https://learn.microsoft.com/en-us/exchange/permissions-exo/application-rbac)).
+Done by an **Exchange Administrator**; do **not** add or consent any API permission in Entra for this mode.
 
-## 4. Environment variables (API host, never committed)
+```powershell
+New-ServicePrincipal -AppId <client-id> -ObjectId <enterprise-app-object-id> -DisplayName "Insight Workfolio invitations"
+New-ManagementScope -Name "Insight Workfolio sender" -RecipientRestrictionFilter "PrimarySmtpAddress -eq 'IT@TFFDigital.com'"
+New-ManagementRoleAssignment -App <client-id> -Role "Application Mail.Send" -CustomResourceScope "Insight Workfolio sender"
+Test-ServicePrincipalAuthorization -Identity <client-id> -Resource IT@TFFDigital.com   # expect InScope: True
+```
+
+([RBAC for Applications in Exchange Online](https://learn.microsoft.com/en-us/exchange/permissions-exo/application-rbac).)
+Variables: `INVITATION_MAIL_PROVIDER=graph`, `MAIL_GRAPH_TENANT_ID`, `MAIL_GRAPH_CLIENT_ID`,
+`MAIL_GRAPH_CLIENT_SECRET`, `MAIL_SENDER`; the API refuses to start unless all four are set.
+
+## 4. Environment variables and rollout (`graph-delegated`)
 
 | Variable | Value |
 |---|---|
-| `INVITATION_MAIL_PROVIDER` | `graph` (`none` = default, admin hands the link over; `mock` = development/tests only, refused in production) |
-| `MAIL_GRAPH_TENANT_ID` | Directory (tenant) ID |
-| `MAIL_GRAPH_CLIENT_ID` | Application (client) ID from step 2 |
-| `MAIL_GRAPH_CLIENT_SECRET` | That app's client secret. Typed by the owner into the server's environment file only; never into chat, a ticket or the repository |
-| `MAIL_SENDER` | `IT@TFFDigital.com` (sender and the support address named in the email) |
+| `INVITATION_MAIL_PROVIDER` | `graph-delegated` (`none` = default, admin hands the link over; `mock` = development/tests only, refused in production) |
+| `MAIL_SENDER` | `IT@TFFDigital.com`. Must equal `ONEDRIVE_ACCOUNT_EMAIL` (case-insensitive) or the API refuses to start |
+| `ONEDRIVE_*` | Already set for storage; all seven are required. No `MAIL_GRAPH_*` value is used |
 | `DASHBOARD_URL` | Already set; base of the activation link. Must be `https://` |
 
-The API refuses to start with `graph` unless all four `MAIL_*` values are set. `REPORT_MAIL_PROVIDER` is separate:
-this does not turn on report emails.
+`REPORT_MAIL_PROVIDER` is separate: this does not turn on report emails.
+
+Production rollout, each step only after the owner's approval. The order keeps OneDrive storage and the nightly
+off-site backup working throughout:
+
+1. **Before anything:** confirm the last nightly backup and its off-site copy
+   (`systemctl status workfolio-backup`, `backup-upload.js list`) and `/api/v1/ready`.
+2. **Deploy the code** with the environment unchanged (`INVITATION_MAIL_PROVIDER` still unset). Migration
+   `0030_account_invitations` must be applied (`deploy.sh <sha> --migrate` applies it after a backup if it is
+   not). Check `/api/v1/ready` and `backup-upload.js check`. From here on a token reporting `Mail.Send` is tolerated.
+3. **Entra:** add delegated `Mail.Send` and grant consent (section 3a). Wait an hour or force a refresh
+   (`backup-upload.js check`) and confirm storage is still up.
+4. **Environment:** add `INVITATION_MAIL_PROVIDER=graph-delegated` and `MAIL_SENDER=IT@TFFDigital.com` to
+   `/etc/workfolio/api.env`. Secrets are not touched. Restart the API. Never do this step before step 3: a
+   refresh that asks for an ungranted `Mail.Send` is refused by Microsoft and storage reports "reconnect OneDrive"
+   (recovery: finish step 3, or remove the two lines and restart; the stored refresh token is not consumed by a
+   refused request).
+5. **Reconnect OneDrive** as `IT@TFFDigital.com` (Settings › Microsoft OneDrive › Reconnect) at a time away from
+   the 02:30 UTC backup. The new connection replaces the encrypted token file atomically; the backup uploader
+   reads the same file on its next run, so both keep sharing one valid refresh token. Do not run
+   `backup-upload.js` during the sign-in.
+6. **Verify storage:** `/api/v1/ready`, Settings › Microsoft OneDrive status, `backup-upload.js check` (forces a
+   refresh through the new token and writes the rotated one back).
+7. **Verify mail:** create one test employee with a mailbox you control: status `Sent`, an `INVITATION_SENT`
+   audit row, the message arrives from IT@, nothing in Sent Items, the link activates once.
+8. **Next morning:** the scheduled off-site backup ran (`journalctl -u workfolio-backup`, `backup-upload.js list`).
+
+Rollback: remove the two lines and restart (invitations fall back to the hand-over link); storage is unaffected.
+Removing `Mail.Send` in Entra afterwards is safe with this build in either mode `none` or `graph`.
+
+Troubleshooting (the text is what the invitation shows as its failure reason):
+
+| Message | Meaning and fix |
+|---|---|
+| `Microsoft Graph refused to send as the connected account (HTTP 403, ErrorAccessDenied)` | The connection's token has no `Mail.Send`: grant it (3a), then reconnect OneDrive (step 5) |
+| `No Microsoft token from the OneDrive connection: OneDrive is not connected yet` | Connect OneDrive in Settings |
+| `... OneDrive authorization expired or was revoked; reconnect OneDrive` | The refresh token was revoked, expired, or the refresh asked for `Mail.Send` before it was granted (step 4 before step 3) |
+| `... carries a scope beyond Files.ReadWrite and Mail.Send` | The app registration holds an extra delegated permission: remove it in Entra. Storage is stopped by the same check |
+| `... belongs to another app registration, tenant or account` | The token file is from another account or app: reconnect as `IT@TFFDigital.com` |
+| `Microsoft Graph sendMail failed (HTTP 400, ErrorInvalidRecipients)` | Bad recipient address; not retried |
+| Boot error naming `INVITATION_MAIL_PROVIDER` | `ONEDRIVE_*` incomplete, or `MAIL_SENDER` is not `ONEDRIVE_ACCOUNT_EMAIL` |
 
 Recommendation before going live: the production `DASHBOARD_URL` is a bare IP address. Activation links to an IP
 address from a company mailbox look like phishing and are more likely to be filtered; a DNS name for the dashboard
@@ -127,8 +174,10 @@ is advisable first.
 | RBAC: employee 403 (create, resend, own resend), signed-out 401, IT Admin 403 on a Super Admin account; nothing sent | same | PASS |
 | Rate limit: 31st invitation per admin refused, no account created; other admins unaffected | same | PASS |
 | Graph transport: client-credentials token, `POST /users/IT%40TFFDigital.com/sendMail`, HTML body, one recipient, `saveToSentItems: false`, token cached; tokens with any application permission refused; 429/5xx/network transient, 4xx permanent, 401 refreshes the token; secret never in errors | same, fake `fetch` (no Microsoft contact) | PASS |
-| Configuration validation | `apps/api/test/env.test.ts` | PASS |
+| Delegated transport (2026-11-18): `POST /me/sendMail` with the OneDrive token, payload, 401 → one fresh token and one retry, second 401 and 403 permanent with a reconnect hint, 429/5xx/network transient, no token without a connection, no token or response text in errors; with the real `OneDriveService`: `Mail.Send` requested only in this mode, rotated refresh token persisted, wider token refused, other account refused | same, fake `fetch` (no Microsoft contact) | PASS |
+| OneDrive scope policy: `Mail.Send` tolerated, `Files.ReadWrite` still required, other mail and wide scopes refused | `apps/api/test/onedrive.e2e.test.ts` | PASS |
+| Configuration validation (incl. `graph-delegated`: OneDrive settings required, `MAIL_SENDER` = OneDrive account) | `apps/api/test/env.test.ts` | PASS |
 | Admin UI in Chrome: create → "Invitation sent" (mock labelled as not emailed, no link shown), emailed link activates the account, failure shows reason and hand-over link, resend from the employee page, list badges, "Invitation accepted" | `apps/dashboard/scripts/verify-invitations.mjs` (mock) | PASS 11/11 |
 
-**Not tested (blocked on section 3):** real sending through Microsoft Graph, the Exchange mailbox scope, actual
-delivery, spam placement. No email was sent to anyone during development.
+**Not tested (needs the rollout in section 4):** real sending through Microsoft Graph, whether a refresh after
+the Entra grant returns `Mail.Send` without a reconnect, actual delivery, spam placement. No email was sent to anyone during development.

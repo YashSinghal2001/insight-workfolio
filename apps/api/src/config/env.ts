@@ -219,8 +219,10 @@ export const envSchema = z
     DASHBOARD_URL: z.url().default("http://localhost:3000"),
     // Employee invitation emails (docs/invitations.md). Separate from REPORT_MAIL_PROVIDER: configuring it
     // emails invitations only. none = the admin hands the setup link over (as before); mock = in memory,
-    // development and tests only; graph = Microsoft Graph sendMail, app-only, from MAIL_SENDER.
-    INVITATION_MAIL_PROVIDER: z.enum(["none", "mock", "graph"]).default("none"),
+    // development and tests only; graph = Microsoft Graph sendMail, app-only, from MAIL_SENDER;
+    // graph-delegated = Microsoft Graph sendMail with the OneDrive connection's delegated token (Mail.Send),
+    // as ONEDRIVE_ACCOUNT_EMAIL: needs the ONEDRIVE_* settings, none of the MAIL_GRAPH_* ones.
+    INVITATION_MAIL_PROVIDER: z.enum(["none", "mock", "graph", "graph-delegated"]).default("none"),
     MAIL_GRAPH_TENANT_ID: z.string().optional().transform((v) => v || undefined),
     MAIL_GRAPH_CLIENT_ID: z.string().optional().transform((v) => v || undefined),
     /** Server only; never logged, never sent to the dashboard or desktops. */
@@ -238,6 +240,11 @@ export const envSchema = z
   })
   .refine((env) => env.INVITATION_MAIL_PROVIDER !== "graph" || !!(env.MAIL_GRAPH_TENANT_ID && env.MAIL_GRAPH_CLIENT_ID && env.MAIL_GRAPH_CLIENT_SECRET && env.MAIL_SENDER), {
     message: "MAIL_GRAPH_TENANT_ID, MAIL_GRAPH_CLIENT_ID, MAIL_GRAPH_CLIENT_SECRET and MAIL_SENDER are all required for INVITATION_MAIL_PROVIDER=graph",
+    path: ["INVITATION_MAIL_PROVIDER"],
+  })
+  // Delegated mail is sent as the OneDrive account and nobody else: the sender must be that account.
+  .refine((env) => env.INVITATION_MAIL_PROVIDER !== "graph-delegated" || (!!env.ONEDRIVE_CLIENT_ID && !!env.MAIL_SENDER && env.MAIL_SENDER.toLowerCase() === env.ONEDRIVE_ACCOUNT_EMAIL), {
+    message: "INVITATION_MAIL_PROVIDER=graph-delegated needs the OneDrive settings (ONEDRIVE_*) and MAIL_SENDER equal to ONEDRIVE_ACCOUNT_EMAIL",
     path: ["INVITATION_MAIL_PROVIDER"],
   })
   // Production: a hosted database (libsql:// or https://; no wss://, Turso refuses the WebSocket transport) or a

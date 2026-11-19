@@ -5,6 +5,9 @@ import { decodeJwt } from "jose";
 import { accountAudit } from "../audit/account-audit.js";
 import type { Env } from "../config/env.js";
 import { MailError, type MailMessage, type MailTransport, MockMailTransport, NoMailTransport } from "../reports/mail.js";
+import { ONEDRIVE_AUTH, StorageError } from "../screenshots/storage.js";
+// Type only (injected by token): onedrive.ts imports the auth guard, whose AuthService reaches this module.
+import type { OneDriveService } from "../storage/onedrive.js";
 
 /** Employee invitation emails (docs/invitations.md). Separate from the report transport on purpose. */
 export const INVITATION_TRANSPORT = Symbol("INVITATION_TRANSPORT");
@@ -91,13 +94,75 @@ export class GraphMailTransport implements InvitationTransport {
 
 const transient = (status: number) => status === 429 || status >= 500;
 
+/**
+ * Microsoft Graph sendMail, DELEGATED (INVITATION_MAIL_PROVIDER=graph-delegated): `POST /me/sendMail` with the
+ * access token of the OneDrive connection (OneDriveService: same sign-in, encrypted token file and refresh; no
+ * second OAuth flow, no second credential). A delegated Mail.Send token can send only as the signed-in account,
+ * which OneDriveService pins to ONEDRIVE_ACCOUNT_EMAIL (= MAIL_SENDER, checked at boot). Needs delegated
+ * Mail.Send on the app and a OneDrive connection made (or refreshed) after it was granted.
+ * Recorded as provider "graph", like the app-only transport: it is Microsoft Graph either way.
+ */
+export class DelegatedGraphMailTransport implements InvitationTransport {
+  readonly name = "graph" as const;
+  readonly delivers = true;
+
+  constructor(
+    private readonly auth: Pick<OneDriveService, "token">,
+    private readonly fetchFn: typeof fetch = fetch,
+  ) {}
+
+  async send(m: MailMessage): Promise<{ messageId: string }> {
+    let res = await this.post(m, false);
+    // The cached token may have been revoked or rotated away: one fresh token, one more try, never a loop.
+    if (res.status === 401) res = await this.post(m, true);
+    if (res.status === 202) return { messageId: res.headers.get("request-id") ?? "graph" };
+    const body = (await res.json().catch(() => null)) as { error?: { code?: unknown } } | null;
+    const code = typeof body?.error?.code === "string" && /^\w{1,64}$/.test(body.error.code) ? `, ${body.error.code}` : "";
+    if (res.status === 401 || res.status === 403) {
+      throw new MailError(`Microsoft Graph refused to send as the connected account (HTTP ${res.status}${code}); grant delegated Mail.Send to the app, then reconnect OneDrive in Settings › Storage`, true);
+    }
+    throw new MailError(`Microsoft Graph sendMail failed (HTTP ${res.status}${code})`, !transient(res.status));
+  }
+
+  private async post(m: MailMessage, fresh: boolean): Promise<Response> {
+    let token: string;
+    try {
+      token = await this.auth.token(fresh);
+    } catch (err) {
+      // StorageError messages are written to be shown (no token, secret or response body in them).
+      const why = err instanceof StorageError ? err.message : "unexpected error";
+      throw new MailError(`No Microsoft token from the OneDrive connection: ${why}`, !/timed out|unreachable/.test(why));
+    }
+    if (typeof token !== "string" || !token) throw new MailError("No Microsoft token from the OneDrive connection", true);
+    try {
+      return await this.fetchFn(`${GRAPH}/me/sendMail`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        body: JSON.stringify({
+          message: {
+            subject: m.subject,
+            body: m.html ? { contentType: "HTML", content: m.html } : { contentType: "Text", content: m.text },
+            toRecipients: [{ emailAddress: { address: m.to } }],
+          },
+          // The message carries a live activation link: never leave a copy in the shared IT mailbox.
+          saveToSentItems: false,
+        }),
+        signal: AbortSignal.timeout(TIMEOUT_MS),
+      });
+    } catch {
+      throw new MailError("Microsoft could not be reached", false);
+    }
+  }
+}
+
 export const invitationTransportProvider = {
   provide: INVITATION_TRANSPORT,
-  inject: [ConfigService],
-  useFactory: (config: ConfigService<Env, true>): InvitationTransport => {
+  inject: [ConfigService, ONEDRIVE_AUTH],
+  useFactory: (config: ConfigService<Env, true>, onedrive: OneDriveService): InvitationTransport => {
     const provider = config.get("INVITATION_MAIL_PROVIDER", { infer: true });
     if (provider === "mock") return new MockMailTransport();
     if (provider === "none") return new NoMailTransport();
+    if (provider === "graph-delegated") return new DelegatedGraphMailTransport(onedrive);
     return new GraphMailTransport({
       tenantId: config.get("MAIL_GRAPH_TENANT_ID", { infer: true })!,
       clientId: config.get("MAIL_GRAPH_CLIENT_ID", { infer: true })!,
