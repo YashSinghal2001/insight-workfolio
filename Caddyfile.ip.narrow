@@ -1,0 +1,84 @@
+# Insight Workfolio reverse proxy, SINGLE-ORIGIN variant for the temporary launch WITHOUT a domain:
+# everything is served from https://<WORKFOLIO_PUBLIC_IP>. Installed at /etc/caddy/Caddyfile by
+# install-vps.sh when /etc/caddy/workfolio.env sets WORKFOLIO_PUBLIC_IP and no WORKFOLIO_DOMAIN.
+# The two-hostname variant for a real domain is deploy/caddy/Caddyfile.
+#
+# Routing on one origin (no CORS in play, cookies are first-party):
+#   /api/*   -> 127.0.0.1:4000  NestJS API (its routes all live under /api/v1; auth cookies are Path=/api)
+#   /*       -> 127.0.0.1:3000  Next.js dashboard (it has no route handlers of its own under /api)
+# Both apps bind to loopback only; Caddy is the only public listener (80 -> 443 redirect, 443). Caddy sets
+# X-Forwarded-For / X-Forwarded-Proto; the API trusts them from loopback only (TRUST_PROXY=loopback).
+# Security headers (HSTS, nosniff, frame denial, no-store, referrer policy) are set by the apps themselves.
+#
+# TLS for a bare IP address: Let's Encrypt issues IP-address certificates only under its "shortlived" ACME
+# profile (about 6 days of validity; Caddy renews automatically, roughly every 2 days, using ARI). Caddy
+# >= 2.10 understands the `profile` option. Without this explicit issuer Caddy would use its internal CA for
+# an IP site (browser warnings). HTTP-01 needs port 80 reachable; TLS-ALPN-01 needs 443. Both are open by
+# install-vps.sh. If Let's Encrypt refuses IP issuance, `journalctl -u caddy` shows it and the site stays
+# down rather than silently self-signed: do not add a fallback issuer here on purpose.
+{
+	email {$ACME_EMAIL}
+	# Admin API off: nothing on this host needs to reconfigure Caddy at runtime.
+	admin off
+}
+
+{$WORKFOLIO_PUBLIC_IP} {
+	tls {
+		issuer acme {
+			profile shortlived
+		}
+	}
+
+	@api path /api/*
+	handle @api {
+		# Screenshot uploads are raw WebP up to 10 MB; JSON bodies are capped at 1 MB by the API.
+		request_body {
+			max_size 12MB
+		}
+		# Timelapse downloads can take a while over slow links; the API bounds each stream itself.
+		# No `encode` on API responses (nothing to gain for JSON of this size; keeps compression away from
+		# responses that carry credentials).
+		reverse_proxy 127.0.0.1:4000 {
+			transport http {
+				response_header_timeout 60s
+			}
+			flush_interval -1
+		}
+	}
+
+	# Desktop installers hosted on the VPS, kept out of the public git repository. Only top-level .exe/.dmg
+	# files in /srv/workfolio-downloads (folder root:workfolio-publisher 1775, files 644) and its
+	# desktop-releases.json manifest are served; no listing, nothing else.
+	handle_path /desktop-downloads/* {
+		root * /srv/workfolio-downloads
+		@installer path_regexp ^/[A-Za-z0-9][A-Za-z0-9._-]*\.(exe|dmg)$
+		handle @installer {
+			header Content-Disposition attachment
+			header X-Content-Type-Options nosniff
+			header Cache-Control no-cache
+			file_server
+		}
+		# Runtime release manifest the dashboard reads (written atomically by the publisher receiver).
+		@manifest path /desktop-releases.json
+		handle @manifest {
+			header X-Content-Type-Options nosniff
+			header Cache-Control no-cache
+			file_server
+		}
+		handle {
+			respond 404
+		}
+	}
+
+	handle {
+		encode zstd gzip
+		reverse_proxy 127.0.0.1:3000
+	}
+
+	log {
+		output file /var/log/caddy/site.access.log {
+			roll_size 50MiB
+			roll_keep 5
+		}
+	}
+}
