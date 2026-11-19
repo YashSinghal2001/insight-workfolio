@@ -6,6 +6,8 @@
 // WORKFOLIO_DASHBOARD_URL (https, required) is the web dashboard shown to administrators (VITE_DASHBOARD_URL).
 // WORKFOLIO_ENV=staging|production (default production) picks the bundle identity (environmentIdentity), so a
 // staging build installs beside production with its own app data and credential-store entries.
+// A placeholder API on the reserved .invalid TLD (CI's unsigned test installers) always builds the third
+// identity, test ("Insight Workfolio Test"), and nothing else can: a test build never replaces a real install.
 // Signing is optional: without APPLE_SIGNING_IDENTITY the bundle is unsigned (ad-hoc linker signature
 // only). With it, the Tauri CLI signs (hardened runtime, src-tauri/Entitlements.plist) and, given one
 // complete set of notarization credentials, notarizes and staples the .app. See docs/deployment.md.
@@ -55,16 +57,26 @@ export function releaseDashboardUrl(raw, apiUrl) {
 export const ENVIRONMENTS = {
   production: { identifier: "com.insightworkfolio.desktop", productName: "Insight Workfolio" },
   staging: { identifier: "com.insightworkfolio.desktop.staging", productName: "Insight Workfolio Staging" },
+  // Not a choice: the identity of every build for a placeholder API (.invalid), and only of those.
+  test: { identifier: "com.insightworkfolio.desktop.test", productName: "Insight Workfolio Test" },
 };
 
 /**
  * Identity for WORKFOLIO_ENV (unset = production). The identifier also names the app data directory and
  * (Windows) the single-instance mutex; the keychain / Credential Manager service is the identifier too,
- * compiled into the Rust side through WORKFOLIO_KEYCHAIN_SERVICE (src-tauri/src/lib.rs).
+ * compiled into the Rust side through WORKFOLIO_KEYCHAIN_SERVICE (src-tauri/src/lib.rs). The product name
+ * names the Windows install folder, Start menu entry, uninstall registry key and sign-in Run value.
+ *
+ * `apiUrl` on the reserved `.invalid` TLD (RFC 2606, CI's placeholder) forces the `test` identity: that
+ * installer cannot reach any server, so it must never install over, update or share data with a real one.
+ * The reverse holds too: a real API never gets the test name.
  */
-export function environmentIdentity(raw) {
-  const env = raw?.trim() || "production";
+export function environmentIdentity(raw, apiUrl) {
+  const placeholder = apiUrl !== undefined && new URL(apiUrl).hostname.endsWith(".invalid");
+  const env = raw?.trim() || (placeholder ? "test" : "production");
   if (!Object.hasOwn(ENVIRONMENTS, env)) throw new Error(`must be staging or production, not "${raw}"`);
+  if (placeholder && env !== "test") throw new Error(`"${env}" cannot be built for a placeholder API (.invalid): that build always gets the test identity`);
+  if (!placeholder && env === "test") throw new Error('"test" is only the identity of a build for a placeholder API on the .invalid TLD');
   const identity = ENVIRONMENTS[env];
   return { env, ...identity, keychainService: identity.identifier };
 }
@@ -212,12 +224,14 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     process.exit(1);
   }
   try {
-    identity = environmentIdentity(process.env.WORKFOLIO_ENV);
+    identity = environmentIdentity(process.env.WORKFOLIO_ENV, result.apiUrl);
   } catch (err) {
     console.error(`WORKFOLIO_ENV: ${err.message}`);
     process.exit(1);
   }
   if (identity.env !== "production") Object.assign(result.config, { identifier: identity.identifier, productName: identity.productName });
+  // The test app also says so in its window title (a config override replaces the whole windows array).
+  if (identity.env === "test") result.config.app.windows = base.app.windows.map((w) => ({ ...w, title: identity.productName }));
   let signing;
   let windowsSigning;
   try {
