@@ -196,7 +196,31 @@ try {
   let t = await text();
   check("sign-in: employee lands on /my (My dashboard) with the employee navigation, not the admin sidebar", (await h1()) === "My dashboard" && (await js(`!!document.querySelector('nav[aria-label="My workspace"]') && !document.querySelector('nav[aria-label="Main"]')`)) && (await js(`document.querySelectorAll('nav[aria-label="My workspace"] a').length`)) === 10);
   check("dashboard: welcome, attendance state, today's activity, website card, project + running timer, pending leave, recent screenshots", /Welcome, Ana Employee/.test(t) && /Clocked in/.test(t) && /Code Editor/.test(t) && /Website activity today/.test(t) && /Ana Project/.test(t) && /Timer running: Ana Project · Write the spec/.test(t) && (await js(`document.querySelector('ul[aria-label="My pending leave"]')?.children.length`)) === 1 && (await js(`document.querySelectorAll('ul[aria-label="Recent screenshots"] li').length`)) === 3, t.slice(0, 300).replace(/\n/g, " | "));
-  check("dashboard: desktop app section with a macOS and a Windows card, each either a /downloads/ link or a disabled button", (await js(`(() => { const s = document.querySelector('section[aria-label="Desktop app"]'); return !!s && ['macos', 'windows'].every((p) => { const c = s.querySelector('[data-platform=' + p + ']'); const a = c?.querySelector('a[download]'); return !!c && (a ? new URL(a.href).pathname.startsWith('/downloads/') && a.origin === location.origin : c.querySelector('button')?.disabled === true); }); })()`)) === true);
+  check("dashboard: desktop app section with a macOS and a Windows card, each either a /downloads/ link or a disabled button", (await js(`(() => { const s = document.querySelector('section[aria-label="Desktop app"]'); return !!s && ['macos', 'windows'].every((p) => { const c = s.querySelector('[data-platform=' + p + ']'); const a = c?.querySelector('a[download]'); return !!c && (a ? /^\\/(desktop-)?downloads\\//.test(new URL(a.href).pathname) && a.origin === location.origin : c.querySelector('button')?.disabled === true); }); })()`)) === true);
+  // The card reads the VPS release manifest at runtime (written by deploy/scripts/desktop-downloads-receiver.py).
+  // Serve one to the browser: what it publishes is what the employee sees, and a bad entry is ignored.
+  {
+    const live = {
+      windows: { version: "9.8.7", releasedAt: "2026-11-19", file: "insight-workfolio_9.8.7_windows-x86_64-setup.exe", href: "/desktop-downloads/insight-workfolio_9.8.7_windows-x86_64-setup.exe", arch: "64-bit (x64)", sizeBytes: 5242880, sha256: "a".repeat(64), commit: "0".repeat(40), notes: "Faster start.\nFixes the clock-in button." },
+      macos: { version: "9.8.7", releasedAt: "2026-11-19", file: "evil.dmg", href: "https://example.invalid/evil.dmg", arch: "Universal", sizeBytes: 1, sha256: "b".repeat(64) },
+    };
+    const onPaused = (m) => {
+      const msg = JSON.parse(m.data);
+      if (msg.method === "Fetch.requestPaused") void cdp("Fetch.fulfillRequest", { requestId: msg.params.requestId, responseCode: 200, responseHeaders: [{ name: "content-type", value: "application/json" }], body: Buffer.from(JSON.stringify(live)).toString("base64") });
+    };
+    ws.addEventListener("message", onPaused);
+    await cdp("Fetch.enable", { patterns: [{ urlPattern: "*/desktop-downloads/desktop-releases.json" }] });
+    await go("/my");
+    await waitFor(`document.querySelector('[data-platform=windows] a[download]')?.getAttribute('href') === ${JSON.stringify(live.windows.href)}`, "the published Windows release on the card");
+    const card = await js(`(() => { const s = document.querySelector('section[aria-label="Desktop app"]'); const of = (p) => s.querySelector('[data-platform=' + p + ']').closest('section');
+      return { win: of('windows').innerText, winAll: of('windows').textContent, mac: of('macos').innerText, macHref: of('macos').querySelector('a[download]')?.getAttribute('href') ?? null, first: s.querySelector('[data-platform]').dataset.platform }; })()`);
+    check("dashboard: the published manifest drives the Windows card (latest version, release date, size, release notes, checksum, link)", /Latest version 9\.8\.7/.test(card.win) && /Released/.test(card.win) && /5\.0 MB/.test(card.win) && card.win.includes("Faster start.") && card.win.includes("Fixes the clock-in button.") && card.winAll.includes("a".repeat(64)), card.win.replace(/\s+/g, " ").slice(0, 160));
+    check("dashboard: a manifest entry linking to another site is ignored; the bundled installer stays", !!card.macHref?.startsWith("/downloads/") && !/9\.8\.7/.test(card.mac), String(card.macHref));
+    check("dashboard: the installer for this computer (a Mac here) comes first and is marked", card.first === "macos" && /This computer/.test(card.mac) && !/This computer/.test(card.win));
+    await cdp("Fetch.disable");
+    ws.removeEventListener("message", onPaused);
+    await go("/my");
+  }
   await waitFor(`[...document.querySelectorAll('ul[aria-label="Recent screenshots"] img')].length === 3 && [...document.querySelectorAll('ul[aria-label="Recent screenshots"] img')].every((i) => i.src.startsWith('blob:') && i.complete && i.naturalWidth > 0)`, "dashboard thumbnails");
   check("dashboard: thumbnails load as blob URLs through the API (no image URL in the page)", !(await js(`document.documentElement.outerHTML`)).includes("/content"));
   check("dashboard: no productivity score or ranking", !/score|rank/i.test(t));
