@@ -122,7 +122,13 @@ jobs:
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
           APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
-        run: pnpm --filter @workfolio/desktop package -- --bundles app,dmg ${{ inputs.macos_universal && '--target universal-apple-darwin' || '' }}
+        # A secret that is not configured arrives as an empty variable, and the bundler takes an empty
+        # APPLE_CERTIFICATE for a certificate to import: drop the empty ones, so "not configured" means unsigned.
+        run: |
+          for v in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_API_KEY APPLE_API_ISSUER; do
+            [ -n "${!v}" ] || unset "$v"
+          done
+          pnpm --filter @workfolio/desktop package -- --bundles app,dmg ${{ inputs.macos_universal && '--target universal-apple-darwin' || '' }}
       - name: Build signed packages (Windows)
         if: matrix.os == 'windows-latest'
         env:
@@ -132,7 +138,11 @@ jobs:
           AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
           AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
           AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
-        run: pnpm --filter @workfolio/desktop package -- --bundles nsis
+        run: |
+          for v in AZURE_TRUSTED_SIGNING_ENDPOINT AZURE_TRUSTED_SIGNING_ACCOUNT AZURE_TRUSTED_SIGNING_PROFILE AZURE_CLIENT_ID AZURE_CLIENT_SECRET AZURE_TENANT_ID; do
+            [ -n "${!v}" ] || unset "$v"
+          done
+          pnpm --filter @workfolio/desktop package -- --bundles nsis
       # Stable, space-free names. Renaming does not affect the signature (it covers the bytes). Tauri's own
       # names carry version and target, so matching them exactly is the first version/architecture check.
       - name: Collect packages
