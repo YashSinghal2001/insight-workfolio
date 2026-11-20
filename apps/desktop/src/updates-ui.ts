@@ -4,8 +4,8 @@
 // Nothing restarts without the employee's confirmation; a mandatory update only blocks clocking in.
 import { invoke } from "@tauri-apps/api/core";
 import { check, type Update } from "@tauri-apps/plugin-updater";
-import { DEVICE_HEADER, type ReportUpdateStatusInput, type UpdateState } from "@workfolio/shared";
-import { CHECK_EVERY_MS, formatBytes, offerOf, postponeFor, shouldPrompt, updateErrorReason, type Offer, type Postponed } from "./update-policy.ts";
+import { DEVICE_HEADER, type ReportUpdateStatusInput, type UpdateManifest, type UpdateState } from "@workfolio/shared";
+import { CHECK_EVERY_MS, formatBytes, manualStatus, offerOf, postponeFor, shouldPrompt, updateErrorReason, type Offer, type Postponed } from "./update-policy.ts";
 
 type Phase = "idle" | "checking" | "current" | "available" | "downloading" | "ready" | "installing" | "error";
 
@@ -15,6 +15,8 @@ interface Deps {
   installationId: () => Promise<string>;
   /** Signed in with an active device: send the state to the API (errors are ignored). */
   report: (status: ReportUpdateStatusInput) => Promise<void>;
+  /** Builds without the updater: the API manifest for this installation (undefined = nothing newer, or not signed in). */
+  manifest: () => Promise<Partial<UpdateManifest> | undefined>;
   /** Clocked in or on a break: restarting interrupts recording, so the confirmation says so. */
   working: () => boolean;
   /** Recording was stopped for the install but the install failed: configure it again. */
@@ -205,7 +207,9 @@ export function initUpdates(d: Deps) {
     },
     /** Signed in on an active device: report the last check's outcome now (a check before sign-in could not). */
     reportNow() {
-      if (phase === "current") send("UP_TO_DATE");
+      // Without the updater no check ever runs: report the installed version anyway (it was never reported before).
+      if (!d.enabled) void d.manifest().then((m) => d.report(manualStatus(d.currentVersion(), m))).catch(() => undefined);
+      else if (phase === "current") send("UP_TO_DATE");
       else if (phase === "available") send(visible ? "AVAILABLE" : "POSTPONED");
     },
     /** An installed version below the minimum supported one: clocking in waits for the update. */

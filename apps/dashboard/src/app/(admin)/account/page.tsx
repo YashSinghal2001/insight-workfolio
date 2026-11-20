@@ -1,14 +1,16 @@
 "use client";
 
-import { PLATFORM_ROLE_LABEL } from "@workfolio/shared";
+import { PLATFORM_ROLE_LABEL, type HealthResponse } from "@workfolio/shared";
 import { useAuth } from "@/components/auth-provider";
 import { PageHeader } from "@/components/kit";
+import { useApi } from "@/components/my-ui";
 import { SessionsCard } from "@/components/sessions-card";
 import { Card } from "@/components/ui";
 
 /** The signed-in administrator's own account. Admins may have no employee profile. */
 export default function AccountPage() {
   const { auth } = useAuth();
+  const health = useApi<HealthResponse>("/health");
   if (auth.status !== "authenticated") return null;
   const { user, employee } = auth.me;
 
@@ -21,6 +23,14 @@ export default function AccountPage() {
           <dd className="break-words">{user.email}</dd>
           <dt className="text-muted">Role</dt>
           <dd>{PLATFORM_ROLE_LABEL[user.platformRole]}</dd>
+          <dt className="text-muted">Server</dt>
+          <dd className="font-mono" role="status">
+            {health.load.state === "ready"
+              ? `API v${health.load.data.version ?? "unknown"}${health.load.data.commit ? ` (${health.load.data.commit.slice(0, 7)})` : ""}`
+              : health.load.state === "loading"
+                ? "Checking…"
+                : "Version unavailable"}
+          </dd>
         </dl>
       </Card>
       <SessionsCard timeZone={employee?.timezone} />

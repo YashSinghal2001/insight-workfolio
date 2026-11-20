@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { formatBytes, offerOf, OPTIONAL_POSTPONE_HOURS, postponeFor, shouldPrompt, updateErrorReason } from "../src/update-policy.ts";
+import { formatBytes, manifestPath, manualStatus, offerOf, OPTIONAL_POSTPONE_HOURS, postponeFor, shouldPrompt, updateErrorReason } from "../src/update-policy.ts";
 
 const H = 3_600_000;
 
@@ -60,4 +60,26 @@ test("the update UI is wired: elements exist, the updater permission is granted,
   }
   const caps = JSON.parse(readFileSync(new URL("../src-tauri/capabilities/default.json", import.meta.url), "utf8"));
   assert.deepEqual(caps.permissions, ["core:default", "notification:allow-notify", "updater:default"]);
+});
+
+test("manual builds: the manifest path is the one the Tauri updater asks", () => {
+  assert.equal(manifestPath("macos", "aarch64", "0.2.2"), "/desktop-updates/manifest/darwin/aarch64/0.2.2");
+  assert.equal(manifestPath("windows", "x86_64", "0.2.2"), "/desktop-updates/manifest/windows/x86_64/0.2.2");
+});
+
+test("manual builds report their installed version: up to date on 204, available only for a newer version", () => {
+  assert.deepEqual(manualStatus("0.2.2", undefined), { installedVersion: "0.2.2", availableVersion: null, state: "UP_TO_DATE", failureReason: null });
+  assert.deepEqual(manualStatus("0.2.2", { version: "0.3.0" }), { installedVersion: "0.2.2", availableVersion: "0.3.0", state: "AVAILABLE", failureReason: null });
+  assert.equal(manualStatus("0.2.2", { version: "0.2.2" }).state, "UP_TO_DATE", "same version");
+  assert.equal(manualStatus("0.2.2", { version: "0.2.1" }).state, "UP_TO_DATE", "older version");
+  for (const bad of [{ version: "latest" }, { version: 3 as unknown as string }, {}]) assert.equal(manualStatus("0.2.2", bad).availableVersion, null);
+});
+
+test("regression: version reporting does not depend on the updater (every installed build reported nothing)", () => {
+  const ui = readFileSync(new URL("../src/updates-ui.ts", import.meta.url), "utf8");
+  assert.match(ui, /if \(!d\.enabled\) void d\.manifest\(\)\.then\(\(m\) => d\.report\(manualStatus\(d\.currentVersion\(\), m\)\)\)/);
+  const main = readFileSync(new URL("../src/main.ts", import.meta.url), "utf8");
+  assert.ok(main.includes("updates?.reportNow();"), "after sign-in");
+  assert.ok(main.includes("if (app.profile) updates.reportNow();"), "signed in before app_info answered");
+  assert.ok(readFileSync(new URL("../src-tauri/src/lib.rs", import.meta.url), "utf8").includes("arch: std::env::consts::ARCH"));
 });
