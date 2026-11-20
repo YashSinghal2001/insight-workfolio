@@ -101,13 +101,13 @@ export class ReportsService implements OnModuleInit, OnModuleDestroy {
     return schedules!.rows.map((r) => this.toSchedule(r, recipients!.rows));
   }
 
-  async create(caller: AuthContext, input: CreateReportScheduleInput) {
+  async create(caller: AuthContext, input: Omit<CreateReportScheduleInput, "kind" | "sendAtLocalTime"> & Partial<Pick<CreateReportScheduleInput, "kind" | "sendAtLocalTime">>) {
     await this.assertScope(input.employeeId ?? null, input.teamId ?? null);
     const id = randomUUID();
     await this.db.execute({
       sql: `INSERT INTO report_schedules (id, name, kind, frequency, timezone, send_at_local_time, employee_id, team_id, include_projects, created_by)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      args: [id, input.name, input.kind, input.frequency, input.timeZone, input.sendAtLocalTime, input.employeeId ?? null, input.teamId ?? null, input.includeProjects ? 1 : 0, caller.id],
+      args: [id, input.name, input.kind ?? "WORKED_HOURS", input.frequency, input.timeZone, input.sendAtLocalTime ?? null, input.employeeId ?? null, input.teamId ?? null, input.includeProjects ? 1 : 0, caller.id],
     });
     this.logger.log({ scheduleId: id, actorId: caller.id }, "Report schedule created");
     return this.schedule(id);

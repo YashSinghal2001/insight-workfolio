@@ -175,7 +175,7 @@ export function duePeriod(frequency: ReportFrequency, now: number, timeZone: str
 }
 
 /** Control characters (newlines included) become spaces: names can never add a header or forge a line. */
-const oneLine = (s: string) => s.replace(/[\u0000-\u001f\u007f]+/g, " ").trim();
+const oneLine = (s: string) => s.replace(/\p{Cc}+/gu, " ").trim();
 
 /** Missing-record and freshness warnings, in the order shown. */
 export function reportWarnings(d: ReportData): string[] {
