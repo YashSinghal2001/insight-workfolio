@@ -234,3 +234,11 @@ Browser checks for new pages: add to a new `apps/dashboard/scripts/verify-parity
 Privacy (roadmap Phase 6): no window titles, keystrokes or screenshot contents beyond what existing admin views already show;
 risk users are derived from existing alerts + scheduled-hours shortfall (no new collection, no schema change). Bulk export:
 `screenshots:delete`-level identity (Super Admin only), every exported screenshot access-logged, size-capped.
+
+## 13. Wave 4 (verification and readiness) [contract]
+
+| ID | Feature | Owns |
+|---|---|---|
+| W4-SECURITY | RBAC / scoping / privacy verification of every route added in waves 1–3; fixes for confirmed issues | new `apps/api/test/parity-rbac-matrix.e2e.test.ts`, minimal fixes anywhere in `apps/api/src/**` (each listed in the report), `docs/security.md` addendum |
+| W4-E2E | Browser E2E for new flows, desktop→API→dashboard flow, notification mock delivery, performance, backup/restore drill, flaky-test fixes | new `apps/dashboard/scripts/verify-parity.mjs` (+ npm script), existing test files where flaky, `deploy/scripts/*` drills (read/run locally only) |
+| W4-RELEASE-DOCS | Production readiness: deploy steps, migration plan, rollback, smoke tests, env changes, owner decisions | new `docs/status/PRODUCTION-READINESS.md`, `docs/deployment.md` addendum, `docs/releases/` deploy-record template |
