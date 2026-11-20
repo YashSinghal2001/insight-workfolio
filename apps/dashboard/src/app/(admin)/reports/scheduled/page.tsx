@@ -191,6 +191,17 @@ export default function ScheduledReportsPage() {
   const [editing, setEditing] = useState<ReportSchedule | "new" | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
+  const [preview, setPreview] = useState<{ name: string; text: string | null; error: string | null } | null>(null);
+
+  async function showPreview(s: ReportSchedule) {
+    setPreview({ name: s.name, text: null, error: null });
+    try {
+      const r = await api<{ text: string }>(`/reports/schedules/${s.id}/preview`);
+      setPreview({ name: s.name, text: r.text, error: null });
+    } catch (err) {
+      setPreview({ name: s.name, text: null, error: errorMessage(err) });
+    }
+  }
 
   const load = useCallback(async () => {
     try {
@@ -257,7 +268,7 @@ export default function ScheduledReportsPage() {
         />
       )}
 
-      <div aria-live="polite">{message && <p role="status" className="text-sm">{message}</p>}</div>
+      <div aria-live="polite">{message && <p role="status" data-report-message className="text-sm">{message}</p>}</div>
       {error && <ErrorState message={error} onRetry={() => void load()} />}
       {!schedules && !error && <SkeletonRows label="scheduled reports" />}
       {schedules?.length === 0 && <EmptyState title="No scheduled reports yet." hint="Create one: runs are recorded even when nothing is emailed." action={<Button onClick={() => setEditing("new")}>New report</Button>} />}
@@ -284,6 +295,7 @@ export default function ScheduledReportsPage() {
                 <td>
                   <span className="flex flex-wrap gap-1">
                     <Button variant="secondary" className="!px-2 !py-1 text-xs" aria-label={`Edit ${s.name}`} onClick={() => setEditing(s)}>Edit</Button>
+                    <Button variant="secondary" className="!px-2 !py-1 text-xs" aria-label={`Preview ${s.name}`} pending={preview?.name === s.name && !preview.text && !preview.error} onClick={() => void showPreview(s)}>Preview</Button>
                     <Button variant="secondary" className="!px-2 !py-1 text-xs" aria-label={`Run ${s.name} now`} pending={busy === `${s.id}:run`} onClick={() => void act(s, "run", async () => {
                       const r = await api<RunNowResponse>(`/reports/schedules/${s.id}/run`, { method: "POST" });
                       return `${s.name}: ${r.duplicate ? "already run for" : "ran for"} ${r.run.period.from} – ${r.run.period.to}: ${RUN[r.run.status][0].toLowerCase()}.`;
@@ -298,6 +310,17 @@ export default function ScheduledReportsPage() {
             );
           })}
         </DataTable>
+      )}
+      {preview && (
+        <section aria-label={`Preview ${preview.name}`} className="flex flex-col gap-2 rounded-lg border border-border bg-surface p-4">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <h2 className="text-lg font-semibold">Preview: {preview.name} <span className="text-sm font-normal text-muted">(last complete period, not sent)</span></h2>
+            <Button variant="secondary" onClick={() => setPreview(null)}>Close preview</Button>
+          </div>
+          {preview.error && <ErrorState message={preview.error} />}
+          {!preview.text && !preview.error && <SkeletonRows rows={2} label="preview" />}
+          {preview.text && <pre className="max-h-96 overflow-auto rounded-md border border-border bg-background p-3 text-xs whitespace-pre-wrap break-words">{preview.text}</pre>}
+        </section>
       )}
     </div>
   );
