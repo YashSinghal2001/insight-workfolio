@@ -6,7 +6,7 @@ import { useRouter } from "next/navigation";
 import { PLATFORM_ROLE_LABEL } from "@workfolio/shared";
 import { AppShell } from "@/components/app-shell";
 import { useAuth } from "@/components/auth-provider";
-import { MyNav } from "@/components/my-nav";
+import { MY_SECTIONS, MyNav } from "@/components/my-nav";
 import { buttonClass, secondaryButtonClass } from "@/components/ui";
 
 /** The employee's own dashboard (their data only; every request is authorized again by the API). */
@@ -37,10 +37,12 @@ export default function EmployeeLayout({ children }: { children: React.ReactNode
     <AppShell
       navId="my-nav"
       context="My workspace"
+      sections={employee ? MY_SECTIONS(auth.me.teamHead === true) : undefined}
+      root="/my"
       nav={employee ? (p) => <MyNav {...p} teamHead={auth.me.teamHead === true} /> : undefined}
       actions={
         <>
-          <span className="hidden text-muted sm:inline">{employee ? `${employee.fullName} (${employee.employeeCode})` : user.email}</span>
+          <span className="hidden text-muted xl:inline">{employee ? `${employee.fullName} (${employee.employeeCode})` : user.email}</span>
           <span className="rounded bg-brand/10 px-2 py-0.5 text-xs font-medium text-brand" data-testid="platform-role">{PLATFORM_ROLE_LABEL[user.platformRole]}</span>
           {user.role === "ADMIN" && <Link href="/" className="text-brand hover:underline">Admin dashboard</Link>}
           <button type="button" onClick={() => logout()} className={`${secondaryButtonClass} px-3 py-1`}>Sign out</button>
