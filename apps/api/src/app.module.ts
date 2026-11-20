@@ -28,6 +28,8 @@ import { AuthGuard } from "./auth/auth.guard.js";
 import { AuthService } from "./auth/auth.service.js";
 import { validateEnv, type Env } from "./config/env.js";
 import { DatabaseModule } from "./database/database.module.js";
+import { EmployeeAnalyticsController } from "./employees/analytics.controller.js";
+import { EmployeeAnalyticsService } from "./employees/analytics.service.js";
 import { DevicesController } from "./devices/devices.controller.js";
 import { DevicesService } from "./devices/devices.service.js";
 import { EmployeesController } from "./employees/employees.controller.js";
@@ -106,7 +108,7 @@ import { NotificationRulesService } from "./notifications/notification-rules.ser
     }),
     DatabaseModule,
   ],
-  controllers: [AlertsController, HealthController, AuthController, EmployeesController, DevicesController, AttendanceController, CorrectionsController, ActivityController, MonitoringSettingsController, ScreenshotsController, ScreenshotSettingsController, TimelapseController, LeaveController, HolidaysController, TeamsController, ProjectsController, TaskTimeController, ReportsController, WebsitesController, RolesController, AuditController, ScheduleSettingsController, DailyAttendanceController, EmployeeTrackingController, GoogleDriveOAuthController, OneDriveController, DesktopUpdatesController, NotificationsController, AnomaliesController],
+  controllers: [AlertsController, HealthController, AuthController, EmployeesController, DevicesController, AttendanceController, CorrectionsController, ActivityController, MonitoringSettingsController, ScreenshotsController, ScreenshotSettingsController, TimelapseController, LeaveController, HolidaysController, TeamsController, ProjectsController, TaskTimeController, ReportsController, WebsitesController, RolesController, AuditController, ScheduleSettingsController, DailyAttendanceController, EmployeeTrackingController, GoogleDriveOAuthController, OneDriveController, DesktopUpdatesController, NotificationsController, AnomaliesController, EmployeeAnalyticsController],
   providers: [
     AlertsService,
     AuthService,
@@ -146,6 +148,7 @@ import { NotificationRulesService } from "./notifications/notification-rules.ser
     GoogleDriveOAuthService,
     OneDriveService,
     DesktopUpdatesService,
+    EmployeeAnalyticsService,
     { provide: ONEDRIVE_AUTH, useExisting: OneDriveService },
     { provide: APP_GUARD, useClass: AuthGuard },
   ],

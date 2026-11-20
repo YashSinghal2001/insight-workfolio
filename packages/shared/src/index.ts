@@ -21,3 +21,4 @@ export * from "./desktop-updates.js";
 export * from "./notifications.js";
 export * from "./attendance-reports.js";
 export * from "./attendance-anomalies.js";
+export * from "./employee-analytics.js";
