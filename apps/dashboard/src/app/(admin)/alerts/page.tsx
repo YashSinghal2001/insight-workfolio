@@ -43,7 +43,7 @@ export default function AlertsPage() {
     <div className="mx-auto flex max-w-5xl flex-col gap-6">
       <PageHeader
         title="Alerts"
-        description={
+        about={
           <>
             Rules checked every minute against attendance and activity. At most one alert per rule, employee and day. Nobody is alerted on a{" "}
             <Link href="/holidays" className="underline">holiday</Link> or a day with approved leave. Attendance rules need an enabled{" "}

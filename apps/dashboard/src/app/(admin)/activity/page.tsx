@@ -116,7 +116,7 @@ function Activity() {
     <div className="mx-auto flex max-w-6xl flex-col gap-6">
       <PageHeader
         title="Activity"
-        description={
+        about={
           <>
             Recorded by the desktop app only while the employee is clocked in and not on a break: the foreground application&apos;s
             name and idle time (no input for the configured threshold, or screen locked). No window titles or keystrokes. Website

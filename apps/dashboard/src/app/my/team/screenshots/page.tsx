@@ -110,7 +110,7 @@ function TeamScreenshots() {
     <>
       <PageHeader
         title="Team screenshots"
-        description={`Screenshots of your team members' main screens, taken only while clocked in. They may contain personal information; every thumbnail and view is logged with your account. The range is in your time zone (${TZ}).`}
+        about={`Screenshots of your team members' main screens, taken only while clocked in. They may contain personal information; every thumbnail and view is logged with your account. The range is in your time zone (${TZ}).`}
       />
       <div className="flex flex-wrap items-end gap-3">
         <EmployeePicker value={employeeId} onChange={(id) => (setGallery(null), setPage(1), setEmployeeId(id))} label="Member" allLabel="All members" />

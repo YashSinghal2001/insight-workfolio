@@ -48,7 +48,7 @@ export default function ApplicationLabelsPage() {
       <PageHeader
         title="Application labels"
         breadcrumbs={[{ label: "Settings", href: "/settings" }, { label: "Application labels" }]}
-        description={
+        about={
           <>
             Your own labels for applications, used for the productive, neutral and unproductive totals on{" "}
             <Link href="/activity" className="underline">Activity</Link>. They are applied whenever activity is read, so adding, changing or removing a

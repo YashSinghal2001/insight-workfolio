@@ -216,7 +216,7 @@ function Screenshots() {
     <div className="mx-auto flex max-w-6xl flex-col gap-6">
       <PageHeader
         title="Screenshots"
-        description={
+        about={
           <>
             Screenshots of employees&apos; main screens, taken only while clocked in, not on a break, after they acknowledged the screenshot
             notice. They may contain personal or sensitive information. Only the privacy masks set in Settings are blacked out, on the employee&apos;s computer

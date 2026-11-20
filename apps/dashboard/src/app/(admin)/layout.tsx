@@ -7,7 +7,7 @@ import { PLATFORM_ROLE_LABEL } from "@workfolio/shared";
 import { ApiStatus } from "@/components/api-status";
 import { AppShell } from "@/components/app-shell";
 import { useAuth } from "@/components/auth-provider";
-import { Sidebar } from "@/components/sidebar";
+import { ADMIN_NAV, Sidebar } from "@/components/sidebar";
 import { buttonClass, secondaryButtonClass } from "@/components/ui";
 
 /** Client-side gate for UX only; every request is authorized again by the API. */
@@ -58,11 +58,12 @@ export default function AdminLayout({ children }: LayoutProps<"/">) {
     <AppShell
       navId="admin-nav"
       context="Admin"
+      sections={ADMIN_NAV}
       nav={(p) => <Sidebar {...p} />}
       actions={
         <>
           <ApiStatus />
-          <span className="hidden text-muted lg:inline">{user.email}</span>
+          <span className="hidden text-muted xl:inline">{user.email}</span>
           <span className="rounded bg-brand/10 px-2 py-0.5 text-xs font-medium text-brand" data-testid="platform-role">{PLATFORM_ROLE_LABEL[user.platformRole]}</span>
           {auth.me.employee && <Link href="/my" className="text-brand hover:underline">My workspace</Link>}
           <button type="button" onClick={() => logout()} className={`${secondaryButtonClass} px-3 py-1`}>

@@ -106,7 +106,7 @@ export default function TeamLeavePage() {
     <>
       <PageHeader
         title="Team leave"
-        description="Leave requests of your team members. Approving or rejecting records your decision only; approval is refused when it would exceed the member's balance. You cannot decide your own requests."
+        about="Leave requests of your team members. Approving or rejecting records your decision only; approval is refused when it would exceed the member's balance. You cannot decide your own requests."
       />
       <Tabs label="Status" tabs={FILTERS} value={filter} idPrefix="team-leave" onChange={setFilter}>
         <div className="flex flex-col gap-4">

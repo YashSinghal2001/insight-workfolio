@@ -118,7 +118,7 @@ export default function AuditPage() {
     <div className="mx-auto flex max-w-6xl flex-col gap-6">
       <PageHeader
         title="Audit log"
-        description={
+        about={
           <>
             A read-only view of recorded events: account and session changes, role changes, website rules, projects, screenshot and timelapse access, screenshot deletions,
             and settings versions (including work schedule and application label changes).

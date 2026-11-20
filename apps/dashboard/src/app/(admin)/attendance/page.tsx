@@ -73,7 +73,7 @@ function Attendance() {
     <div className="mx-auto flex max-w-6xl flex-col gap-6">
       <PageHeader
         title="Attendance"
-        description="Live status from employees' desktop apps, and a daily view against the work schedule. Times are shown in each employee's time zone. Read-only: attendance cannot be edited here."
+        about="Live status from employees' desktop apps, and a daily view against the work schedule. Times are shown in each employee's time zone. Read-only: attendance cannot be edited here."
       />
       <Tabs label="Attendance views" tabs={VIEWS} value={view} idPrefix="att" onChange={(v) => router.replace(v === "daily" ? `${pathname}?view=daily` : pathname)}>
         {view === "live" ? <Live /> : <Daily />}

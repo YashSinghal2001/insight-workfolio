@@ -244,7 +244,7 @@ export default function WebsitesPage() {
     <div className="mx-auto flex max-w-5xl flex-col gap-6">
       <PageHeader
         title="Website usage"
-        description="Domain names and time only, recorded by a browser extension each employee connects themselves, while they are clocked in and not on a break. No page addresses, searches, titles, content, history or private windows. Recorded time is not a measure of productivity, and nothing here ranks or scores employees."
+        about="Domain names and time only, recorded by a browser extension each employee connects themselves, while they are clocked in and not on a break. No page addresses, searches, titles, content, history or private windows. Recorded time is not a measure of productivity, and nothing here ranks or scores employees."
       />
       {failed(policyS) && <ErrorState title="Could not load the website policy" message={failed(policyS)!} onRetry={loadFixed} />}
       {!policyS && <SkeletonRows label="website policy" />}

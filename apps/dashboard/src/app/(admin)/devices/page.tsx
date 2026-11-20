@@ -45,7 +45,7 @@ export default function DevicesPage() {
     <div className="flex flex-col gap-6">
       <PageHeader
         title="Devices"
-        description="Employees may register several Windows and macOS devices; each account is signed in on at most one at a time. Revoking a device affects only that device."
+        about="Employees may register several Windows and macOS devices; each account is signed in on at most one at a time. Revoking a device affects only that device."
       />
       <SuccessNotice message={ok} onDismiss={() => setOk(null)} />
       {error ? (

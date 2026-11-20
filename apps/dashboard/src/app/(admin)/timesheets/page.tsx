@@ -62,7 +62,7 @@ export default function TimesheetsPage() {
     <div className="mx-auto flex max-w-6xl flex-col gap-6">
       <PageHeader
         title="Timesheets"
-        description="Completed shifts only, by the local date each shift started in the employee's time zone. Overtime is reported, not applied to payroll. Open shifts are not counted until they are clocked out or corrected."
+        about="Completed shifts only, by the local date each shift started in the employee's time zone. Overtime is reported, not applied to payroll. Open shifts are not counted until they are clocked out or corrected."
       />
 
       <FilterBar label="Filter employees" onSubmit={onSearch}>

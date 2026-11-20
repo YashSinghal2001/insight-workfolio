@@ -72,7 +72,7 @@ export default function NotificationsPage() {
     <div className="mx-auto flex max-w-6xl flex-col gap-6">
       <PageHeader
         title="Notifications"
-        description="Emails the system sends from the IT mailbox. Recipients are chosen by the server from the event and each account's role; they cannot be set here. Times are in your time zone."
+        about="Emails the system sends from the IT mailbox. Recipients are chosen by the server from the event and each account's role; they cannot be set here. Times are in your time zone."
         actions={<Button variant="secondary" onClick={() => setReload((n) => n + 1)}>Refresh</Button>}
       />
 

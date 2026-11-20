@@ -34,8 +34,9 @@ export const TEAM_NAV = [
   { label: "Team leave", href: "/my/team/leave" },
 ] as const;
 const WITH_TEAM = [...SECTIONS.slice(0, -1), { title: "My team", items: TEAM_NAV }, SECTIONS.at(-1)!];
+export const MY_SECTIONS = (teamHead: boolean) => (teamHead ? WITH_TEAM : SECTIONS);
 
 /** The employee nav (`nav#my-nav[aria-label="My workspace"]`, exactly the 10 MY_NAV links, plus TEAM_NAV for team heads). */
 export function MyNav({ teamHead = false, ...props }: NavProps & { teamHead?: boolean } = {}) {
-  return <ShellNav id="my-nav" label="My workspace" title="My workspace" sections={teamHead ? WITH_TEAM : SECTIONS} root="/my" {...props} />;
+  return <ShellNav id="my-nav" label="My workspace" title="My workspace" sections={MY_SECTIONS(teamHead)} root="/my" {...props} />;
 }
