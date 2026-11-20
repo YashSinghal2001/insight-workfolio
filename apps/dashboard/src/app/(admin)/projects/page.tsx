@@ -284,7 +284,7 @@ export default function ProjectsPage() {
     <div className="mx-auto flex max-w-5xl flex-col gap-6">
       <PageHeader
         title="Projects"
-        description="Create projects and tasks, and assign employees. Assigned employees start and stop task timers in the desktop app while clocked in. Timers never change attendance, and archived projects or closed tasks accept no new timers. Nothing is deleted: every change is kept in the project's history."
+        about="Create projects and tasks, and assign employees. Assigned employees start and stop task timers in the desktop app while clocked in. Timers never change attendance, and archived projects or closed tasks accept no new timers. Nothing is deleted: every change is kept in the project's history."
       />
 
       <Card title="New project">

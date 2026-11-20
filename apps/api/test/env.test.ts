@@ -51,6 +51,19 @@ test("email reports: the mock provider is refused in production; the default sen
   assert.throws(() => validateEnv({ ...production, REPORT_MAIL_PROVIDER: "smtp" }));
 });
 
+test("email reports, graph-delegated: needs the OneDrive settings and MAIL_SENDER = the OneDrive account", () => {
+  refused({ REPORT_MAIL_PROVIDER: "graph-delegated" }, "REPORT_MAIL_PROVIDER");
+  const onedrive = {
+    ONEDRIVE_TENANT_ID: "tenant", ONEDRIVE_CLIENT_ID: "client", ONEDRIVE_CLIENT_SECRET: SECRET,
+    ONEDRIVE_REDIRECT_URI: "https://api.example.com/api/v1/storage/onedrive/oauth/callback",
+    ONEDRIVE_TOKEN_FILE: "/var/lib/workfolio/secrets/onedrive.json", ONEDRIVE_TOKEN_KEY: Buffer.alloc(32, 7).toString("base64"),
+    ONEDRIVE_ACCOUNT_EMAIL: "it@example.com", REPORT_MAIL_PROVIDER: "graph-delegated",
+  };
+  refused({ ...onedrive, MAIL_SENDER: "other@example.com" }, "REPORT_MAIL_PROVIDER");
+  const env = validateEnv({ ...production, ...onedrive, MAIL_SENDER: "it@example.com" });
+  assert.deepEqual([env.REPORT_MAIL_PROVIDER, env.INVITATION_MAIL_PROVIDER], ["graph-delegated", "none"], "independent of invitations");
+});
+
 test("invitation emails: off by default, mock refused in production, graph needs all four settings", () => {
   assert.equal(validateEnv(production).INVITATION_MAIL_PROVIDER, "none");
   refused({ INVITATION_MAIL_PROVIDER: "mock" }, "INVITATION_MAIL_PROVIDER");

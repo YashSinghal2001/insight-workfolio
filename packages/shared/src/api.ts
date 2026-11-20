@@ -24,6 +24,10 @@ export interface HealthResponse {
   status: "ok";
   uptimeSeconds: number;
   timestamp: string;
+  /** The API package version (apps/api/package.json). */
+  version: string;
+  /** The deployed git commit (WORKFOLIO_BUILD_COMMIT, written by deploy.sh), or null when unknown. */
+  commit: string | null;
 }
 
 export type DependencyStatus = "up" | "down";
@@ -96,6 +100,14 @@ export interface Employee {
   updatedAt: string;
   /** The latest emailed invitation; null when none was ever emailed (no provider, or created before invitations). */
   invitation: Invitation | null;
+  /** Identity (Super Admin, Admin, Employee). */
+  platformRole: PlatformRole;
+  /** Active teams the employee belongs to, by name. */
+  teams: { id: string; name: string }[];
+  /** Platforms of the employee's non-revoked devices. */
+  platforms: string[];
+  /** Desktop version last reported by a non-revoked device; null when none reported. */
+  appVersion: string | null;
 }
 
 /**

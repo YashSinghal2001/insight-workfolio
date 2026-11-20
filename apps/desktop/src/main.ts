@@ -14,6 +14,7 @@ import {
   type DeviceStatusResponse,
   type MeResponse,
   type SyncResponse,
+  type UpdateManifest,
 } from "@workfolio/shared";
 import { initActivity } from "./activity-ui.ts";
 import { initScreenshots } from "./screenshot-ui.ts";
@@ -23,13 +24,14 @@ import { initLeave } from "./leave.ts";
 import { initTasks } from "./tasks.ts";
 import { initWebsites } from "./websites.ts";
 import { ApiClient, HttpError, profileOf, restoreSession, type CachedProfile, type TokenStore } from "./session.ts";
-import { project, SyncEngine, type QueuedEvent } from "./sync.ts";
+import { project, staleClockInSince, SyncEngine, type QueuedEvent } from "./sync.ts";
 import { resolveApiUrl, type ApiUrlMode } from "./api-url.ts";
 import { trayBridge, trayUpdate, type TrayState } from "./tray-bridge.ts";
 import { edgeNotifier } from "./notify.ts";
-import { applyStaticWording, platformOf, setPlatform, words } from "./platform.ts";
+import { applyStaticWording, platformOf, setPlatform, setText, words } from "./platform.ts";
 import { initPrefs } from "./prefs-ui.ts";
 import { initUpdates } from "./updates-ui.ts";
+import { manifestPath } from "./update-policy.ts";
 import { lockBreakStep, type LockBreakMarker, type LockInput } from "./lock-break.ts";
 
 /** Set by vite.config.ts: "development" for `tauri dev` and debug bundles, "production" for release. */
@@ -459,7 +461,7 @@ function render() {
           ? "Connect to the internet to register this device."
           : null;
   $("#device-blocked").hidden = !blocked;
-  $("#device-blocked-text").textContent = blocked ?? "";
+  setText($("#device-blocked-text"), blocked ?? "");
   $("#attendance").hidden = status !== "ACTIVE";
   $("#sync").hidden = status !== "ACTIVE";
 
@@ -499,6 +501,11 @@ function renderAttendance() {
         : null;
   $("#att-preview").hidden = !hint;
   $("#att-preview").textContent = hint ?? "";
+
+  // Flag only (owner decision): nothing is clocked out or corrected automatically.
+  const staleSince = p && app.profile ? staleClockInSince(p, app.profile.timezone) : null;
+  $("#att-stale").hidden = !staleSince;
+  if (staleSince) setText($("#att-stale"), `You are still clocked in since ${formatTime(staleSince)}. Clock out, then request a correction of the real end time.`);
 
   for (const button of document.querySelectorAll<HTMLButtonElement>("[data-action]")) {
     const type = button.dataset.action as AttendanceEventType;
@@ -691,10 +698,10 @@ async function checkApi() {
 
 async function showAppInfo() {
   if (IN_TAURI) {
-    const info = await invoke<{ version: string; trackingEnabled: boolean; platform: string; updatesEnabled: boolean }>("app_info");
+    const info = await invoke<{ version: string; trackingEnabled: boolean; platform: string; arch: string; updatesEnabled: boolean }>("app_info");
     $("#version").textContent = `v${info.version}`;
     $("#update-installed").textContent = info.version;
-    startUpdates(info.version, info.updatesEnabled);
+    startUpdates(info.version, info.updatesEnabled, info.platform, info.arch);
     if (info.platform === "macos" || info.platform === "windows") app.platform = info.platform;
     // Wording follows the shell only; the browser keeps the macOS texts (headless suites assert them).
     setPlatform(platformOf(info.platform));
@@ -708,15 +715,17 @@ async function showAppInfo() {
 // ---- App updates ----------------------------------------------------------------
 
 let updates: ReturnType<typeof initUpdates> | null = null;
-function startUpdates(version: string, enabled: boolean) {
+function startUpdates(version: string, enabled: boolean, os: string, arch: string) {
+  const canReport = () => app.online && app.device?.status === "ACTIVE";
   updates = initUpdates({
     enabled,
     currentVersion: () => version,
     installationId,
     report: async (status) => {
-      if (!app.online || app.device?.status !== "ACTIVE") return;
+      if (!canReport()) return;
       await client.request("POST", "/desktop-updates/status", status, deviceHeaders());
     },
+    manifest: async () => (canReport() ? client.request<UpdateManifest | undefined>("GET", manifestPath(os, arch, version), undefined, deviceHeaders()) : undefined),
     working: () => {
       const s = project(app.current, app.queued)?.state;
       return s === "CLOCKED_IN" || s === "ON_BREAK";
@@ -730,6 +739,7 @@ function startUpdates(version: string, enabled: boolean) {
     onChange: () => app.profile && renderAttendance(),
   });
   updates.start();
+  if (app.profile) updates.reportNow(); // signed in before app_info answered: enter() found no updates yet
 }
 
 window.addEventListener("online", () => void checkApi());

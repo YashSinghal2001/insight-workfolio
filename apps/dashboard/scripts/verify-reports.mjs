@@ -1,4 +1,4 @@
-// F12 runtime check: the admin Reports page in the dashboard production build (:3102), headless
+// F12 runtime check: the admin Scheduled reports page (/reports/scheduled) in the dashboard production build (:3102), headless
 // Chrome, against a throwaway API (temporary file DB) on :4000 with the MOCK mail provider: messages
 // stay in that API process's memory and nothing is emailed. Synthetic people only.
 // Run after `pnpm build`. Needs Google Chrome (macOS path) and free ports 4000 and 3102.
@@ -110,30 +110,45 @@ await cdp("Network.enable");
 const dash = spawn("pnpm", ["exec", "next", "start", "--port", "3102"], { cwd: `${ROOT}/apps/dashboard`, stdio: "ignore" });
 for (let i = 0; i < 150 && !(await fetch(`${APP}/login`).then((r) => r.ok, () => false)); i++) await new Promise((r) => setTimeout(r, 200));
 
-const card = (text) => `[...document.querySelectorAll('article')].find((a) => a.getAttribute('aria-label') === ${JSON.stringify(text)})`;
-const button = (scope, label) => `[...${scope}.querySelectorAll('button')].find((b) => b.textContent.trim() === ${JSON.stringify(label)})`;
+// /reports/scheduled: a table row per report (tr[data-schedule]) and one editor section (new or "Edit <name>").
+const row = (name) => `document.querySelector(${JSON.stringify(`tr[data-schedule="${name}"]`)})`;
+const editor = (label) => `document.querySelector(${JSON.stringify(`section[aria-label="${label}"]`)})`;
+const button = (scope, label) => `[...${scope}.querySelectorAll('button')].find((b) => b.textContent.trim() === ${JSON.stringify(label)} || b.getAttribute('aria-label') === ${JSON.stringify(label)})`;
 const setReact = (sel, value) => `(() => { const el = ${sel}; const proto = el instanceof HTMLSelectElement ? HTMLSelectElement.prototype : HTMLInputElement.prototype; Object.getOwnPropertyDescriptor(proto, "value").set.call(el, ${JSON.stringify(value)}); el.dispatchEvent(new Event(el instanceof HTMLSelectElement ? "change" : "input", { bubbles: true })); })()`;
-const newForm = `[...document.querySelectorAll('form')].find((f) => f.innerText.includes('Create report'))`;
-async function createReport(name, frequency, employeeLabel = "") {
-  await js(setReact(`${newForm}.querySelector('input')`, name));
-  await js(setReact(`${newForm}.querySelectorAll('select')[0]`, frequency));
-  await js(setReact(`${newForm}.querySelectorAll('input')[1]`, "UTC"));
-  if (employeeLabel) await js(setReact(`${newForm}.querySelectorAll('select')[1]`, await js(`[...${newForm}.querySelectorAll('select')[1].options].find((o) => o.textContent.startsWith(${JSON.stringify(employeeLabel)})).value`)));
-  await js(`${newForm}.requestSubmit()`);
-  await waitFor(`!!${card(name)}`, `report ${name}`);
+const field = (scope, label) => `document.getElementById([...${scope}.querySelectorAll('label')].find((l) => l.textContent.replace('*', '').trim() === ${JSON.stringify(label)}).htmlFor)`;
+async function createReport(name, frequency, employeeLabel = "", kind = "WORKED_HOURS") {
+  await js(`${button("document", "New report")}.click()`);
+  const form = editor("New scheduled report");
+  await waitFor(`!!${form}`, "new report form");
+  await js(setReact(field(form, "Report type"), kind));
+  await js(setReact(field(form, "Title"), name));
+  await js(setReact(field(form, "Frequency"), frequency));
+  await js(setReact(field(form, "Time zone"), "UTC"));
+  if (employeeLabel) {
+    await js(setReact(field(form, "Report of"), "EMPLOYEE"));
+    await waitFor(`[...${form}.querySelectorAll('select option')].some((o) => o.textContent.startsWith(${JSON.stringify(employeeLabel)}))`, "employee option");
+    const sel = `[...${form}.querySelectorAll('select')].find((s) => [...s.options].some((o) => o.textContent.startsWith(${JSON.stringify(employeeLabel)})))`;
+    await js(setReact(sel, await js(`[...${sel}.options].find((o) => o.textContent.startsWith(${JSON.stringify(employeeLabel)})).value`)));
+  }
+  await js(`${form}.querySelector('form').requestSubmit()`);
+  await waitFor(`!!${editor(`Edit ${name}`)} && !!${row(name)}`, `report ${name}`);
 }
 async function addRecipient(name, email) {
-  await waitFor(`[...${card(name)}.querySelectorAll('select option')].some((o) => o.textContent.startsWith(${JSON.stringify(email)}))`, `eligible ${email}`);
-  const value = await js(`[...${card(name)}.querySelectorAll('select option')].find((o) => o.textContent.startsWith(${JSON.stringify(email)})).value`);
-  await js(setReact(`${card(name)}.querySelector('select')`, value));
-  await js(`${card(name)}.querySelector('select').form.requestSubmit()`);
-  await waitFor(`${card(name)}.querySelector('section[aria-label=Recipients] ul').innerText.includes(${JSON.stringify(email)})`, `recipient ${email}`);
+  const form = editor(`Edit ${name}`);
+  if (!(await js(`!!${form}`))) await js(`${button(row(name), `Edit ${name}`)}.click()`);
+  const box = `[...${form}.querySelectorAll('fieldset[aria-label=Recipients] label')].find((l) => l.textContent.startsWith(${JSON.stringify(email)}))?.querySelector('input')`;
+  await waitFor(`!!${box}`, `eligible ${email}`);
+  await js(`${box}.click()`);
+  await waitFor(`${row(name)}.innerText.includes(${JSON.stringify(email)})`, `recipient ${email}`);
 }
 async function runNow(name) {
-  await js(`${button(card(name), "Run now")}.click()`);
-  await waitFor(`!!${card(name)}.querySelector('[role=status], [role=alert]')`, "run result");
-  await waitFor(`!!${card(name)}.querySelector('[data-run-status]')`, "run listed");
-  return js(`${card(name)}.querySelector('[role=status], [role=alert]').textContent`);
+  // Mark (never remove: React owns it) the previous message; the page unmounts it and renders a fresh one.
+  const msg = "[data-report-message]";
+  await js(`document.querySelector('${msg}')?.setAttribute('data-old', '')`);
+  await js(`${button(row(name), `Run ${name} now`)}.click()`);
+  await waitFor(`!!document.querySelector('${msg}:not([data-old])')`, "run result");
+  await waitFor(`!!${row(name)}.querySelector('[data-run-status]')`, "run listed");
+  return js(`document.querySelector('${msg}:not([data-old])').textContent`);
 }
 
 try {
@@ -146,45 +161,48 @@ try {
     document.querySelector('form').requestSubmit();
   })()`);
   await waitFor(`location.pathname !== "/login"`, "sign-in");
-  const nav = `[...document.querySelectorAll('nav a')].find((a) => a.textContent === 'Reports')`;
-  await waitFor(`!!${nav}`, "Reports link");
-  await js(`${nav}.click()`);
-  await waitFor(`location.pathname === '/reports' && document.body.innerText.includes('No reports yet.')`, "empty reports page");
+  const link = (text) => `[...document.querySelectorAll('nav a')].find((a) => a.textContent === ${JSON.stringify(text)})`;
+  await waitFor(`!!${link("Reports")}`, "Reports link");
+  await js(`${link("Reports")}.click()`);
+  await waitFor(`location.pathname === '/reports' && !!document.querySelector('nav[aria-label=Reports]')`, "reports sub-menu");
+  await js(`document.querySelector('nav[aria-label=Reports]').querySelector('a[href="/reports/scheduled"]').click()`);
+  await waitFor(`location.pathname === '/reports/scheduled' && document.body.innerText.includes('No scheduled reports yet.')`, "empty scheduled reports page");
   const page = await js(`document.body.innerText`);
   check("dashboard: mock provider clearly labelled (nothing is emailed); empty state", /Mock provider \(development only\).*Nothing is emailed/s.test(page) && /The scheduler is off/.test(page));
 
   await createReport("Daily attendance", "DAILY");
-  check("dashboard: report created with no recipients explained", (await js(`${card("Daily attendance")}.innerText`)).includes("No recipients: runs are recorded but nobody receives them."));
-  await waitFor(`${card("Daily attendance")}.querySelectorAll('select option').length >= 3`, "eligible list");
-  const options = await js(`[...${card("Daily attendance")}.querySelectorAll('select option')].map((o) => o.textContent)`);
+  check("dashboard: report created with no recipients", (await js(`${row("Daily attendance")}.innerText`)).includes("none"));
+  const recipients = `${editor("Edit Daily attendance")}.querySelectorAll('fieldset[aria-label=Recipients] label')`;
+  await waitFor(`${recipients}.length >= 2`, "eligible list");
+  const options = await js(`[...${recipients}].map((o) => o.textContent)`);
   check("dashboard: an all-employee report offers administrators only (not the employee)", options.some((o) => o.startsWith("admin2@example.com")) && !options.some((o) => o.includes("report1@example.com")), JSON.stringify(options));
   await addRecipient("Daily attendance", "admin2@example.com");
 
-  await js(`${button(card("Daily attendance"), "Preview")}.click()`);
-  await waitFor(`!!${card("Daily attendance")}.querySelector('pre')`, "preview");
-  const preview = await js(`${card("Daily attendance")}.querySelector('pre').textContent`);
+  await js(`${button(row("Daily attendance"), "Preview Daily attendance")}.click()`);
+  await waitFor(`!!${editor("Preview Daily attendance")}?.querySelector('pre')`, "preview");
+  const preview = await js(`${editor("Preview Daily attendance")}.querySelector('pre').textContent`);
   check("dashboard: preview shows yesterday's attendance (4h 00m) and freshness warnings, without sending", preview.includes(`for ${yesterday}`) && /Ana Employee \(RE-1\): 1 shift\(s\), worked 4h 00m/.test(preview) && preview.includes("WARNINGS") && mock.outbox.length === 0, preview.split("\n").slice(0, 6).join(" | "));
   check("dashboard: no leave reason, screenshots, activity or e-mail addresses in the report", !preview.includes("PRIVATE-LEAVE-REASON") && !preview.includes("@example.com") && /contains no screenshots, application activity, leave details or website data/.test(preview));
 
   const first = await runNow("Daily attendance");
-  const runText = await js(`${card("Daily attendance")}.querySelector('section[aria-label=Runs]').innerText`);
-  check("dashboard: run now → 'not emailed' (mock only), never 'sent'; one message in the mock outbox", /Ran for .*not emailed/.test(first) && runText.includes("admin2@example.com: Mock only: not emailed") && !/\bSent\b|Delivered/.test(runText) && mock.outbox.length === 1 && mock.outbox[0].to === "admin2@example.com", `${first} | ${runText.replace(/\s+/g, " ")}`);
+  const runText = await js(`${row("Daily attendance")}.innerText`);
+  check("dashboard: run now → 'not emailed' (mock only), never 'sent'; one message in the mock outbox", /ran for .*not emailed/.test(first) && runText.includes("Not emailed") && runText.includes("mock only") && !/\bSent\b|Delivered/.test(runText) && mock.outbox.length === 1 && mock.outbox[0].to === "admin2@example.com", `${first} | ${runText.replace(/\s+/g, " ")}`);
   const again = await runNow("Daily attendance");
-  check("dashboard: running again for the same period sends nothing new", /Already run for/.test(again) && mock.outbox.length === 1 && (await js(`${card("Daily attendance")}.querySelectorAll('[data-run-status]').length`)) === 1, again);
+  check("dashboard: running again for the same period sends nothing new", /already run for/.test(again) && mock.outbox.length === 1 && (await js(`${row("Daily attendance")}.querySelectorAll('[data-run-status]').length`)) === 1, again);
 
   await createReport("Ana weekly", "WEEKLY", "Ana Employee");
   await addRecipient("Ana weekly", "report1@example.com");
-  check("dashboard: a one-employee report may go to that employee", (await js(`${card("Ana weekly")}.innerText`)).includes("report1@example.com employee"));
+  check("dashboard: a one-employee report may go to that employee", (await js(`${row("Ana weekly")}.innerText`)).includes("report1@example.com"));
 
   mock.failNext("permanent");
   await createReport("Monthly", "MONTHLY");
   await addRecipient("Monthly", "admin@example.com");
   await runNow("Monthly");
-  const failed = await js(`${card("Monthly")}.querySelector('section[aria-label=Runs]').innerText`);
-  check("dashboard: a provider failure is shown as Failed with the reason", /Failed/.test(failed) && failed.includes("Mock provider rejected the recipient") && failed.includes("1 attempt(s)"), failed.replace(/\s+/g, " "));
+  const failed = await js(`${row("Monthly")}.innerText`);
+  check("dashboard: a provider failure is shown as Failed", /Failed/.test(failed) && failed.includes("failed"), failed.replace(/\s+/g, " "));
 
-  await js(`${button(card("Monthly"), "Pause")}.click()`);
-  await waitFor(`${card("Monthly")}.innerText.includes('Paused') && !!${button(card("Monthly"), "Activate")}`, "paused");
+  await js(`${button(row("Monthly"), "Pause Monthly")}.click()`);
+  await waitFor(`${row("Monthly")}.innerText.includes('Paused') && !!${button(row("Monthly"), "Activate Monthly")}`, "paused");
   check("dashboard: report paused", true);
   await shot("reports-dashboard.png");
 

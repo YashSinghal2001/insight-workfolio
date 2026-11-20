@@ -7,19 +7,25 @@ import {
   attendanceTotals,
   DAILY_ATTENDANCE_STATUSES,
   formatDuration,
-  localDate,
   type AttendanceOverviewRow,
   type AttendanceSession,
   type DailyAttendanceResponse,
   type DailyAttendanceStatus,
   type LeavePortion,
   type LiveStatus,
+  type OverviewFreshness,
   type Paginated,
   type ScreenshotFeatureState,
 } from "@workfolio/shared";
+import { GlobalFilters, useGlobalFilters } from "@/components/global-filters";
 import { DataTable, EmptyState, ErrorState, FilterBar, PageHeader, Pagination, SkeletonRows, StatusBadge, Tabs, type Tone } from "@/components/kit";
 import { formatInZone, inputClass, secondaryButtonClass } from "@/components/ui";
 import { api, errorMessage } from "@/lib/api";
+import { ATTENDANCE_TABS, eventSourceLabel, lastSeenLabel, parseAttendanceTab, type AttendanceTab } from "@/lib/attendance-ui";
+import { pollWhileVisible } from "@/lib/poll";
+import { LateTab } from "./_components/late";
+import { MissingTab } from "./_components/missing";
+import { MonthlyTab } from "./_components/monthly";
 
 const PAGE_SIZE = 20;
 const REFRESH_MS = 30_000;
@@ -49,11 +55,7 @@ const SHOTS: Record<ScreenshotFeatureState, { label: string; tone: Tone }> = {
 const totals = (s: AttendanceSession, now: number) =>
   attendanceTotals({ start: s.clockInAt, end: s.clockOutAt }, s.breaks.map((b) => ({ start: b.startedAt, end: b.endedAt })), now);
 
-const VIEWS = [
-  { id: "live", label: "Live" },
-  { id: "daily", label: "Daily" },
-] as const;
-type View = (typeof VIEWS)[number]["id"];
+type LiveRow = AttendanceOverviewRow & OverviewFreshness;
 
 export default function AttendancePage() {
   // useSearchParams suspends for request-time params under cacheComponents.
@@ -68,42 +70,54 @@ function Attendance() {
   const params = useSearchParams();
   const router = useRouter();
   const pathname = usePathname();
-  const view: View = params.get("view") === "daily" ? "daily" : "live";
+  const { date, teamId } = useGlobalFilters();
+  const tab = parseAttendanceTab(new URLSearchParams(params.toString()));
+  const select = (t: AttendanceTab) => {
+    const next = new URLSearchParams(params.toString());
+    next.delete("view");
+    if (t === "live") next.delete("tab");
+    else next.set("tab", t);
+    const qs = next.toString();
+    router.replace(qs ? `${pathname}?${qs}` : pathname, { scroll: false });
+  };
+  const team = teamId ?? "all";
   return (
     <div className="mx-auto flex max-w-6xl flex-col gap-6">
       <PageHeader
         title="Attendance"
-        description="Live status from employees' desktop apps, and a daily view against the work schedule. Times are shown in each employee's time zone. Read-only: attendance cannot be edited here."
+        about="Live status from employees' desktop apps, daily and monthly views against the work schedule, late arrivals and shifts that look forgotten. Times are shown in each employee's time zone. Attendance is never edited here: fixes go through correction requests that a different administrator approves."
       />
-      <Tabs label="Attendance views" tabs={VIEWS} value={view} idPrefix="att" onChange={(v) => router.replace(v === "daily" ? `${pathname}?view=daily` : pathname)}>
-        {view === "live" ? <Live /> : <Daily />}
+      {/* Live is "now" and the other tabs have their own period, so only Daily uses the global date. */}
+      <GlobalFilters date={tab === "daily"} />
+      <Tabs label="Attendance views" tabs={ATTENDANCE_TABS} value={tab} idPrefix="att" onChange={select}>
+        {tab === "live" && <Live key={team} teamId={teamId} />}
+        {tab === "daily" && <Daily key={`${team}-${date}`} teamId={teamId} date={date} />}
+        {tab === "monthly" && <MonthlyTab key={team} teamId={teamId} />}
+        {tab === "late" && <LateTab key={team} teamId={teamId} />}
+        {tab === "missing" && <MissingTab key={team} teamId={teamId} />}
       </Tabs>
     </div>
   );
 }
 
-function Live() {
+function Live({ teamId }: { teamId: string | null }) {
   const [query, setQuery] = useState({ q: "", page: 1 });
-  const [data, setData] = useState<Paginated<AttendanceOverviewRow> | null>(null);
+  const [data, setData] = useState<Paginated<LiveRow> | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [now, setNow] = useState(() => Date.now());
 
   useEffect(() => {
-    let active = true;
     const params = new URLSearchParams({ page: String(query.page), pageSize: String(PAGE_SIZE) });
     if (query.q) params.set("q", query.q);
-    const load = () =>
-      api<Paginated<AttendanceOverviewRow>>(`/attendance/overview?${params}`).then(
-        (r) => active && (setData(r), setError(null), setNow(Date.now())),
-        (e) => active && setError(errorMessage(e)),
-      );
-    load();
-    const timer = setInterval(load, REFRESH_MS);
-    return () => {
-      active = false;
-      clearInterval(timer);
-    };
-  }, [query]);
+    if (teamId) params.set("teamId", teamId);
+    // Every 30 s while the tab is visible; only the newest response is applied.
+    return pollWhileVisible(
+      () => api<Paginated<LiveRow>>(`/attendance/overview?${params}`),
+      (r) => (setData(r), setError(null), setNow(Date.now())),
+      (e) => setError(errorMessage(e)),
+      REFRESH_MS,
+    );
+  }, [query, teamId]);
 
   function onSearch(e: FormEvent<HTMLFormElement>) {
     setData(null);
@@ -123,7 +137,7 @@ function Live() {
       {!data && !error && <SkeletonRows label="attendance" />}
       {data?.items.length === 0 && <EmptyState title={query.q ? "No employees match your search." : "No employees enrolled yet."} />}
       {data && data.items.length > 0 && (
-        <DataTable label="Live attendance" head={["Employee", "Status", "Activity", "Clocked in", "Breaks", "Net working time", "Screenshots", "Last sync"]} minWidth={1080}>
+        <DataTable label="Live attendance" head={["Employee", "Status", "Activity", "Clocked in", "Breaks", "Net working time", "Screenshots", "Device"]} minWidth={1080}>
           {data.items.map((row) => <Row key={row.employeeId} row={row} now={now} />)}
         </DataTable>
       )}
@@ -142,19 +156,19 @@ const DAILY: Record<DailyAttendanceStatus, { label: string; tone: Tone }> = {
   ABSENT: { label: "Absent", tone: "danger" },
   NOT_YET_DUE: { label: "Not yet due", tone: "neutral" },
 };
-const TZ = Intl.DateTimeFormat().resolvedOptions().timeZone;
 const PORTION: Record<LeavePortion, string> = { FULL_DAY: "full day", FIRST_HALF: "first half", SECOND_HALF: "second half", SHORT: "part of the day" };
 
-function Daily() {
-  const [query, setQuery] = useState(() => ({ date: localDate(Date.now(), TZ), q: "", page: 1 }));
+function Daily({ date, teamId }: { date: string; teamId: string | null }) {
+  const [query, setQuery] = useState({ q: "", page: 1 });
   const [data, setData] = useState<DailyAttendanceResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [retry, setRetry] = useState(0);
 
   useEffect(() => {
     let active = true;
-    const params = new URLSearchParams({ date: query.date, page: String(query.page), pageSize: String(PAGE_SIZE) });
+    const params = new URLSearchParams({ date, page: String(query.page), pageSize: String(PAGE_SIZE) });
     if (query.q) params.set("q", query.q);
+    if (teamId) params.set("teamId", teamId);
     api<DailyAttendanceResponse>(`/attendance/daily?${params}`).then(
       (r) => active && (setData(r), setError(null)),
       (e) => active && (setError(errorMessage(e)), setData(null)),
@@ -162,7 +176,7 @@ function Daily() {
     return () => {
       active = false;
     };
-  }, [query, retry]);
+  }, [query, date, teamId, retry]);
 
   const pages = data ? Math.max(1, Math.ceil(data.total / data.pageSize)) : 1;
   const noPolicy = data && data.total > 0 && data.summary.NO_POLICY + data.summary.ON_LEAVE + data.summary.HOLIDAY === data.total && data.summary.NO_POLICY > 0;
@@ -170,15 +184,11 @@ function Daily() {
   return (
     <div className="flex flex-col gap-4">
       <FilterBar label="Daily attendance filters" onSubmit={(e) => (setData(null), setQuery((q) => ({ ...q, q: String(new FormData(e.currentTarget).get("q") ?? "").trim(), page: 1 })))}>
-        <label className="flex flex-col gap-1 text-sm">
-          <span className="text-xs text-muted">Date</span>
-          <input type="date" required value={query.date} onChange={(e) => e.target.value && (setData(null), setQuery((q) => ({ ...q, date: e.target.value, page: 1 })))} className={inputClass} />
-        </label>
         <input name="q" type="search" placeholder="Search name, email or employee code" aria-label="Search employees" maxLength={100} className={`${inputClass} flex-1 sm:w-auto`} />
         <button type="submit" className={secondaryButtonClass}>Search</button>
       </FilterBar>
       <p className="text-xs text-muted">
-        The date is read in each employee&apos;s own time zone. {data?.meta.policyRule} A <Link href="/holidays" className="text-brand underline">holiday</Link> is
+        Showing {date} (change it with the date filter at the top). The date is read in each employee&apos;s own time zone. {data?.meta.policyRule} A <Link href="/holidays" className="text-brand underline">holiday</Link> is
         shown as Holiday, never Absent{data && !data.meta.holidaysConfigured ? " (no holidays are configured yet)" : ""}. An employee&apos;s own start time or workdays, set on their employee page, replace the organisation&apos;s schedule for them.
       </p>
       {noPolicy && (
@@ -221,7 +231,7 @@ function Daily() {
   );
 }
 
-function Row({ row, now }: { row: AttendanceOverviewRow; now: number }) {
+function Row({ row, now }: { row: LiveRow; now: number }) {
   const s = row.session;
   const open = s && row.state !== "CLOCKED_OUT";
   const t = s && totals(s, now);
@@ -251,17 +261,15 @@ function Row({ row, now }: { row: AttendanceOverviewRow; now: number }) {
       </td>
       <td><StatusBadge tone={SHOTS[row.screenshotState].tone}>{SHOTS[row.screenshotState].label}</StatusBadge></td>
       <td>
-        {!ev ? (
-          <span className="text-muted">Never</span>
-        ) : (
-          <>
-            <div>{formatInZone(ev.receivedAt, row.timezone)}</div>
-            <div className={`text-xs ${ev.outcome === "REJECTED" ? "text-red-700 dark:text-red-300" : "text-muted"}`}>
-              {ev.outcome === "REJECTED" ? "Last event rejected" : ev.source === "OFFLINE_SYNC" ? "Uploaded from offline queue" : "Online"}
-            </div>
-          </>
+        {/* Freshness comes from the device's last contact, never from how the last event was sent. */}
+        <span title={row.lastSeenAt ? formatInZone(row.lastSeenAt, row.timezone) : undefined}>
+          <StatusBadge tone={row.online ? "success" : "neutral"}>{lastSeenLabel(row.online, row.lastSeenAt, now)}</StatusBadge>
+        </span>
+        {ev && (
+          <div className={`mt-1 text-xs ${ev.outcome === "REJECTED" ? "text-danger" : "text-muted"}`}>
+            Last event {formatInZone(ev.receivedAt, row.timezone)} · {ev.outcome === "REJECTED" ? "rejected" : eventSourceLabel(ev.source)}
+          </div>
         )}
-        {row.deviceLastSeenAt && <div className="text-xs text-muted">Device seen {formatInZone(row.deviceLastSeenAt, row.timezone)}</div>}
       </td>
     </tr>
   );

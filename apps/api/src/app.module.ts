@@ -6,6 +6,8 @@ import { ConfigModule, ConfigService } from "@nestjs/config";
 import { APP_GUARD } from "@nestjs/core";
 import { LoggerModule } from "nestjs-pino";
 import { ActivityController } from "./activity/activity.controller.js";
+import { ActivityAppsService } from "./activity/activity-apps.service.js";
+import { RiskUsersService } from "./activity/risk-users.service.js";
 import { AlertsController } from "./alerts/alerts.controller.js";
 import { AlertsService } from "./alerts/alerts.service.js";
 import { ActivityService } from "./activity/activity.service.js";
@@ -13,11 +15,20 @@ import { RetentionService } from "./activity/retention.service.js";
 import { ActivityCategoriesService } from "./activity/categories.service.js";
 import { AuditController } from "./audit/audit.controller.js";
 import { AuditService } from "./audit/audit.service.js";
+import { AnomaliesController } from "./attendance/anomalies.controller.js";
+import { AnomaliesService } from "./attendance/anomalies.service.js";
+import { OverviewController } from "./overview/overview.controller.js";
+import { OverviewService } from "./overview/overview.service.js";
+import { TeamTimelineController } from "./timeline/team-timeline.controller.js";
+import { TeamTimelineService } from "./timeline/team-timeline.service.js";
 import { AttendanceController } from "./attendance/attendance.controller.js";
 import { AttendanceService } from "./attendance/attendance.service.js";
 import { CorrectionsController } from "./attendance/corrections.controller.js";
 import { CorrectionsService } from "./attendance/corrections.service.js";
 import { TimesheetService } from "./attendance/timesheet.service.js";
+import { MonthlyService } from "./attendance/monthly.service.js";
+import { SummaryReportController } from "./attendance/summary-report.controller.js";
+import { SummaryReportService } from "./attendance/summary-report.service.js";
 import { EmployeeLocks } from "./common/employee-locks.js";
 import { policyProvider } from "./common/policy.js";
 import { AuthController } from "./auth/auth.controller.js";
@@ -25,6 +36,8 @@ import { AuthGuard } from "./auth/auth.guard.js";
 import { AuthService } from "./auth/auth.service.js";
 import { validateEnv, type Env } from "./config/env.js";
 import { DatabaseModule } from "./database/database.module.js";
+import { EmployeeAnalyticsController } from "./employees/analytics.controller.js";
+import { EmployeeAnalyticsService } from "./employees/analytics.service.js";
 import { DevicesController } from "./devices/devices.controller.js";
 import { DevicesService } from "./devices/devices.service.js";
 import { EmployeesController } from "./employees/employees.controller.js";
@@ -63,6 +76,7 @@ import { OneDriveController, OneDriveService } from "./storage/onedrive.js";
 import { EmailService } from "./notifications/email.service.js";
 import { NotificationsController } from "./notifications/notifications.controller.js";
 import { NotificationsService } from "./notifications/notifications.service.js";
+import { NotificationRulesService } from "./notifications/notification-rules.service.js";
 
 @Module({
   imports: [
@@ -102,14 +116,21 @@ import { NotificationsService } from "./notifications/notifications.service.js";
     }),
     DatabaseModule,
   ],
-  controllers: [AlertsController, HealthController, AuthController, EmployeesController, DevicesController, AttendanceController, CorrectionsController, ActivityController, MonitoringSettingsController, ScreenshotsController, ScreenshotSettingsController, TimelapseController, LeaveController, HolidaysController, TeamsController, ProjectsController, TaskTimeController, ReportsController, WebsitesController, RolesController, AuditController, ScheduleSettingsController, DailyAttendanceController, EmployeeTrackingController, GoogleDriveOAuthController, OneDriveController, DesktopUpdatesController, NotificationsController],
+  controllers: [AlertsController, HealthController, AuthController, EmployeesController, DevicesController, AttendanceController, CorrectionsController, ActivityController, MonitoringSettingsController, ScreenshotsController, ScreenshotSettingsController, TimelapseController, LeaveController, HolidaysController, TeamsController, ProjectsController, TaskTimeController, ReportsController, WebsitesController, RolesController, AuditController, ScheduleSettingsController, DailyAttendanceController, EmployeeTrackingController, GoogleDriveOAuthController, OneDriveController, DesktopUpdatesController, NotificationsController, AnomaliesController, EmployeeAnalyticsController, SummaryReportController, OverviewController, TeamTimelineController],
   providers: [
     AlertsService,
+    ActivityAppsService,
+    RiskUsersService,
     AuthService,
     EmployeesService,
     DevicesService,
     AttendanceService,
+    AnomaliesService,
+    OverviewService,
+    TeamTimelineService,
     TimesheetService,
+    MonthlyService,
+    SummaryReportService,
     CorrectionsService,
     EmployeeLocks,
     policyProvider,
@@ -132,6 +153,7 @@ import { NotificationsService } from "./notifications/notifications.service.js";
     invitationTransportProvider,
     EmailService,
     NotificationsService,
+    NotificationRulesService,
     ReportsService,
     WebsitesService,
     RolesService,
@@ -139,6 +161,7 @@ import { NotificationsService } from "./notifications/notifications.service.js";
     GoogleDriveOAuthService,
     OneDriveService,
     DesktopUpdatesService,
+    EmployeeAnalyticsService,
     { provide: ONEDRIVE_AUTH, useExisting: OneDriveService },
     { provide: APP_GUARD, useClass: AuthGuard },
   ],

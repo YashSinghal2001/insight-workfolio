@@ -17,6 +17,8 @@ User=workfolio
 Group=workfolio
 WorkingDirectory=/opt/workfolio/current/apps/api
 EnvironmentFile=/etc/workfolio/api.env
+# Per release, written by deploy.sh: WORKFOLIO_BUILD_COMMIT (shown by /api/v1/health). Optional ("-"): older releases report commit null.
+EnvironmentFile=-/opt/workfolio/current/release.env
 Environment=NODE_ENV=production
 # The API verifies the schema at boot and refuses to start while a migration is pending (db:migrate first).
 ExecStart=/usr/bin/node dist/main.js

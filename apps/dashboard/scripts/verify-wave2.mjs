@@ -334,22 +334,21 @@ try {
   // ---- W18: daily attendance shows HOLIDAY, not ABSENT ------------------------------------------------
   {
     const row = (name) => `([...document.querySelectorAll('main table tr')].find((r) => r.innerText.includes(${JSON.stringify(name)}))?.innerText ?? "")`;
-    await visit("/attendance?view=daily", `!!document.querySelector('main input[type=date]')`, "daily view");
-    await setValue("main input[type=date]", D);
+    await visit("/attendance?tab=daily", `!!document.querySelector('input[type=date][aria-label=Date]')`, "daily view");
+    await setValue("input[type=date][aria-label=Date]", D);
     await expect(`W18 ${D} (holiday): Ben and Hana show Holiday`, `${row(ben.name)}.includes("Holiday") && ${row(hana.name)}.includes("Holiday")`);
     const hol = await js(`[...document.querySelectorAll('main table tr')].map((r) => r.innerText).join("\\n")`);
     check(`W18 ${D}: nobody Absent on the holiday`, !/Absent/.test(hol), hol.replace(/\s+/g, " ").slice(0, 300));
     await shot("w18-attendance-holiday.png");
-    await setValue("main input[type=date]", D0);
+    await setValue("input[type=date][aria-label=Date]", D0);
     await expect(`W18 ${D0} (ordinary workday, no clock-in): Hana shows Absent`, `${row(hana.name)}.includes("Absent")`);
     await shot("w18-attendance-absent-contrast.png");
-    await pageProblems("/attendance?view=daily");
+    await pageProblems("/attendance?tab=daily");
   }
 
   // ---- W35/W36: leave types and balances ---------------------------------------------------------------
   {
-    await visit("/leave", `!!document.querySelector('#leave-view-btn-types')`, "leave page");
-    await js(`document.querySelector('#leave-view-btn-types').click()`);
+    await visit("/settings/leave-types", `!!document.querySelector('form[aria-label="New leave type"]')`, "leave types settings page");
     await waitFor(`!!document.querySelector('form[aria-label="New leave type"]') && !!document.querySelector('table[aria-label="Leave types"]')`, "leave types");
     await setValue('form[aria-label="New leave type"] input[maxlength="60"]', "Annual leave");
     const nums = 'form[aria-label="New leave type"] input[type=number]';
@@ -357,6 +356,8 @@ try {
     await js(`document.querySelector('form[aria-label="New leave type"]').requestSubmit()`);
     await expect("W36/W35 create a leave type (20 days, 4 h short leave per month) from the page", `${has("Saved Annual leave.")} && /Annual leave\\s+Paid\\s+20 days\\s+4 hours/.test(${text('table[aria-label="Leave types"]')})`);
     await shot("w36-leave-types.png");
+    await pageProblems("/settings/leave-types");
+    await visit("/leave", `!!document.querySelector('#leave-view-btn-balances')`, "leave page");
     await js(`document.querySelector('#leave-view-btn-balances').click()`);
     await expect("W36 balances table: Annual leave column, Ben 20 of 20 days left", `(() => { const t = document.querySelector('table[aria-label="Leave balances"]'); if (!t) return false; const r = [...t.rows].find((r) => r.innerText.includes("Ben Breaks")); return t.tHead.innerText.includes("Annual leave") && !!r && r.innerText.includes("20 of 20 days left"); })()`);
     await shot("w36-leave-balances.png");
@@ -365,8 +366,10 @@ try {
 
   // ---- AW-04 / W22: settings ------------------------------------------------------------------------------
   {
-    await visit("/settings", `${has("Local development")} && ${has("Connected")} && !!document.querySelector('textarea[name=idleExcludedApps]')`, "settings storage card + policy form");
+    await visit("/settings/storage", `${has("Local development")} && ${has("Connected")}`, "settings storage card");
     check("AW-04 storage card: Local development, Connected", true);
+    await pageProblems("/settings/storage");
+    await visit("/settings/monitoring", `!!document.querySelector('textarea[name=idleExcludedApps]')`, "monitoring policy form");
     await setValue("textarea[name=idleExcludedApps]", "us.zoom.xos\nZoom.exe");
     await setValue("textarea[name=reason]", "verify-wave2: exclude video calls from idle");
     await js(`document.querySelector('textarea[name=idleExcludedApps]').form.requestSubmit()`);
@@ -375,12 +378,12 @@ try {
     check("W22 API returns the saved idle-excluded apps", JSON.stringify(s?.effective?.idleExcludedApps) === JSON.stringify(["us.zoom.xos", "Zoom.exe"]), JSON.stringify(s?.effective?.idleExcludedApps));
     await waitFor(`document.querySelector('textarea[name=idleExcludedApps]').value === "us.zoom.xos\\nZoom.exe"`, "form shows saved list", 10_000).then(() => check("W22 form re-renders with the saved list", true), () => check("W22 form re-renders with the saved list", false));
     await shot("aw04-w22-settings.png");
-    await pageProblems("/settings");
+    await pageProblems("/settings/monitoring");
   }
 
   // ---- W17/W21: per-person tracking overrides ----------------------------------------------------------------
   {
-    await visit(`/employees/${ben.id}`, `!!document.querySelector('input[name=expectedStart]')`, "tracking overrides form");
+    await visit(`/employees/${ben.id}?tab=edit`, `!!document.querySelector('input[name=expectedStart]')`, "tracking overrides form");
     await setValue("input[name=expectedStart]", "10:30");
     await setValue("input[name=idleThresholdSeconds]", "120");
     await js(`[...document.querySelectorAll('input[name=workday]')].filter((c) => Number(c.value) <= 5 && !c.checked).forEach((c) => c.click())`);

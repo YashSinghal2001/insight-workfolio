@@ -149,19 +149,21 @@ try {
   check("failed: the hand-over setup link is shown instead", await js("!!document.querySelector('input[aria-label=\"Setup link\"]')"));
   await shot("2-created-invitation-failed.png");
   const ravi = await db.execute("SELECT p.id FROM employee_profiles p JOIN users u ON u.id = p.user_id WHERE u.email = 'ravi@example.com'");
-  await go(`/employees/${ravi.rows[0].id}`, `[...document.querySelectorAll('button')].some((b) => b.textContent === "Resend invitation")`);
+  await go(`/employees/${ravi.rows[0].id}?tab=edit`, `[...document.querySelectorAll('button')].some((b) => b.textContent === "Resend invitation")`);
+  // Other mail (e.g. Asha's "account is active" notification) may already be in the outbox: count from here.
+  const sentBefore = mock.outbox.length;
   await js(`[...document.querySelectorAll('button')].find((b) => b.textContent === "Resend invitation").click()`);
   await waitFor(`!!document.querySelector('dialog[open]')`, "confirm dialog");
   await js(`[...document.querySelectorAll('dialog[open] button')].find((b) => b.textContent === "Resend invitation").click()`);
   await waitFor(`document.body.innerText.includes("Invitation resent.") && document.querySelector('[data-testid=invitation-status]')?.dataset.status === "SENT"`, "resent");
-  check("resend from the employee page: status becomes 'Invitation sent', one more email", mock.outbox.length === 2 && mock.outbox[1].to === "ravi@example.com");
+  check("resend from the employee page: status becomes 'Invitation sent', one more email", mock.outbox.length === sentBefore + 1 && mock.outbox.at(-1).to === "ravi@example.com" && mock.outbox.at(-1).subject === "Welcome to Insight Workfolio — Activate Your Account", mock.outbox.map((m) => `${m.to}: ${m.subject}`).join(" | "));
   await shot("3-resent.png");
 
   // 4) Employees list and the accepted invitation.
   await go("/employees", `document.querySelectorAll('table tbody tr').length >= 2`);
   check("list: pending employee shows the invitation badge; the activated one does not", (await js(`(() => { const row = [...document.querySelectorAll('tbody tr')].find((r) => r.innerText.includes("ravi@example.com")); return row?.innerText.includes("Invitation sent") ?? false; })()`)) && (await js(`(() => { const row = [...document.querySelectorAll('tbody tr')].find((r) => r.innerText.includes("asha@example.com")); return !!row && !row.innerText.includes("Invitation"); })()`)));
   const ashaId = (await db.execute("SELECT p.id FROM employee_profiles p JOIN users u ON u.id = p.user_id WHERE u.email = 'asha@example.com'")).rows[0].id;
-  await go(`/employees/${ashaId}`, `!!document.querySelector('[data-testid=invitation-status]')`);
+  await go(`/employees/${ashaId}?tab=edit`, `!!document.querySelector('[data-testid=invitation-status]')`);
   check("accepted: 'Invitation accepted' and no resend button", (await js(`document.querySelector('[data-testid=invitation-status]').dataset.status`)) === "ACCEPTED" && !(await js(`[...document.querySelectorAll('button')].some((b) => b.textContent === "Resend invitation")`)));
   await shot("4-accepted.png");
 } catch (err) {

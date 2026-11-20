@@ -27,13 +27,16 @@ mode=deploy
 for arg in "$@"; do
   case "$arg" in
     --migrate) migrate=1 ;;
-    --migrate-only) mode=migrate-only ;;
+    --migrate-only) mode="migrate-only" ;;
     --rollback) mode=rollback ;;
     -*) die "unknown option $arg" ;;
     *) ref="$arg" ;;
   esac
 done
 [ "$(id -u)" != 0 ] || die "run as $WORKFOLIO_USER, not root"
+
+# One line per activation (append-only): when, what, which commit, migrated or not, who. `tail deploys.log`.
+record() { printf '%s %s %s ref=%s migrate=%s by=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" "$2" "$3" "$4" "$(id -un)" >> "$WORKFOLIO_ROOT/deploys.log"; }
 
 restart_and_check() {
   log "restarting $API_SERVICE"
@@ -66,6 +69,7 @@ case "$mode" in
     ln -sfn "$(readlink -f "$current")" "$previous"
     ln -sfn "$target" "$current"
     restart_and_check
+    record rollback "$(cat "$target/RELEASE_SHA" 2>/dev/null || echo unknown)" "${target##*/}" 0
     log "rollback complete: current -> $target"
     exit 0 ;;
   migrate-only)
@@ -96,6 +100,8 @@ mkdir -p "$release"
 log "release $release from $ref ($sha)"
 git -C "$repo" archive "$sha" | tar -x -C "$release"
 printf '%s\n' "$sha" > "$release/RELEASE_SHA"
+# Read by workfolio-api.service (EnvironmentFile=-/opt/workfolio/current/release.env): /api/v1/health shows the commit.
+printf 'WORKFOLIO_BUILD_COMMIT=%s\n' "$sha" > "$release/release.env"
 
 cd "$release"
 export NODE_ENV=production
@@ -127,6 +133,7 @@ fi
 if [ -L "$current" ]; then ln -sfn "$(readlink -f "$current")" "$previous"; fi
 ln -sfn "$release" "$current"
 restart_and_check
+record deploy "$sha" "$ref" "$migrate"
 
 # ---- prune old releases (never current / previous) ------------------------------------------
 keep=$(readlink -f "$current"); prev=$(readlink -f "$previous" 2>/dev/null || true)

@@ -11,6 +11,7 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  PayloadTooLargeException,
   UnprocessableEntityException,
   UnsupportedMediaTypeException,
   type OnModuleDestroy,
@@ -28,6 +29,7 @@ import {
   screenshotFeatureState,
   type EmployeeRef,
   type Paginated,
+  SCREENSHOT_EXPORT_LIMITS,
   SCREENSHOT_LIMITS,
   type ScreenshotDeleteResponse,
   type ScreenshotDeletionMode,
@@ -47,12 +49,12 @@ import {
   sameMasks,
 } from "@workfolio/shared";
 import { clockedInSegments, iso, screenshotReport, str } from "../attendance/sessions.js";
-import { employeeReadAudit } from "../audit/account-audit.js";
+import { accountAudit, employeeReadAudit } from "../audit/account-audit.js";
 import { RateLimiter } from "../auth/crypto.js";
 import type { AuthContext } from "../auth/auth.service.js";
 import { EmployeeLocks } from "../common/employee-locks.js";
 import { POLICY } from "../common/policy.js";
-import { canReadEmployee, scopeSql } from "../common/scope.js";
+import { canReadEmployee, scopeSql, teamFilterSql } from "../common/scope.js";
 import type { Env } from "../config/env.js";
 import { DATABASE } from "../database/database.module.js";
 import type { DeviceContext } from "../devices/devices.service.js";
@@ -61,6 +63,7 @@ import { ScreenshotSettingsService } from "./screenshot-settings.service.js";
 import { quickXorHash, SCREENSHOT_STORAGE, screenshotKey, StorageError, type ScreenshotStorage } from "./storage.js";
 import { NotificationsService } from "../notifications/notifications.service.js";
 import { TimelapseService } from "./timelapse.service.js";
+import { zipStream, type ZipEntry } from "./zip.js";
 
 const DAY_MS = 86_400_000;
 /** A capture this far in the future (after skew correction) is refused. */
@@ -72,8 +75,16 @@ const RETENTION_CHUNK = 100;
 
 /** Registered but not uploaded for longer than this: the desktop is offline or retrying. */
 const STALLED_MS = 3_600_000;
+/** Gallery filters; `teamId` and `status` are for server-side callers (Overview), not the HTTP query. */
+type GalleryFilter = ScreenshotGalleryQuery & { teamId?: string; status?: ScreenshotUploadStatus };
+/**
+ * Captured inside one of the employee's IDLE activity intervals (no input for the idle threshold; locked screens are never
+ * captured). Intervals are at most 24 h (trigger), so the indexed search covers only the day before the capture.
+ */
+const IDLE_SQL = `EXISTS (SELECT 1 FROM activity_intervals a WHERE a.employee_id = s.employee_id AND a.kind = 'IDLE'
+  AND a.started_at <= s.captured_at AND a.started_at > strftime('%Y-%m-%dT%H:%M:%fZ', s.captured_at, '-1 day') AND a.ended_at > s.captured_at)`;
 const GALLERY_COLUMNS = `s.id, s.employee_id, s.captured_at, s.width, s.height, s.file_size_bytes, s.upload_status, s.storage_provider, s.stored_at, s.mask_count, s.blurred,
-  p.full_name, p.employee_code, p.timezone`;
+  p.full_name, p.employee_code, p.timezone, ${IDLE_SQL} AS idle`;
 const ITEM_COLUMNS = "id, employee_id, captured_at, width, height, file_size_bytes, upload_status, storage_provider, stored_at, mask_count, blurred";
 const toItem = (r: Row): ScreenshotItem => ({
   id: String(r.id),
@@ -92,7 +103,19 @@ const toItem = (r: Row): ScreenshotItem => ({
 const toGalleryItem = (r: Row): ScreenshotGalleryItem => ({
   ...toItem(r),
   employee: { id: String(r.employee_id), fullName: String(r.full_name), employeeCode: String(r.employee_code), timezone: String(r.timezone) },
+  idle: Boolean(r.idle),
 });
+/** Screenshot ids listed in the export audit row (the row is capped at 2000 characters); every id is in the access log. */
+const EXPORT_AUDIT_IDS = 40;
+const exportAuditMetadata = (rows: Row[], bytes: number) => ({
+  count: rows.length,
+  bytes,
+  employees: new Set(rows.map((r) => String(r.employee_id))).size,
+  screenshotIds: rows.slice(0, EXPORT_AUDIT_IDS).map((r) => String(r.id)).join(","),
+  screenshotIdsOmitted: Math.max(0, rows.length - EXPORT_AUDIT_IDS),
+});
+/** Archive entry name: employee code, UTC capture time and id only (never a storage key or path). */
+const exportName = (r: Row) => `screenshot-${String(r.employee_code).replace(/[^A-Za-z0-9_-]/g, "_")}-${String(r.captured_at).replace(/[:.]/g, "-")}-${String(r.id)}.webp`;
 
 /** Width and height from a WebP header (VP8, VP8L or VP8X), or null when it is not a valid WebP. */
 export function webpSize(b: Uint8Array): { width: number; height: number } | null {
@@ -335,7 +358,7 @@ export class ScreenshotsService implements OnModuleInit, OnModuleDestroy {
   }
 
   /** Admin gallery: newest first, all employees or one, dates in the viewer's time zone. Metadata only. */
-  async gallery(q: ScreenshotGalleryQuery, caller: AuthContext): Promise<Paginated<ScreenshotGalleryItem>> {
+  async gallery(q: GalleryFilter, caller: AuthContext): Promise<Paginated<ScreenshotGalleryItem>> {
     const { where, args } = this.galleryFilter(q, caller);
     // ponytail: only a gallery filtered to one employee is audited here. The all-employees page is not (a row
     // per page per employee would drown the audit); each image actually opened is logged in screenshot_access_log.
@@ -431,6 +454,55 @@ export class ScreenshotsService implements OnModuleInit, OnModuleDestroy {
       throw new BadGatewayException("The stored screenshot failed validation");
     }
     return bytes;
+  }
+
+  // ---- Bulk export (Super Admin) --------------------------------------------------------
+
+  /**
+   * ZIP of the chosen screenshots (STORE, streamed one file at a time). Everything is checked before the first byte:
+   * unknown or out-of-scope id → 404, not stored here → 409, more than SCREENSHOT_EXPORT_LIMITS.maxBytes → 413. Then one
+   * access-log row per screenshot (VIEW) and one SCREENSHOTS_EXPORTED audit row are committed together. A storage failure
+   * or a file failing validation mid-stream aborts the download (logged).
+   */
+  async exportZip(caller: AuthContext, ids: string[]): Promise<{ count: number; stream: AsyncGenerator<Uint8Array> }> {
+    const scope = scopeSql(caller, "screenshots:read", "s.employee_id");
+    const { rows } = await this.db.execute({
+      sql: `SELECT ${GALLERY_COLUMNS}, s.storage_key FROM screenshots s JOIN employee_profiles p ON p.id = s.employee_id
+            WHERE s.id IN (${ids.map(() => "?").join(", ")})${scope.sql} ORDER BY s.captured_at, s.id`,
+      args: [...ids, ...scope.args],
+    });
+    if (rows.length !== ids.length) throw new NotFoundException("Screenshot not found");
+    const unavailable = rows.filter((r) => r.upload_status !== "STORED" || r.storage_provider !== this.storage.provider).length;
+    if (unavailable) throw new ConflictException(`${unavailable} of the selected screenshots are not stored on this server (awaiting upload, deleted, or kept in other storage); deselect them and try again`);
+    const bytes = rows.reduce((n, r) => n + Number(r.file_size_bytes), 0);
+    if (bytes > SCREENSHOT_EXPORT_LIMITS.maxBytes) throw new PayloadTooLargeException(`The selection is ${Math.ceil(bytes / 1_048_576)} MB; an export is limited to ${SCREENSHOT_EXPORT_LIMITS.maxBytes / 1_048_576} MB. Select fewer screenshots.`);
+    await this.db.batch(
+      [
+        ...rows.map((r) => ({ sql: "INSERT INTO screenshot_access_log (id, screenshot_id, user_id, action) VALUES (?, ?, ?, 'VIEW')", args: [randomUUID(), String(r.id), caller.id] })),
+        accountAudit({ actorUserId: caller.id, action: "SCREENSHOTS_EXPORTED", resourceType: "ACCOUNT", resourceId: caller.id, metadata: exportAuditMetadata(rows, bytes) }),
+      ],
+      "write",
+    );
+    this.logger.log({ userId: caller.id, count: rows.length, bytes }, "Screenshots exported");
+    const storage = this.storage;
+    const logger = this.logger;
+    async function* entries(): AsyncGenerator<ZipEntry> {
+      for (const r of rows) {
+        let data: Uint8Array;
+        try {
+          data = await storage.get(String(r.storage_key));
+        } catch (err) {
+          logger.warn({ screenshotId: String(r.id), err: (err as Error).message }, "Screenshot export aborted: retrieval failed");
+          throw new BadGatewayException("Screenshot storage is unavailable");
+        }
+        if (data.length !== Number(r.file_size_bytes) || !webpSize(data)) {
+          logger.error({ screenshotId: String(r.id), bytes: data.length }, "Screenshot export aborted: stored screenshot failed validation");
+          throw new BadGatewayException("A stored screenshot failed validation");
+        }
+        yield { name: exportName(r), data, modified: new Date(String(r.captured_at)) };
+      }
+    }
+    return { count: rows.length, stream: zipStream(entries()) };
   }
 
   // ---- Admin deletion -------------------------------------------------------------------
@@ -679,11 +751,16 @@ export class ScreenshotsService implements OnModuleInit, OnModuleDestroy {
   }
 
   /** Team heads (W41): only their teams' members; another employeeId simply matches nothing. */
-  private galleryFilter(q: ScreenshotGalleryQuery, caller: AuthContext) {
+  private galleryFilter(q: GalleryFilter, caller: AuthContext) {
     const args: string[] = [zonedToUtc(`${q.from}T00:00`, q.tz), zonedToUtc(`${addDays(q.to, 1)}T00:00`, q.tz)];
     if (q.employeeId) args.push(q.employeeId);
+    if (q.status) args.push(q.status);
     const scope = scopeSql(caller, "screenshots:read", "s.employee_id");
-    return { where: `s.captured_at >= ? AND s.captured_at < ?${q.employeeId ? " AND s.employee_id = ?" : ""}${scope.sql}`, args: [...args, ...scope.args] };
+    const team = teamFilterSql(q.teamId, "s.employee_id");
+    return {
+      where: `s.captured_at >= ? AND s.captured_at < ?${q.employeeId ? " AND s.employee_id = ?" : ""}${q.status ? " AND s.upload_status = ?" : ""}${q.idle ? ` AND ${IDLE_SQL}` : ""}${scope.sql}${team.sql}`,
+      args: [...args, ...scope.args, ...team.args],
+    };
   }
 
   private throttle(employeeId: string) {

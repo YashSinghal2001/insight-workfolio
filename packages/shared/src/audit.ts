@@ -32,6 +32,12 @@ export const ACCOUNT_AUDIT_ACTIONS = [
   "EMPLOYEE_ACTIVITY_SUMMARY_VIEWED",
   "EMPLOYEE_ATTENDANCE_VIEWED",
   "EMPLOYEE_ATTENDANCE_EXPORTED",
+  // Bulk ZIP export of screenshots by a Super Admin (one row per export; each file is also in screenshot_access_log).
+  "SCREENSHOTS_EXPORTED",
+  "NOTIFICATION_RULE_CREATED",
+  "NOTIFICATION_RULE_UPDATED",
+  "NOTIFICATION_RECIPIENT_ADDED",
+  "NOTIFICATION_RECIPIENT_REMOVED",
 ] as const;
 export type AccountAuditAction = (typeof ACCOUNT_AUDIT_ACTIONS)[number];
 export const ACCOUNT_AUDIT_RESOURCES = ["ACCOUNT", "SESSION", "DEVICE", "SETUP_LINK"] as const;

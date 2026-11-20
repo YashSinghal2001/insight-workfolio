@@ -1,5 +1,7 @@
 import { Body, Controller, Delete, Get, Headers, HttpCode, Param, ParseUUIDPipe, Patch, Post, Query } from "@nestjs/common";
 import {
+  activityAppHistoryQuerySchema,
+  activityAppsQuerySchema,
   activityOverviewQuerySchema,
   activityQuerySchema,
   activitySyncSchema,
@@ -9,20 +11,26 @@ import {
   DEVICE_HEADER,
   employeeFilterSchema,
   retentionRunSchema,
+  riskUsersQuerySchema,
+  type ActivityAppHistoryQuery,
+  type ActivityAppsQuery,
   type ActivityOverviewQuery,
   type ActivityOverviewResponse,
   type ActivityQuery,
   type ActivitySyncRequest,
   type ApplicationCategoryInput,
+  type RiskUsersQuery,
 } from "@workfolio/shared";
 import { CurrentUser, RequirePermission, TeamScoped } from "../auth/auth.guard.js";
 import type { AuthContext } from "../auth/auth.service.js";
 import { ZodPipe } from "../common/zod.pipe.js";
 import { DevicesService } from "../devices/devices.service.js";
 import { EmployeesService } from "../employees/employees.service.js";
+import { ActivityAppsService } from "./activity-apps.service.js";
 import { ActivityService } from "./activity.service.js";
 import { ActivityCategoriesService } from "./categories.service.js";
 import { RetentionService } from "./retention.service.js";
+import { RiskUsersService } from "./risk-users.service.js";
 
 /**
  * Writes come only from the caller's own active device. Reads default to the caller;
@@ -36,6 +44,8 @@ export class ActivityController {
     private readonly employees: EmployeesService,
     private readonly retention: RetentionService,
     private readonly categories: ActivityCategoriesService,
+    private readonly appsUsage: ActivityAppsService,
+    private readonly riskUsers: RiskUsersService,
   ) {}
 
   @Post("sync")
@@ -135,6 +145,30 @@ export class ActivityController {
     const refs = page.items.map((e) => ({ id: e.id, fullName: e.fullName, employeeCode: e.employeeCode, timezone: e.timezone }));
     const { items, categoriesConfigured } = await this.activity.overview(refs, q.from, q.to);
     return { ...page, items, from: q.from, to: q.to, categoriesConfigured };
+  }
+
+  /** Admin / team head: app usage of the scope (optionally one team): per app, per label, per employee; ≤ 31 days. */
+  @Get("apps")
+  @RequirePermission("activity:read-all")
+  @TeamScoped()
+  apps(@CurrentUser() user: AuthContext, @Query(new ZodPipe(activityAppsQuerySchema)) q: ActivityAppsQuery) {
+    return this.appsUsage.apps(user, q);
+  }
+
+  /** One application's usage per local day and employee; audited per employee shown (as /activity/summary). */
+  @Get("apps/history")
+  @RequirePermission("activity:read-all")
+  @TeamScoped()
+  appHistory(@CurrentUser() user: AuthContext, @Query(new ZodPipe(activityAppHistoryQuerySchema)) q: ActivityAppHistoryQuery) {
+    return this.appsUsage.history(user, q);
+  }
+
+  /** Computed risk users: alert rows grouped by rule kind + less working hours; ≤ 92 days. */
+  @Get("risk-users")
+  @RequirePermission("activity:read-all")
+  @TeamScoped()
+  risk(@CurrentUser() user: AuthContext, @Query(new ZodPipe(riskUsersQuerySchema)) q: RiskUsersQuery) {
+    return this.riskUsers.list(user, q);
   }
 
   private target(user: AuthContext, employeeId?: string) {

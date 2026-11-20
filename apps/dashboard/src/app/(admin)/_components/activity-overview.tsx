@@ -16,18 +16,26 @@ const PAGE_SIZE = 20;
  * each employee's own time zone). `onOpen` opens the per-employee view in place (the /activity
  * page); without it the name links to /activity?employeeId=…
  */
-export function ActivityOverview({ range, onOpen }: { range: Range; onOpen?: (employeeId: string) => void }) {
+export function ActivityOverview({ range, onOpen, teamId }: { range: Range; onOpen?: (employeeId: string) => void; teamId?: string | null }) {
   const [q, setQ] = useState("");
   const [search, setSearch] = useState("");
   const [page, setPage] = useState(1);
   const [data, setData] = useState<ActivityOverviewResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [retry, setRetry] = useState(0);
+  // A different team (or range) starts again at page 1 (state adjusted during render, not in an effect).
+  const [filter, setFilter] = useState({ range, teamId });
+  if (filter.range !== range || filter.teamId !== teamId) {
+    setFilter({ range, teamId });
+    setPage(1);
+    setData(null);
+  }
 
   useEffect(() => {
     let live = true;
     const params = new URLSearchParams({ from: range.from, to: range.to, page: String(page), pageSize: String(PAGE_SIZE) });
     if (search) params.set("q", search);
+    if (teamId) params.set("teamId", teamId);
     api<ActivityOverviewResponse>(`/activity/overview?${params}`).then(
       (r) => live && (setData(r), setError(null)),
       (e) => live && setError(errorMessage(e)),
@@ -35,7 +43,7 @@ export function ActivityOverview({ range, onOpen }: { range: Range; onOpen?: (em
     return () => {
       live = false;
     };
-  }, [range, search, page, retry]);
+  }, [range, search, page, retry, teamId]);
 
   const pages = data ? Math.max(1, Math.ceil(data.total / data.pageSize)) : 1;
   const head = ["Employee", "Clocked in", "Active", "Idle", "Unobserved", ...(data?.categoriesConfigured ? ["Productive", "Productive share"] : []), "Last upload"];

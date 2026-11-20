@@ -55,11 +55,13 @@ async function employee(code: string): Promise<Emp> {
   const login = await api("/auth/login", { method: "POST", body: { email, password: PASSWORD, client: "desktop" } });
   const id = e.body.employee.id;
   const device = randomUUID();
-  const start = Date.now() - 3 * 3_600_000;
+  // P7-11: a closed one-hour shift that started up to 3 h ago, kept inside today's UTC date (scaled down just after midnight).
+  const span = Math.min(3 * 3_600_000, Date.now() - Date.parse(`${iso(Date.now()).slice(0, 10)}T00:00:00Z`));
+  const start = Date.now() - span;
   await db.execute({ sql: "INSERT INTO devices (id, employee_id, device_name, platform, device_identifier) VALUES (?, ?, 'Mac', 'macos', ?)", args: [device, id, randomUUID()] });
   await db.execute({
     sql: "INSERT INTO attendance_sessions (id, employee_id, device_id, clock_in_at, clock_out_at, status) VALUES (?, ?, ?, ?, ?, 'CLOSED')",
-    args: [randomUUID(), id, device, iso(start), iso(start + 3_600_000)],
+    args: [randomUUID(), id, device, iso(start), iso(start + span / 3)],
   });
   return { id, userId: e.body.employee.userId, bearer: login.body.accessToken };
 }

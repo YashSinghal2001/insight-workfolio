@@ -59,8 +59,8 @@ const toItem = (r: Record<string, unknown>): ActivityTimelineItem => ({
 const CLIPPED_MS = "round((julianday(min(ended_at, ?)) - julianday(max(started_at, ?))) * 86400000)";
 const minutes = (ms: number) => `${Math.round(ms / 60_000)} min`;
 /** Same grouping key as the per-application totals (identifier, else the name). */
-const APP_KEY = "coalesce(a.application_identifier, 'name:' || a.application_name)";
-const appKey = (a: { applicationIdentifier: string | null; applicationName: string | null }) => a.applicationIdentifier ?? `name:${a.applicationName}`;
+export const APP_KEY = "coalesce(a.application_identifier, 'name:' || a.application_name)";
+export const appKey = (a: { applicationIdentifier: string | null; applicationName: string | null }) => a.applicationIdentifier ?? `name:${a.applicationName}`;
 type Split = Record<ApplicationCategory, number>;
 const emptySplit = (): Split => ({ PRODUCTIVE: 0, NEUTRAL: 0, UNPRODUCTIVE: 0, UNCLASSIFIED: 0 });
 
@@ -407,6 +407,26 @@ export class ActivityService {
       };
     });
     return { items, categoriesConfigured: configured };
+  }
+
+  /**
+   * Active time per application across these employees (each range in their own zone), largest first: the
+   * per-application totals of summary(), summed over a group (Overview top apps). One query.
+   */
+  async appTotals(employees: Pick<EmployeeRef, "id" | "timezone">[], from: string, to: string): Promise<{ applicationName: string; activeMs: number }[]> {
+    if (!employees.length) return [];
+    // ponytail: 3 parameters per employee in one VALUES list; split it beyond ~10k employees (SQLite's parameter limit).
+    const bounds = employees.flatMap((e) => [e.id, ...this.bounds(e as EmployeeRef, from, to)]);
+    const { rows } = await this.db.execute({
+      // The bare application_name comes from the latest interval (max), so a renamed app shows its current name.
+      sql: `WITH b(emp, s, e) AS (VALUES ${employees.map(() => "(?, ?, ?)").join(", ")})
+            SELECT a.application_name AS name, max(a.started_at) AS latest,
+                   sum(max(0, round((julianday(min(a.ended_at, b.e)) - julianday(max(a.started_at, b.s))) * 86400000))) AS ms
+            FROM b JOIN activity_intervals a ON a.employee_id = b.emp AND a.kind = 'ACTIVE' AND a.started_at < b.e AND a.ended_at > b.s
+            GROUP BY ${APP_KEY} ORDER BY ms DESC, name`,
+      args: bounds,
+    });
+    return rows.map((r) => ({ applicationName: String(r.name), activeMs: Number(r.ms) })).filter((a) => a.activeMs > 0);
   }
 
   // ---- internals ------------------------------------------------------------------

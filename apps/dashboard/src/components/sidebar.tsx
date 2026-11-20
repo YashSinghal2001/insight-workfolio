@@ -4,12 +4,15 @@ import { can } from "@workfolio/shared";
 import { ShellNav, type NavProps, type NavSection } from "@/components/app-shell";
 import { useAuth } from "@/components/auth-provider";
 
-/** Admin navigation, grouped. Labels and hrefs are asserted by browser suites (`nav a` text). */
+/**
+ * Admin navigation, grouped per the contract route map (docs/IMPLEMENTATION-CONTRACTS.md §6). Only routes that
+ * exist are listed; whoever builds a new page adds its one-line entry. Labels and hrefs are asserted by browser
+ * suites (`nav a` text). Settings sub-pages live in the Settings sub-menu (SETTINGS_NAV).
+ */
 export const ADMIN_NAV: readonly NavSection[] = [
-  { title: "Overview", items: [{ label: "Overview", href: "/" }] },
-  { title: "People", items: [{ label: "Employees", href: "/employees" }, { label: "Devices", href: "/devices" }, { label: "Teams", href: "/teams" }, { label: "Roles", href: "/roles" }] },
+  { title: "Realtime", items: [{ label: "Overview", href: "/" }, { label: "Live team", href: "/live-team" }] },
   {
-    title: "Time",
+    title: "Attendance",
     items: [
       { label: "Attendance", href: "/attendance" },
       { label: "Timesheets", href: "/timesheets" },
@@ -22,25 +25,39 @@ export const ADMIN_NAV: readonly NavSection[] = [
     title: "Monitoring",
     items: [
       { label: "Activity", href: "/activity" },
-      { label: "Websites", href: "/websites" },
+      { label: "Timeline", href: "/timeline" },
       { label: "Screenshots", href: "/screenshots" },
+      { label: "Websites", href: "/websites" },
+      { label: "Risk users", href: "/risk-users" },
     ],
   },
   { title: "Work", items: [{ label: "Projects", href: "/projects" }] },
   { title: "Reports", items: [{ label: "Reports", href: "/reports" }, { label: "Alerts", href: "/alerts" }] },
+  { title: "People", items: [{ label: "Employees", href: "/employees" }, { label: "Teams", href: "/teams" }, { label: "Devices", href: "/devices" }, { label: "Roles", href: "/roles" }] },
   {
-    title: "Administration",
+    title: "Admin",
     items: [
-      { label: "Audit", href: "/audit" },
       { label: "Notifications", href: "/notifications" },
+      { label: "Audit", href: "/audit" },
+      { label: "Desktop updates", href: "/desktop-updates" },
       { label: "Settings", href: "/settings" },
-      { label: "Work schedule", href: "/settings/schedule" },
-      { label: "App labels", href: "/settings/labels" },
-      { label: "Desktop app updates", href: "/desktop-updates" },
       { label: "My account", href: "/account" },
     ],
   },
 ];
+
+/** Settings sub-menu (`<SubNav>` in app/(admin)/settings/layout.tsx). */
+export const SETTINGS_NAV = [
+  { label: "General", href: "/settings" },
+  { label: "Work schedule", href: "/settings/schedule" },
+  { label: "Monitoring & notices", href: "/settings/monitoring" },
+  { label: "Screenshots & masks", href: "/settings/screenshots" },
+  { label: "App labels", href: "/settings/labels" },
+  { label: "Website policy", href: "/settings/websites" },
+  { label: "Storage", href: "/settings/storage" },
+  { label: "Email & notifications", href: "/settings/notifications" },
+  { label: "Leave types", href: "/settings/leave-types" },
+] as const;
 
 /** The admin sidebar (`nav#admin-nav[aria-label="Main"]`). Without props it is the desktop sidebar only. */
 export function Sidebar(props: NavProps = {}) {

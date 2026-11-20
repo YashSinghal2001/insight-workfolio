@@ -1,5 +1,5 @@
 import { Body, Controller, Delete, Get, HttpCode, Param, ParseUUIDPipe, Patch, Post, Query } from "@nestjs/common";
-import { addRecipientSchema, createReportScheduleSchema, updateReportScheduleSchema } from "@workfolio/shared";
+import { addRecipientSchema, createReportScheduleSchema, updateReportScheduleSchema, type CreateReportScheduleInput, type UpdateReportScheduleInput } from "@workfolio/shared";
 import { z } from "zod";
 import { CurrentUser, RequirePermission } from "../auth/auth.guard.js";
 import type { AuthContext } from "../auth/auth.service.js";
@@ -28,13 +28,13 @@ export class ReportsController {
 
   @Post("schedules")
   @RequirePermission("reports:manage")
-  create(@CurrentUser() user: AuthContext, @Body(new ZodPipe(createReportScheduleSchema)) body: z.infer<typeof createReportScheduleSchema>) {
+  create(@CurrentUser() user: AuthContext, @Body(new ZodPipe(createReportScheduleSchema)) body: CreateReportScheduleInput) {
     return this.reports.create(user, body);
   }
 
   @Patch("schedules/:id")
   @RequirePermission("reports:manage")
-  update(@CurrentUser() user: AuthContext, @Id() id: string, @Body(new ZodPipe(updateReportScheduleSchema)) body: z.infer<typeof updateReportScheduleSchema>) {
+  update(@CurrentUser() user: AuthContext, @Id() id: string, @Body(new ZodPipe(updateReportScheduleSchema)) body: UpdateReportScheduleInput) {
     return this.reports.update(user, id, body);
   }
 

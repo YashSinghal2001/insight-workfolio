@@ -552,3 +552,37 @@ ones are never deleted automatically; confirmed ones are removed 24 h after conf
   Rust commands (`screenshot_*`), which read only files the capture worker wrote.
 - `x-powered-by` disabled on the API.
 - Production API must sit behind TLS (reverse proxy on the VPS).
+
+## Product-parity additions (waves 1–3, verified in W4-SECURITY)
+
+Inventory and threat list: `docs/status/agent-plans/W4-SECURITY.md`. Matrix test:
+`apps/api/test/parity-rbac-matrix.e2e.test.ts` (unauthenticated 401, employee 403, team head in/out of team,
+Admin, Super Admin, and the response bodies of every new read and export).
+
+- **New team-scoped reads** (`@TeamScoped`, team heads see only the active teams they head, anyone else's id is a
+  404): `GET /overview`, `/attendance/{missing-clock-outs,monthly,monthly/export,late,summary-report,daily/export}`,
+  `/employees/:id/analytics`, `/activity/{apps,apps/history,risk-users,team-timeline}`. Existing
+  `/attendance/{overview,summary,timesheets,timesheets/export,daily}` and `GET /employees` gained `teamId`.
+- **Team filter** (`teamId`, uuid): `assertTeamReadable` first (admins: any existing team; heads: an active team
+  they head; otherwise 404), then `teamFilterSql` intersected with `scopeSql`. A head never sees the names of a
+  member's other teams (`GET /employees`, `/employees/:id`, analytics).
+- **Overview sections** obey their own permission (screenshots, apps, leave); screenshot thumbnails still load
+  through `/screenshots/:id/content` (access-logged).
+- **Admin only:** notification rules (`settings:manage`), report schedule kinds/team scope (`reports:manage`).
+  Rule and report recipients are accounts only: admins, or the head of the rule's/report's active team, re-checked
+  at send time; team-rule emails list only that team's members.
+- **Super Admin only (new):** `POST /screenshots/export` (`screenshots:delete` identity; ≤ 200 ids, ≤ 200 MB; one
+  `screenshot_access_log` row per file and a `SCREENSHOTS_EXPORTED` audit row before the first byte; entries named by
+  employee code, capture time and id, never a storage key).
+- **Audit / access log:** `/activity/apps/history`, `/activity/team-timeline` and `/employees/:id/analytics` write the
+  per-employee read audit rows (as `/activity/summary` and `/activity/timeline`); nothing for the caller's own record.
+- **Corrections on behalf:** `POST /attendance/corrections` with `employeeId` needs `attendance:review` (else 404).
+  Nobody reviews their own request **or a correction of their own attendance** (403), so an admin-initiated
+  correction for another admin needs a third reviewer.
+- **Privacy:** new responses and files carry name, employee code and zone, never emails (except account lists),
+  leave reasons, alert details, storage keys or paths; window titles are not collected. CSV cells starting with a
+  formula character are prefixed (`csvCell`); XLSX cells are typed text. Attendance emails are HTML-escaped with
+  CR/LF stripped from subjects.
+- **Abuse limits:** every new query is a zod schema (uuid ids, ISO dates, ranges ≤ 92 days, app usage ≤ 31 days,
+  pages ≤ 100); SQL is built from constants with bound arguments only; bulk reads are chunked under SQLite's
+  parameter limit. The global per-session / per-IP rate limit (`API_RATE_LIMIT_PER_MINUTE`) covers the new routes.

@@ -83,8 +83,9 @@ export class CorrectionsService {
   ) {}
 
   async create(caller: AuthContext, input: CreateCorrection): Promise<CorrectionRequest> {
-    const employee = await this.employees.attendanceTarget(caller); // always the caller's own profile
-    const { type, reason, ...rest } = input;
+    const { type, reason, employeeId, ...rest } = input;
+    // Own profile, or (attendance:review holders only) another employee; anyone else gets a 404.
+    const employee = await this.employees.attendanceTarget(caller, employeeId, "attendance:review");
     const { sessionId = null, breakId = null, ...proposed } = rest as Record<string, string | undefined>;
     const proposal: Proposal = { type, sessionId, breakId, proposed: proposed as Record<string, string> };
     await this.validate(employee.id, proposal); // fail early; re-checked at approval
@@ -94,7 +95,7 @@ export class CorrectionsService {
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       args: [id, employee.id, caller.id, type, sessionId, breakId, JSON.stringify(proposal.proposed), reason],
     });
-    this.logger.log({ correctionId: id, employeeId: employee.id, actorId: caller.id, type }, "Correction requested");
+    this.logger.log({ correctionId: id, employeeId: employee.id, actorId: caller.id, type, onBehalf: employee.userId !== caller.id }, "Correction requested");
     return this.get(caller, id);
   }
 
@@ -187,6 +188,9 @@ export class CorrectionsService {
   private async reviewable(caller: AuthContext, id: string): Promise<CorrectionRequest> {
     const request = await this.get(caller, id);
     if (request.requestedBy.id === caller.id) throw new ForbiddenException("You cannot review your own correction request");
+    // A request made on someone's behalf (admin-initiated) is still about their attendance: they never review it.
+    const subject = (await this.db.execute({ sql: "SELECT user_id FROM employee_profiles WHERE id = ?", args: [request.employee.id] })).rows[0];
+    if (subject && String(subject.user_id) === caller.id) throw new ForbiddenException("You cannot review a correction of your own attendance");
     if (request.status !== "PENDING") throw new ConflictException("This request has already been reviewed");
     return request;
   }

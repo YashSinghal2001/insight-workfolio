@@ -10,6 +10,10 @@
  * - Loading / empty / error: <SkeletonRows label="employees" /> while loading (announces "Loading employees…"),
  *   <EmptyState title hint? action? icon?> for no data, <ErrorState message onRetry?> for failures.
  *   Never fake data: <StatCard label value={null} reason="Not tracked yet" /> renders "—" plus the reason.
+ * - Long explanatory/compliance text: <PageHeader about={…}> renders a closed "About this page" disclosure.
+ * - KPIs: <StatCard label value hint? tone?> (tone colours the value: success|warning|danger|info).
+ * - Sortable tables: <DataTable label rows={items} rowKey={(r) => r.id} columns={[{ header: "Name",
+ *   sortValue: (r) => r.name, cell: (r) => r.name }, …]} />; header buttons toggle asc/desc (aria-sort).
  * - Tables: <DataTable label="Employees" head={["Name", …]} minWidth={640}>…<tr/>…</DataTable>. The table
  *   scrolls inside its own wrapper, so the page never scrolls horizontally at 360 px. `label` is the
  *   aria-label (browser suites select tables by it); `caption` adds a visible caption.
@@ -42,6 +46,7 @@ import {
   type ReactNode,
 } from "react";
 import Link from "next/link";
+import { sortRows, type SortDirection, type SortValue } from "@/lib/sort-rows";
 import { buttonClass, dangerButtonClass, ghostButtonClass, inputClass, Notice, secondaryButtonClass } from "@/components/ui";
 
 const cx = (...c: (string | false | null | undefined)[]) => c.filter(Boolean).join(" ");
@@ -58,11 +63,13 @@ export interface PageHeaderProps {
   description?: ReactNode;
   actions?: ReactNode;
   breadcrumbs?: Crumb[];
+  /** Long explanatory / compliance text, kept but collapsed into a closed "About this page" disclosure. */
+  about?: ReactNode;
 }
 
-export function PageHeader({ title, description, actions, breadcrumbs }: PageHeaderProps) {
+export function PageHeader({ title, description, actions, breadcrumbs, about }: PageHeaderProps) {
   return (
-    <div className="mb-6 flex flex-col gap-2">
+    <div className="mb-5 flex flex-col gap-2">
       {breadcrumbs && breadcrumbs.length > 0 && (
         <nav aria-label="Breadcrumb" className="text-xs text-muted">
           <ol className="flex flex-wrap items-center gap-1">
@@ -81,11 +88,17 @@ export function PageHeader({ title, description, actions, breadcrumbs }: PageHea
       )}
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div className="min-w-0">
-          <h1 className="text-2xl font-semibold tracking-tight">{title}</h1>
-          {description && <p className="mt-1 text-sm text-muted">{description}</p>}
+          <h1 className="text-xl font-semibold tracking-tight">{title}</h1>
+          {description && <p className="mt-0.5 text-sm text-muted">{description}</p>}
         </div>
         {actions && <div className="flex flex-wrap items-center gap-2">{actions}</div>}
       </div>
+      {about && (
+        <details className="group max-w-3xl text-sm">
+          <summary className="w-fit cursor-pointer rounded text-xs font-medium text-muted select-none hover:text-foreground">About this page</summary>
+          <div className="mt-1.5 rounded-lg border border-border bg-surface px-3 py-2 text-muted">{about}</div>
+        </details>
+      )}
     </div>
   );
 }
@@ -117,7 +130,7 @@ export interface EmptyStateProps {
 
 export function EmptyState({ title, hint, action, icon }: EmptyStateProps) {
   return (
-    <div className="flex flex-col items-center gap-2 rounded-lg border border-dashed border-border px-4 py-10 text-center">
+    <div className="flex flex-col items-center gap-2 rounded-lg border border-dashed border-border px-4 py-8 text-center">
       {icon && <div aria-hidden className="text-muted">{icon}</div>}
       <p className="font-medium">{title}</p>
       {hint && <p className="max-w-md text-sm text-muted">{hint}</p>}
@@ -152,18 +165,22 @@ export interface StatCardProps {
   /** Why the value is missing (shown only when value is null/undefined). */
   reason?: string;
   href?: string;
+  /** Colours the value (status meaning; the label still names it, so colour is never the only signal). */
+  tone?: Exclude<Tone, "neutral">;
 }
 
-export function StatCard({ label, value, hint, reason, href }: StatCardProps) {
+const VALUE_TONE: Record<Exclude<Tone, "neutral">, string> = { success: "text-success", warning: "text-warning", danger: "text-danger", info: "text-info" };
+
+export function StatCard({ label, value, hint, reason, href, tone }: StatCardProps) {
   const missing = value === null || value === undefined;
   const body = (
     <>
       <p className="text-xs font-medium text-muted">{label}</p>
-      <p className="mt-1 text-2xl font-semibold tabular-nums">{missing ? <span aria-label="Not available">—</span> : value}</p>
-      {missing && reason ? <p className="mt-1 text-xs text-muted">{reason}</p> : hint && <p className="mt-1 text-xs text-muted">{hint}</p>}
+      <p className={cx("mt-0.5 text-xl font-semibold tabular-nums", !missing && tone && VALUE_TONE[tone])}>{missing ? <span aria-label="Not available">—</span> : value}</p>
+      {missing && reason ? <p className="mt-0.5 text-xs text-muted">{reason}</p> : hint && <p className="mt-0.5 text-xs text-muted">{hint}</p>}
     </>
   );
-  const cls = "block rounded-lg border border-border bg-surface px-4 py-3 shadow-xs";
+  const cls = "block rounded-lg border border-border bg-surface p-3 shadow-xs";
   return href ? (
     <Link href={href} className={`${cls} transition-colors hover:border-brand/50`}>{body}</Link>
   ) : (
@@ -177,34 +194,90 @@ export function StatGrid({ children }: { children: ReactNode }) {
 
 /* ---------------------------------------------------------------- table */
 
-export interface DataTableProps {
+export interface DataColumn<T> {
+  header: ReactNode;
+  cell: (row: T) => ReactNode;
+  /** Makes the column sortable (numbers, strings; null/undefined sort last). */
+  sortValue?: (row: T) => SortValue;
+}
+
+interface DataTableBase {
   /** Accessible name (aria-label); browser suites select tables by it. */
   label: string;
   caption?: ReactNode;
-  /** Column headers; omit to render your own <thead> inside children. */
-  head?: ReactNode[];
   /** Minimum table width in px before the wrapper scrolls (default 0 = natural). */
   minWidth?: number;
   stickyHeader?: boolean;
+}
+
+export interface DataTableProps extends DataTableBase {
+  /** Column headers; omit to render your own <thead> inside children. */
+  head?: ReactNode[];
   children: ReactNode;
 }
 
-export function DataTable({ label, caption, head, minWidth, stickyHeader, children }: DataTableProps) {
+export interface SortableDataTableProps<T> extends DataTableBase {
+  columns: readonly DataColumn<T>[];
+  rows: readonly T[];
+  rowKey: (row: T) => string;
+  /** Initial sort: column index and direction. Default: input order. */
+  defaultSort?: { column: number; direction: SortDirection };
+}
+
+const TH = "border-b border-border px-3 py-2 font-medium whitespace-nowrap";
+
+/** Rows sorted by a clicked header; the header button is keyboard operable and exposes aria-sort. */
+function SortableTable<T>({ columns, rows, rowKey, defaultSort, ...base }: SortableDataTableProps<T>) {
+  const [sort, setSort] = useState(defaultSort ?? null);
+  const by = sort && columns[sort.column]?.sortValue;
+  const sorted = by ? sortRows(rows, by, sort.direction) : rows;
+  const head = columns.map((c, i) => {
+    if (!c.sortValue) return c.header;
+    const dir = sort?.column === i ? sort.direction : null;
+    return (
+      <button
+        key={i}
+        type="button"
+        onClick={() => setSort({ column: i, direction: dir === "asc" ? "desc" : "asc" })}
+        className="inline-flex items-center gap-1 font-medium hover:text-foreground"
+      >
+        {c.header}
+        <span aria-hidden className={dir ? "text-foreground" : "opacity-40"}>{dir === "asc" ? "▲" : dir === "desc" ? "▼" : "↕"}</span>
+      </button>
+    );
+  });
+  return (
+    <TableFrame {...base} head={head} ariaSort={columns.map((c, i) => (c.sortValue ? (sort?.column === i ? (sort.direction === "asc" ? "ascending" : "descending") : "none") : undefined))}>
+      {sorted.map((r) => (
+        <tr key={rowKey(r)}>
+          {columns.map((c, i) => <td key={i}>{c.cell(r)}</td>)}
+        </tr>
+      ))}
+    </TableFrame>
+  );
+}
+
+export function DataTable<T>(props: DataTableProps | SortableDataTableProps<T>) {
+  return "columns" in props ? <SortableTable {...props} /> : <TableFrame {...props} />;
+}
+
+function TableFrame({ label, caption, head, minWidth, stickyHeader, ariaSort, children }: DataTableProps & { ariaSort?: ("ascending" | "descending" | "none" | undefined)[] }) {
   return (
     // relative: visually hidden (absolute) header text stays inside the scroll box instead of widening the page.
     <div className={cx("relative max-w-full overflow-x-auto rounded-lg border border-border bg-surface", stickyHeader && "max-h-[70vh] overflow-y-auto")}>
-      <table aria-label={label} className="w-full text-left text-sm" style={minWidth ? { minWidth } : undefined}>
-        {caption && <caption className="px-4 pt-3 text-left text-sm text-muted">{caption}</caption>}
+      <table aria-label={label} className="w-full text-left text-[13px]" style={minWidth ? { minWidth } : undefined}>
+        {caption && <caption className="px-3 pt-2.5 text-left text-sm text-muted">{caption}</caption>}
         {head && (
           <thead className={cx("bg-surface-muted text-xs text-muted", stickyHeader && "sticky top-0 z-10")}>
             <tr>
               {head.map((h, i) => (
-                <th key={i} scope="col" className="border-b border-border px-4 py-2.5 font-medium whitespace-nowrap">{h}</th>
+                <th key={i} scope="col" aria-sort={ariaSort?.[i]} className={TH}>{h}</th>
               ))}
             </tr>
           </thead>
         )}
-        <tbody className="[&_td]:border-b [&_td]:border-border [&_td]:px-4 [&_td]:py-2.5 [&_tr:last-child_td]:border-0">{children}</tbody>
+        {/* 36 px rows: 13 px text, 8 px vertical padding. */}
+        <tbody className="[&_td]:h-9 [&_td]:border-b [&_td]:border-border [&_td]:px-3 [&_td]:py-2 [&_tr:last-child_td]:border-0">{children}</tbody>
       </table>
     </div>
   );
@@ -230,7 +303,7 @@ export function Pagination({ page, pageCount, onPage, label = "Pagination" }: { 
 /* ---------------------------------------------------------------- filter bar */
 
 export function FilterBar({ children, label = "Filters", onSubmit }: { children: ReactNode; label?: string; onSubmit?: (e: FormEvent<HTMLFormElement>) => void }) {
-  const cls = "flex flex-wrap items-end gap-3 rounded-lg border border-border bg-surface px-4 py-3 [&>*]:min-w-0";
+  const cls = "flex flex-wrap items-end gap-3 rounded-lg border border-border bg-surface p-3 [&>*]:min-w-0";
   return onSubmit ? (
     <form role="search" aria-label={label} className={cls} onSubmit={(e) => (e.preventDefault(), onSubmit(e))}>{children}</form>
   ) : (

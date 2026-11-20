@@ -462,6 +462,18 @@ test("email reports: one run per schedule and period, one delivery per recipient
   await assert.rejects(db.execute("UPDATE report_deliveries SET status = 'PENDING', finished_at = NULL WHERE id = 'd1'"), (e) => guardViolation(e) === "append_only", "no resend of a finished delivery");
   await db.execute("INSERT INTO report_delivery_attempts (id, delivery_id, attempt, outcome) VALUES ('x1', 'd1', 1, 'MOCKED')");
   await assert.rejects(db.execute("INSERT INTO report_delivery_attempts (id, delivery_id, attempt, outcome) VALUES ('x2', 'd1', 1, 'SENT')"), (e) => isUniqueViolation(e));
+  // 0035: kind, send time and team scope; organisation, team or one employee, never team and employee together.
+  await db.batch([
+    "INSERT INTO employee_profiles (id, user_id, employee_code, full_name) VALUES ('p1', 'a1', 'E1', 'Pat')",
+    "INSERT INTO teams (id, name, created_by) VALUES ('t1', 'Ops', 'a1')",
+  ], "write");
+  assert.deepEqual((await db.execute("SELECT kind, send_at_local_time, team_id FROM report_schedules WHERE id = 's1'")).rows.map((r) => ({ ...r })), [{ kind: "WORKED_HOURS", send_at_local_time: null, team_id: null }]);
+  await db.execute("INSERT INTO report_schedules (id, name, frequency, timezone, created_by, kind, send_at_local_time, team_id) VALUES ('s3', 'Late', 'DAILY', 'UTC', 'a1', 'LATE', '09:30', 't1')");
+  for (const bad of ["kind = 'IDLE'", "send_at_local_time = '24:00'", "send_at_local_time = '9:30'", "send_at_local_time = '09:60'"]) {
+    await assert.rejects(db.execute(`UPDATE report_schedules SET ${bad} WHERE id = 's3'`), /CHECK constraint/, bad);
+  }
+  await assert.rejects(db.execute("UPDATE report_schedules SET employee_id = 'p1' WHERE id = 's3'"), /report_scope/);
+  await assert.rejects(db.execute("INSERT INTO report_schedules (id, name, frequency, timezone, created_by, employee_id, team_id) VALUES ('s4', 'x', 'DAILY', 'UTC', 'a1', 'p1', 't1')"), /report_scope/);
   for (const sql of ["UPDATE report_runs SET period_to = '2026-10-26'", "DELETE FROM report_runs", "DELETE FROM report_deliveries", "UPDATE report_delivery_attempts SET outcome = 'SENT'", "DELETE FROM report_schedules"]) {
     await assert.rejects(db.execute(sql), (e) => guardViolation(e) === "append_only", sql);
   }

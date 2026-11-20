@@ -21,10 +21,9 @@ import {
 } from "@workfolio/shared";
 import type { AuthContext } from "../auth/auth.service.js";
 import { POLICY } from "../common/policy.js";
-import { scopeSql } from "../common/scope.js";
+import { assertTeamReadable, scopeSql, teamFilterSql } from "../common/scope.js";
 import { DATABASE } from "../database/database.module.js";
-import { EmployeesService } from "../employees/employees.service.js";
-import { ACTIVE_EMPLOYEE, SESSION_COLUMNS, withBreaks } from "./sessions.js";
+import { ACTIVE_EMPLOYEE, rangeSessions, scopedEmployees, SESSION_COLUMNS, withBreaks } from "./sessions.js";
 import { orgTimesheetXlsx, timesheetXlsx } from "./timesheet-xlsx.js";
 
 /** Read-only timesheets computed on request from sessions (corrections included once approved). */
@@ -33,7 +32,6 @@ export class TimesheetService {
   constructor(
     @Inject(DATABASE) private readonly db: DatabaseClient,
     @Inject(POLICY) private readonly policy: AttendancePolicy,
-    private readonly employees: EmployeesService,
   ) {}
 
   async forEmployee(employee: EmployeeRef, from: string, to: string): Promise<TimesheetResponse> {
@@ -95,45 +93,25 @@ export class TimesheetService {
     from: string,
     to: string,
     format: ExportFormat,
-    opts: { q?: string; includeInactive: boolean; caller?: AuthContext },
+    opts: { q?: string; includeInactive: boolean; caller?: AuthContext; teamId?: string },
   ): Promise<{ body: string | Buffer; rows: number }> {
     // Team heads: only their teams' members (W41). The scope's one `?` is bound as ?3.
+    if (opts.caller) await assertTeamReadable(this.db, opts.caller, "attendance:read-all", opts.teamId);
     const scope = opts.caller ? scopeSql(opts.caller, "attendance:read-all", "p.id") : { sql: "", args: [] };
+    const team = teamFilterSql(opts.teamId, "p.id"); // bound as ?4 (after the scope's ?3, or alone)
     const like = opts.q ? `%${opts.q.replace(/[\\%_]/g, (c) => `\\${c}`)}%` : null;
-    // A day of slack on each side covers every UTC offset; rows are then kept by each employee's local date.
-    const window = [`${addDays(from, -1)}T00:00:00.000Z`, `${addDays(to, 2)}T00:00:00.000Z`];
-    const [emps, sessions, sums] = await this.db.batch(
-      [
-        {
-          sql: `SELECT p.id, p.full_name, p.employee_code, p.timezone FROM employee_profiles p JOIN users u ON u.id = p.user_id
-                WHERE (?1 = 1 OR (${ACTIVE_EMPLOYEE}))
-                  AND (?2 IS NULL OR p.full_name LIKE ?2 ESCAPE '\\' OR u.email LIKE ?2 ESCAPE '\\' OR p.employee_code LIKE ?2 ESCAPE '\\')${scope.sql.replace("?", "?3")}
-                ORDER BY p.employee_code, p.id`,
-          args: [opts.includeInactive ? 1 : 0, like, ...scope.args],
-        },
-        { sql: `SELECT ${SESSION_COLUMNS} FROM attendance_sessions s WHERE s.clock_in_at >= ? AND s.clock_in_at < ?`, args: window },
-        {
-          sql: `SELECT attendance_session_id AS id,
-                  coalesce(sum(CASE WHEN kind = 'ACTIVE' THEN active_seconds END), 0) AS active,
-                  coalesce(sum(CASE WHEN kind = 'IDLE' THEN idle_seconds END), 0) AS idle
-                FROM activity_intervals WHERE attendance_session_id IN
-                  (SELECT id FROM attendance_sessions WHERE clock_in_at >= ? AND clock_in_at < ?)
-                GROUP BY attendance_session_id`,
-          args: window,
-        },
-      ],
-      "read",
-    );
-    const employees: EmployeeRef[] = emps!.rows.map((r) => ({ id: String(r.id), fullName: String(r.full_name), employeeCode: String(r.employee_code), timezone: String(r.timezone) }));
-    const wanted = new Set(employees.map((e) => e.id));
-    const kept = sessions!.rows.filter((r) => wanted.has(String(r.employee_id)));
-    // ponytail: withBreaks binds one parameter per shift; fine to ~30k shifts (SQLite's limit), batch it beyond that.
-    const all = await withBreaks(this.db, kept);
-    const ownerOf = new Map(kept.map((r) => [String(r.id), String(r.employee_id)]));
-    const activity = new Map<string, ShiftActivity>(sums!.rows.map((r) => [String(r.id), { activeMs: Number(r.active) * 1000, idleMs: Number(r.idle) * 1000 }]));
+    const { rows: emps } = await this.db.execute({
+      sql: `SELECT p.id, p.full_name, p.employee_code, p.timezone FROM employee_profiles p JOIN users u ON u.id = p.user_id
+            WHERE (?1 = 1 OR (${ACTIVE_EMPLOYEE}))
+              AND (?2 IS NULL OR p.full_name LIKE ?2 ESCAPE '\\' OR u.email LIKE ?2 ESCAPE '\\' OR p.employee_code LIKE ?2 ESCAPE '\\')${scope.sql.replace("?", "?3")}${team.sql.replace("?", scope.args.length ? "?4" : "?3")}
+            ORDER BY p.employee_code, p.id`,
+      args: [opts.includeInactive ? 1 : 0, like, ...scope.args, ...team.args],
+    });
+    const employees: EmployeeRef[] = emps.map((r) => ({ id: String(r.id), fullName: String(r.full_name), employeeCode: String(r.employee_code), timezone: String(r.timezone) }));
+    // Chunked per 500 employees and 5000 shifts: any head count and range stays within SQLite's parameter limit.
+    const { byEmployee, activity } = await rangeSessions(this.db, employees.map((e) => e.id), from, to);
     const perEmployee = employees.map((employee) => {
-      const mine = all.filter((x) => {
-        if (ownerOf.get(x.id) !== employee.id) return false;
+      const mine = (byEmployee.get(employee.id) ?? []).filter((x) => {
         const d = localDate(x.clockInAt, employee.timezone);
         return d >= from && d <= to;
       });
@@ -145,8 +123,9 @@ export class TimesheetService {
   }
 
   /** Admin listing: totals per employee for the range (each in the employee's own time zone). Team heads: their teams. */
-  async summary(query: ListEmployeesQuery & { from: string; to: string }, caller?: AuthContext): Promise<Paginated<TimesheetSummaryRow>> {
-    const page = await this.employees.list(query, caller, "attendance:read-all");
+  async summary(query: ListEmployeesQuery & { from: string; to: string; teamId?: string }, caller?: AuthContext): Promise<Paginated<TimesheetSummaryRow>> {
+    if (caller) await assertTeamReadable(this.db, caller, "attendance:read-all", query.teamId);
+    const page = { ...(await scopedEmployees(this.db, caller, query)), page: query.page, pageSize: query.pageSize };
     const ids = page.items.map((e) => e.id);
     if (!ids.length) return { ...page, items: [] };
     const marks = ids.map(() => "?").join(", ");

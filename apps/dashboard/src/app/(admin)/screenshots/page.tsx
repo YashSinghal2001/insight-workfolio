@@ -4,6 +4,7 @@ import { Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import {
   can,
+  SCREENSHOT_EXPORT_LIMITS,
   SCREENSHOT_MASK_SCALE,
   SCREENSHOT_MIME,
   type Paginated,
@@ -20,7 +21,9 @@ import { TimelapsePanel } from "@/components/timelapse-panel";
 import { Badge, Card, secondaryButtonClass } from "@/components/ui";
 import { api, apiBlob, ApiRequestError, errorMessage } from "@/lib/api";
 import { zonedTime } from "@/lib/zoned-time";
+import { downloadFile } from "../_components/download";
 import { EmployeePicker } from "../_components/employee-picker";
+import { IdleBadge, shotFrameClass } from "./idle";
 
 const PAGE_SIZE = 24;
 const TZ = Intl.DateTimeFormat().resolvedOptions().timeZone;
@@ -60,12 +63,13 @@ function useImage(id: string | null, variant: "thumbnail" | "full") {
   return state;
 }
 
-function Thumbnail({ item, onOpen }: { item: ScreenshotGalleryItem; onOpen: () => void }) {
+/** `select`: shown to Super Admins only (bulk export); only stored screenshots can be selected. */
+function Thumbnail({ item, onOpen, select }: { item: ScreenshotGalleryItem; onOpen: () => void; select?: { checked: boolean; disabled: boolean; onChange: (on: boolean) => void } }) {
   const zone = item.employee.timezone;
   const { url, error } = useImage(item.uploadStatus === "STORED" ? item.id : null, "thumbnail");
   const [label, ok] = STATUS[item.uploadStatus];
   return (
-    <li className="overflow-hidden rounded-lg border border-border bg-surface">
+    <li className={shotFrameClass(item.idle)} data-idle={item.idle || undefined}>
       <button type="button" onClick={onOpen} disabled={item.uploadStatus !== "STORED"} className="block aspect-video w-full bg-background text-xs text-muted disabled:cursor-default" aria-label={`Open screenshot of ${item.employee.fullName} at ${captured(item.capturedAt, zone)}`}>
         {/* eslint-disable-next-line @next/next/no-img-element -- next/image would proxy and cache the screenshot; blob URLs only */}
         {item.uploadStatus !== "STORED" ? label : url ? <img src={url} alt="" className="h-full w-full object-cover object-top" /> : error ? <span className="text-red-700 dark:text-red-300">{error}</span> : "Loading…"}
@@ -73,6 +77,17 @@ function Thumbnail({ item, onOpen }: { item: ScreenshotGalleryItem; onOpen: () =
       <div className="flex flex-col gap-1 px-3 py-2 text-xs">
         <span className="font-medium">{item.employee.fullName} <span className="text-muted">({item.employee.employeeCode})</span></span>
         <span className="tabular-nums text-muted">{captured(item.capturedAt, zone)}</span>
+        {(item.idle || (select && item.uploadStatus === "STORED")) && (
+          <span className="flex items-center justify-between gap-2">
+            <IdleBadge idle={item.idle} />
+            {select && item.uploadStatus === "STORED" && (
+              <label className="ml-auto flex items-center gap-1.5">
+                <input type="checkbox" checked={select.checked} disabled={select.disabled && !select.checked} onChange={(e) => select.onChange(e.target.checked)} aria-label={`Select screenshot of ${item.employee.fullName} at ${captured(item.capturedAt, zone)}`} />
+                Select
+              </label>
+            )}
+          </span>
+        )}
         <span><Badge ok={ok}>{label}</Badge> <span className="text-muted">{item.width}×{item.height} · {Math.round(item.fileSizeBytes / 1024)} KB{item.maskCount ? ` · ${item.maskCount} masked area(s)` : ""}</span>{item.blurred && <> <BlurredBadge /></>}</span>
       </div>
     </li>
@@ -107,7 +122,7 @@ function Viewer({ item, canDelete, onClose, onDeleted }: { item: ScreenshotGalle
   return (
     <dialog ref={ref} onClose={(e) => e.target === ref.current && onClose()} aria-label={`Screenshot of ${item.employee.fullName}`} className="m-auto max-h-[95vh] w-[min(1200px,95vw)] rounded-lg border border-border bg-surface p-0 text-foreground backdrop:bg-black/70">
       <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border px-4 py-2 text-sm">
-        <span><strong>{item.employee.fullName}</strong> · {captured(item.capturedAt, zone)} · {item.width}×{item.height}{item.blurred && <> <BlurredBadge /></>}</span>
+        <span><strong>{item.employee.fullName}</strong> · {captured(item.capturedAt, zone)} · {item.width}×{item.height}{item.blurred && <> <BlurredBadge /></>} <IdleBadge idle={item.idle} /></span>
         <span className="flex flex-wrap gap-2">
           {canDelete && <Button variant="danger" onClick={() => setConfirming(true)}>Delete screenshot</Button>}
           <button type="button" onClick={() => ref.current?.close()} className={secondaryButtonClass} autoFocus>Close</button>
@@ -185,7 +200,19 @@ function Screenshots() {
   const [gallery, setGallery] = useState<Paginated<ScreenshotGalleryItem> | null>(null);
   const [overview, setOverview] = useState<ScreenshotOverview | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [open, setOpen] = useState<ScreenshotGalleryItem | null>(null);
+  // `seq` remounts the viewer on every open: reopening the same screenshot right after closing it (the dialog's close
+  // event is handled after the click) must show the dialog again and fetch (and log) the image again.
+  const [open, setOpenItem] = useState<ScreenshotGalleryItem | null>(null);
+  const [seq, setSeq] = useState(0);
+  const setOpen = (item: ScreenshotGalleryItem | null) => {
+    if (item) setSeq((n) => n + 1);
+    setOpenItem(item);
+  };
+  const [idleOnly, setIdleOnly] = useState(false);
+  // Bulk export (Super Admin): kept across pages and filters until exported or cleared.
+  const [selected, setSelected] = useState<ReadonlySet<string>>(new Set());
+  const [exporting, setExporting] = useState(false);
+  const [exportError, setExportError] = useState<string | null>(null);
   const { auth } = useAuth();
   const canDelete = auth.status === "authenticated" && can(auth.me.user, "screenshots:delete");
   // The organisation policy in force (on/off, interval). null = not loaded or not readable; then no state is claimed.
@@ -194,7 +221,7 @@ function Screenshots() {
 
   useEffect(() => {
     let active = true;
-    const q = `from=${range.from}&to=${range.to}&tz=${encodeURIComponent(TZ)}${employeeId ? `&employeeId=${employeeId}` : ""}`;
+    const q = `from=${range.from}&to=${range.to}&tz=${encodeURIComponent(TZ)}${employeeId ? `&employeeId=${employeeId}` : ""}${idleOnly ? "&idle=true" : ""}`;
     Promise.all([
       api<Paginated<ScreenshotGalleryItem>>(`/screenshots/gallery?${q}&page=${page}&pageSize=${PAGE_SIZE}`),
       api<ScreenshotOverview>(`/screenshots/overview?${q}`),
@@ -205,18 +232,41 @@ function Screenshots() {
     return () => {
       active = false;
     };
-  }, [employeeId, range, page, retry]);
+  }, [employeeId, range, page, retry, idleOnly]);
 
   const reset = () => (setGallery(null), setOverview(null), setPage(1));
   const pick = useCallback((id: string) => (setGallery(null), setOverview(null), setPage(1), setEmployeeId(id)), []);
   const pages = gallery ? Math.max(1, Math.ceil(gallery.total / gallery.pageSize)) : 1;
   const r = overview?.retention;
+  const full = selected.size >= SCREENSHOT_EXPORT_LIMITS.maxItems;
+  const toggle = (id: string, on: boolean) =>
+    setSelected((s) => {
+      const next = new Set(s);
+      if (on && next.size < SCREENSHOT_EXPORT_LIMITS.maxItems) next.add(id);
+      else next.delete(id);
+      return next;
+    });
+  const stored = gallery?.items.filter((i) => i.uploadStatus === "STORED") ?? [];
+  const exportSelected = async () => {
+    setExporting(true);
+    setExportError(null);
+    try {
+      await downloadFile("/screenshots/export", `screenshots-${new Date().toISOString().slice(0, 10)}.zip`, { method: "POST", body: { ids: [...selected] } });
+      setOk(`Exported ${selected.size} screenshot(s). Each one is recorded in its access log, and the export in the audit log.`);
+      setSelected(new Set());
+    } catch (err) {
+      // A non-API error here is a dropped connection: the server aborts a ZIP it cannot finish, so nothing was saved.
+      setExportError(err instanceof ApiRequestError ? err.message : "The download was interrupted and the ZIP is incomplete, so it was not saved. Try again, or select fewer screenshots.");
+    } finally {
+      setExporting(false);
+    }
+  };
 
   return (
     <div className="mx-auto flex max-w-6xl flex-col gap-6">
       <PageHeader
         title="Screenshots"
-        description={
+        about={
           <>
             Screenshots of employees&apos; main screens, taken only while clocked in, not on a break, after they acknowledged the screenshot
             notice. They may contain personal or sensitive information. Only the privacy masks set in Settings are blacked out, on the employee&apos;s computer
@@ -231,7 +281,23 @@ function Screenshots() {
       <div className="flex flex-wrap items-end gap-3">
         <EmployeePicker value={employeeId} onChange={pick} allLabel="All employees" />
         <RangePicker value={range} maxDays={31} timeZone={TZ} onChange={(x) => (reset(), setRange(x))} />
+        <button type="button" aria-pressed={idleOnly} onClick={() => (reset(), setIdleOnly((v) => !v))} className={`${secondaryButtonClass} ${idleOnly ? "border-danger text-danger" : ""}`}>
+          Idle only
+        </button>
       </div>
+      <p className="text-xs text-muted">Screenshots taken while the employee was idle (no keyboard or mouse input for the idle threshold) have a red border and an &quot;Idle&quot; label.</p>
+
+      {canDelete && (
+        <div role="group" aria-label="Export screenshots" className="flex flex-wrap items-center gap-2 text-sm">
+          <button type="button" className={secondaryButtonClass} disabled={!stored.length || full} onClick={() => stored.forEach((i) => toggle(i.id, true))}>Select all on this page</button>
+          <button type="button" className={secondaryButtonClass} disabled={!selected.size} onClick={() => setSelected(new Set())}>Clear selection</button>
+          <Button onClick={exportSelected} disabled={!selected.size || exporting}>{exporting ? "Exporting…" : `Export ${selected.size} as ZIP`}</Button>
+          <span className="text-xs text-muted" aria-live="polite">
+            {selected.size} selected{full ? ` (limit ${SCREENSHOT_EXPORT_LIMITS.maxItems})` : ""}. Super Admin only; every exported screenshot is logged.
+          </span>
+          {exportError && <p role="alert" className="w-full text-xs font-medium text-danger">Export failed: {exportError}</p>}
+        </div>
+      )}
 
       <SuccessNotice message={ok} onDismiss={() => setOk(null)} />
       {error && <ErrorState message={error} onRetry={() => setRetry((n) => n + 1)} />}
@@ -281,10 +347,17 @@ function Screenshots() {
       {gallery && (
         <section aria-label="Screenshot gallery" className="flex flex-col gap-3">
           {gallery.items.length === 0 ? (
-            <EmptyState title="No screenshots in this range." />
+            <EmptyState title={idleOnly ? "No idle screenshots in this range." : "No screenshots in this range."} />
           ) : (
             <ul className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-              {gallery.items.map((item) => <Thumbnail key={item.id} item={item} onOpen={() => setOpen(item)} />)}
+              {gallery.items.map((item) => (
+                <Thumbnail
+                  key={item.id}
+                  item={item}
+                  onOpen={() => setOpen(item)}
+                  select={canDelete ? { checked: selected.has(item.id), disabled: full, onChange: (on) => toggle(item.id, on) } : undefined}
+                />
+              ))}
             </ul>
           )}
           <div className="flex items-center gap-3 text-sm">
@@ -297,6 +370,7 @@ function Screenshots() {
 
       {open && (
         <Viewer
+          key={seq}
           item={open}
           canDelete={canDelete}
           onClose={() => setOpen(null)}

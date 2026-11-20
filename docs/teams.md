@@ -88,7 +88,10 @@ Dashboard: **People → Teams** (`/teams`), including the per-team productivity 
 ## Dashboard (W41/F09)
 
 Team heads get a **My team** section in the `/my` navigation (only when `/auth/me` returns `teamHead: true`):
-`/my/team` (members, today's counts), `/my/team/attendance` (counts for a date + live status),
+`/my/team` (members, today's counts), `/my/team/attendance` (counts for a date, live status with "Last seen" from the device's last contact (Online only
+when the API says `online: true`), Late arrivals for the 7 days ending at the date (`/attendance/late`) and Missing
+clock-outs (`/attendance/missing-clock-outs`), read-only; all with `teamId` of a team they head, picked from
+`/teams/productivity` when they head several),
 `/my/team/timesheets` (+ CSV/XLSX export), `/my/team/screenshots` (gallery + timelapse per member),
 `/my/team/leave` (approve/reject). They never enter the admin layout. Browser check:
 `apps/dashboard/scripts/verify-teamhead.mjs`.

@@ -1,6 +1,6 @@
 import type { Blob } from "node:buffer";
 import type Stream from "node:stream";
-import { TIMESHEET_CSV_COLUMNS, TIMESHEET_CSV_FORMAT, timesheetSummary, type Cell, type EmployeeRef } from "@workfolio/shared";
+import { MONTHLY_EXPORT_LEGEND, TIMESHEET_CSV_COLUMNS, TIMESHEET_CSV_FORMAT, timesheetSummary, type Cell, type EmployeeRef } from "@workfolio/shared";
 import writeExcelFile, { type CellObject, type Feature, type SheetData } from "write-excel-file/node";
 import { getCellAddress, getOrderOfSiblings, getSelfClosingTagMarkup, insertElementMarkupAccordingToOrderOfSiblings } from "write-excel-file/utility";
 
@@ -103,4 +103,27 @@ export async function orgTimesheetXlsx(perEmployee: { employee: EmployeeRef; row
     ],
     { features: [autoFilter(rows.length, TIMESHEET_CSV_COLUMNS.length - 1)] },
   ).toBuffer();
+}
+
+/**
+ * Monthly attendance (GET /attendance/monthly/export): "Attendance" (one row per employee, one column per local
+ * day, then totals; numbers as numbers, everything else text) and "Legend" (the day codes).
+ */
+export async function monthlyAttendanceXlsx(month: string, header: string[], rows: Cell[][], generatedAt = new Date()): Promise<Buffer> {
+  const text = (v: string) => ({ value: v, type: String, format: "@" });
+  const sheet: SheetData = [
+    header.map((v) => ({ value: v, type: String, ...HEADER })),
+    ...rows.map((r) => r.map((v) => cell(typeof v === "number" ? "number" : "text", v))),
+  ];
+  const legend: SheetData = [
+    ["Code", "Meaning"].map((v) => ({ value: v, type: String, ...HEADER })),
+    ...MONTHLY_EXPORT_LEGEND.map(([code, meaning]) => [text(code), text(meaning)]),
+    [null],
+    [text("Month"), text(`${month} (each employee's own time zone)`)],
+    [text("Generated (UTC)"), text(generatedAt.toISOString())],
+  ];
+  return writeExcelFile([
+    { data: sheet, sheet: "Attendance", columns: header.map((_, i) => ({ width: i === 1 ? 24 : i === 2 ? 18 : 13 })), stickyRowsCount: 1 },
+    { data: legend, sheet: "Legend", columns: [{ width: 16 }, { width: 70 }] },
+  ]).toBuffer();
 }

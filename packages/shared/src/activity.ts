@@ -333,6 +333,7 @@ export const activityOverviewQuerySchema = z
     from: z.iso.date(),
     to: z.iso.date(),
     q: z.string().trim().max(100).optional(),
+    teamId: z.uuid().optional(),
     page: z.coerce.number().int().min(1).max(10_000).default(1),
     pageSize: z.coerce.number().int().min(1).max(100).default(20),
   })

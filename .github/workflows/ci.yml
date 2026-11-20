@@ -82,6 +82,8 @@ jobs:
           pnpm --filter @workfolio/desktop exec eslint src test
       - name: Typecheck
         run: pnpm -r typecheck
+      - name: Dashboard unit tests
+        run: pnpm --filter @workfolio/dashboard test:unit
 
       - name: Test packages/shared
         run: pnpm --filter @workfolio/shared test

@@ -7,6 +7,7 @@ import {
   screenshotBlurOverrideSchema,
   screenshotContentQuerySchema,
   screenshotDeleteSchema,
+  screenshotExportSchema,
   screenshotGallerySchema,
   screenshotQuerySchema,
   screenshotRegisterSchema,
@@ -19,6 +20,7 @@ import {
   type ScreenshotRegisterRequest,
   type ScreenshotSettingsInput,
 } from "@workfolio/shared";
+import { Readable } from "node:stream";
 import type { Request, Response } from "express";
 import { CurrentUser, RequirePermission, TeamScoped } from "../auth/auth.guard.js";
 import type { AuthContext } from "../auth/auth.service.js";
@@ -113,6 +115,30 @@ export class ScreenshotsController {
   @RequirePermission("screenshots:delete")
   retentionRun(@CurrentUser() user: AuthContext, @Body(new ZodPipe(retentionRunSchema)) _body: { confirm: true }) {
     return this.screenshots.retentionRun(user);
+  }
+
+  /**
+   * Super Admin (screenshots:delete identity): a ZIP of up to 200 stored screenshots, streamed. Each file is written to
+   * the screenshot access log and the export to the audit log before the first byte; entries are named by employee
+   * code, capture time and id only.
+   */
+  @Post("export")
+  @HttpCode(200)
+  @RequirePermission("screenshots:delete")
+  async export(@CurrentUser() user: AuthContext, @Body(new ZodPipe(screenshotExportSchema)) body: { ids: string[] }, @Res({ passthrough: true }) res: Response) {
+    const { stream } = await this.screenshots.exportZip(user, body.ids);
+    res.setHeader("cache-control", "no-store, private, max-age=0");
+    res.setHeader("pragma", "no-cache");
+    res.setHeader("x-content-type-options", "nosniff");
+    // A failure after the first byte must abort the connection (a clean end would look like a complete ZIP); before
+    // it, a 502 like /content. The service has already logged the cause.
+    return new StreamableFile(Readable.from(stream), { type: "application/zip", disposition: `attachment; filename="screenshots-${new Date().toISOString().slice(0, 10)}.zip"` })
+      .setErrorLogger(() => {})
+      .setErrorHandler((err, r) => {
+        const out = r as Response;
+        if (out.headersSent) out.destroy(err);
+        else out.status(502).json({ statusCode: 502, error: "Bad Gateway", message: err.message, path: "/api/v1/screenshots/export", timestamp: new Date().toISOString() });
+      });
   }
 
   /** Metadata of one screenshot (admins also get its access log). */

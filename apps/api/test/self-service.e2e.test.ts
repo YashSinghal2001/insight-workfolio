@@ -102,7 +102,8 @@ before(async () => {
   await attendance(a, [["CLOCK_IN", midnight - H], ["BREAK_START", midnight - 40 * M], ["BREAK_END", midnight - 25 * M], ["CLOCK_OUT", midnight + H]]);
   await upload(a, [active("Secret App", midnight - 20 * M, midnight + 10 * M)]);
   // B: an open shift (no clock-out) with no activity at all.
-  await attendance(b, [["CLOCK_IN", Date.now() - 2 * H]]);
+  // P7-11: two hours ago, but never before today's UTC midnight (the checks read "today").
+  await attendance(b, [["CLOCK_IN", Math.max(Date.now() - 2 * H, Date.parse(`${today}T00:00:00Z`))]]);
 });
 after(() => app.close());
 

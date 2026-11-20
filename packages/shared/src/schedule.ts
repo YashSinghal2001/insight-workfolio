@@ -58,6 +58,7 @@ export type DailyAttendanceStatus = (typeof DAILY_ATTENDANCE_STATUSES)[number];
 
 export const dailyAttendanceQuerySchema = z.object({
   date: z.iso.date(),
+  teamId: z.uuid().optional(),
   q: z.string().trim().max(100).optional(),
   page: z.coerce.number().int().min(1).max(10_000).default(1),
   pageSize: z.coerce.number().int().min(1).max(100).default(50),

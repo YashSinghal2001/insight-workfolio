@@ -127,7 +127,7 @@ export const historyQuerySchema = pageQuerySchema.extend({
 // ---- Admin overview summary -------------------------------------------------
 
 /** `date` (YYYY-MM-DD) is read as a local date in each employee's own time zone; omitted = each one's today. */
-export const attendanceSummaryQuerySchema = z.strictObject({ date: z.iso.date().optional() });
+export const attendanceSummaryQuerySchema = z.strictObject({ date: z.iso.date().optional(), teamId: z.uuid().optional() });
 export type AttendanceSummaryQuery = z.infer<typeof attendanceSummaryQuerySchema>;
 
 /**
@@ -174,6 +174,18 @@ export type LiveStatus = (typeof LIVE_STATUSES)[number];
 
 /** A device report older than this is not believed (the desktop reports every minute while running). */
 export const LIVE_STATUS_STALE_MS = 3 * 60_000;
+
+/** A device seen (any device-bound request; the desktop syncs every minute) within this long counts as online. */
+export const DEVICE_ONLINE_WINDOW_MS = 5 * 60_000;
+
+/** Overview freshness: the most recently seen registered device, and whether that was within DEVICE_ONLINE_WINDOW_MS. */
+export interface OverviewFreshness {
+  lastSeenAt: string | null;
+  online: boolean;
+}
+
+export const deviceOnline = (lastSeenAt: string | null, now = Date.now()): boolean =>
+  lastSeenAt !== null && now - Date.parse(lastSeenAt) <= DEVICE_ONLINE_WINDOW_MS;
 
 export interface DeviceActivityReport {
   state: DeviceActivityState;

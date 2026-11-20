@@ -162,7 +162,7 @@ try {
   await waitFor(`location.pathname !== "/login"`, "sign-in");
 
   // ---- Settings editor ----
-  await cdp("Page.navigate", { url: `${DASH}/settings` });
+  await cdp("Page.navigate", { url: `${DASH}/settings/screenshots` });
   await waitFor(`!!${form}`, "screenshot settings form");
   check("editor: 'Privacy masks' group with an explanation and 'No masks' state", await js(`${form}.querySelector('fieldset legend')?.textContent === 'Privacy masks' && ${form}.innerText.includes('No masks: the whole main screen is captured') && ${form}.innerText.includes('before')`));
   const add = `[...${form}.querySelectorAll('button')].find((b) => b.textContent === 'Add mask')`;
@@ -226,6 +226,8 @@ try {
   const cards = `[...document.querySelectorAll('section[aria-label="Screenshot gallery"] li')]`;
   await waitFor(`${cards}.length === 2 && ${cards}.every((li) => li.querySelector('img')?.complete && li.querySelector('img').naturalWidth > 0)`, "gallery thumbnails");
   check("gallery cards show '2 masked area(s)'", await js(`${cards}.every((li) => li.innerText.includes('2 masked area(s)'))`));
+  // The explanation sits in the page's "About this page" disclosure (closed by default): open it first.
+  await js("document.querySelectorAll('main details').forEach((d) => (d.open = true))");
   check("gallery explains that only configured masks are blacked out", (await js("document.body.innerText")).includes("Only the privacy masks set in Settings are blacked out"));
   await js(`${cards}[0].querySelector('button').click()`);
   await waitFor(`document.querySelector('dialog[open] img')?.complete && document.querySelector('dialog[open] img').naturalWidth === 1920`, "viewer image");

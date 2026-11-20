@@ -264,16 +264,17 @@ async function downloaded(ext) {
   return null;
 }
 
-const ADMIN_ROUTES = ["/", "/employees", "/employees/new", `/employees/${ana.id}`, "/attendance", "/attendance?view=daily", "/timesheets", `/timesheets/${ana.id}`, "/corrections", "/leave", "/activity", "/websites", "/screenshots", "/projects", "/reports", "/roles", "/audit", "/settings", "/settings/schedule", "/settings/labels", "/account"];
+const ADMIN_ROUTES = ["/", "/employees", "/employees/new", `/employees/${ana.id}`, "/attendance", "/attendance?view=daily", "/timesheets", `/timesheets/${ana.id}`, "/corrections", "/leave", "/activity", "/risk-users", "/websites", "/screenshots", "/projects", "/reports", "/roles", "/audit", "/settings", "/settings/schedule", "/settings/monitoring", "/settings/screenshots", "/settings/labels", "/settings/websites", "/settings/storage", "/settings/notifications", "/settings/leave-types", "/account"];
 const MY_ROUTES = ["/my", "/my/attendance", "/my/activity", "/my/websites", "/my/screenshots", "/my/projects", "/my/tasks", "/my/leave", "/my/reports", "/my/profile"];
-const RESPONSIVE_ADMIN = ["/", "/attendance?view=daily", "/timesheets", "/screenshots", "/settings/schedule", "/settings/labels", "/audit", `/employees/${ana.id}`];
+const RESPONSIVE_ADMIN = ["/", "/attendance?view=daily", "/timesheets", "/reports/scheduled", "/screenshots", "/settings/schedule", "/settings/monitoring", "/settings/screenshots", "/settings/notifications", "/settings/labels", "/audit", `/employees/${ana.id}`];
 const RESPONSIVE_MY = ["/my", "/my/attendance", "/my/leave", "/my/reports", "/my/profile"];
-const WIDTHS = [1440, 1280, 768, 390, 360];
+const WIDTHS = [1440, 1024, 768, 375, 360];
 const responsive = {};
 
 async function responsiveRoutes(routes, navId) {
   for (const w of WIDTHS) {
     await cdp("Emulation.setDeviceMetricsOverride", { width: w, height: 900, deviceScaleFactor: 1, mobile: w < 768 });
+    // Sidebar from 1024 px (lg); below it the Menu button opens a drawer.
     for (const path of routes) {
       const key = path.replace(ana.id, "[id]");
       let cell;
@@ -288,7 +289,7 @@ async function responsiveRoutes(routes, navId) {
           const culprits = await js(`[...document.querySelectorAll('body *')].filter((e) => { if (e.getBoundingClientRect().right <= ${w} + 1) return false; if (/absolute|fixed/.test(getComputedStyle(e).position)) return true; for (let a = e.parentElement; a && a !== document.body; a = a.parentElement) if (getComputedStyle(a).overflowX !== 'visible') return false; return true; }).filter((e, _, all) => !all.includes(e.parentElement)).slice(0, 3).map((e) => e.tagName.toLowerCase() + '.' + String(e.className).split(' ').slice(0, 4).join('.') + ' "' + e.textContent.trim().slice(0, 30) + '"').join(' ; ')`);
           issues.push(`scroll ${r.sw}>${r.iw} [${culprits}]`);
         }
-        if (w >= 768) {
+        if (w >= 1024) {
           if (!(await js(`(() => { const n = document.getElementById(${JSON.stringify(navId)}); const b = n?.getBoundingClientRect(); return !!n && getComputedStyle(n).display !== 'none' && b.width > 0 && b.left >= 0; })()`))) issues.push("sidebar hidden");
           if (await js(`(() => { const b = document.querySelector('button[aria-controls=${JSON.stringify(navId)}]'); return !!b && getComputedStyle(b).display !== 'none'; })()`)) issues.push("menu button shown");
         } else {
@@ -470,8 +471,14 @@ try {
     await js(`document.querySelectorAll('dialog[open]').forEach((d) => d.close())`);
     await go("/settings");
     await waitFor(`/In force now/.test(document.querySelector('main').innerText)`, "in-force summary");
-    await waitFor(`document.querySelectorAll('main input[name=retentionDays]').length === 2`, "retention inputs");
-    const retentionLocked = await js(`[...document.querySelectorAll('main input[name=retentionDays], main input[name=retentionApproved]')].map((i) => i.disabled).join()`);
+    // Retention lives on two settings sub-pages: activity (Monitoring & notices) and screenshots.
+    const locked = [];
+    for (const sub of ["/settings/monitoring", "/settings/screenshots"]) {
+      await go(sub);
+      await waitFor(`document.querySelectorAll('main input[name=retentionDays]').length === 1`, `retention input on ${sub}`);
+      locked.push(await js(`[...document.querySelectorAll('main input[name=retentionDays], main input[name=retentionApproved]')].map((i) => i.disabled).join()`));
+    }
+    const retentionLocked = locked.join();
     check(`roles: ${label} sees the retention inputs ${isSuper ? "enabled" : "disabled"} in Settings`, retentionLocked === Array(4).fill(String(!isSuper)).join(), retentionLocked);
     check(`roles: ${label} ${isSuper ? "is" : "is not"} offered the Roles link, the roles table and "Delete screenshot"; Settings shows what is in force`,
       rolesLink === isSuper && rolesPage && deleteOffered === isSuper, `link ${rolesLink}, page ${rolesPage}, delete ${deleteOffered}`);
@@ -480,6 +487,22 @@ try {
   // =========================== f. Workflows as Super Admin ======================================
   await signIn("ceo@example.com");
   await waitFor(`location.pathname === '/' && !!document.querySelector('nav[aria-label="Main"]')`, "super overview");
+
+  // Theme: light by default; the explicit Dark choice applies at once, survives a reload (pre-paint), and Light restores it.
+  const themeOf = () => js(`({ theme: document.documentElement.dataset.theme, bg: getComputedStyle(document.body).backgroundColor, pressed: document.querySelector('[data-testid="theme-toggle"]')?.getAttribute('aria-pressed') })`);
+  await js(`localStorage.removeItem('iw-theme')`);
+  await go("/");
+  const light = await themeOf();
+  await click(`document.querySelector('[data-testid="theme-toggle"]')`);
+  const dark = await themeOf();
+  await go("/attendance");
+  const reloaded = await themeOf();
+  await click(`document.querySelector('[data-testid="theme-toggle"]')`);
+  const back = await themeOf();
+  check("theme: light by default; Dark toggles, persists across reload, Light restores",
+    light.theme === "light" && light.pressed === "false" && dark.theme === "dark" && dark.pressed === "true" && dark.bg !== light.bg &&
+    reloaded.theme === "dark" && reloaded.pressed === "true" && back.theme === "light" && back.bg === light.bg && (await js(`localStorage.getItem('iw-theme')`)) === "light",
+    JSON.stringify({ light, dark, reloaded, back }));
 
   // Work schedule saved from the page: 11:00 + 15, every day. Applies from the next local day only.
   await go("/settings/schedule");
@@ -495,9 +518,11 @@ try {
   const sched = ok(await api("/settings/schedule", { cookie: superCookie }), "schedule");
   check("workflow: admin saves an enabled work schedule; history lists it", saved && sched.current.enabled && sched.current.expectedStart === "11:00" && sched.current.workdays === "1234567" && sched.history.length === 2, JSON.stringify(sched.current));
 
-  await go("/attendance?view=daily");
-  await js(setReact(`document.querySelector('main input[type=date]')`, D));
-  await waitFor(`document.querySelector('main input[type=date]').value === ${JSON.stringify(D)}`, "date set");
+  await go("/attendance?tab=daily");
+  // Daily follows the global date filter in the top bar (W2-ATTENDANCE-UI).
+  await waitFor(`!!document.querySelector('input[type=date][aria-label=Date]')`, "global date filter");
+  await js(setReact(`document.querySelector('input[type=date][aria-label=Date]')`, D));
+  await waitFor(`document.querySelector('input[type=date][aria-label=Date]').value === ${JSON.stringify(D)}`, "date set");
   await waitFor(`(document.querySelector('table[aria-label="Daily attendance"]')?.innerText ?? '').includes('Cara Leave')`, "daily table");
   const statusOf = (name) => js(`(() => { const r = [...document.querySelectorAll('table[aria-label="Daily attendance"] tbody tr')].find((x) => x.innerText.includes(${JSON.stringify(name)})); return r ? [...r.cells].map((c) => c.innerText.trim()) : null; })()`);
   const [anaRow, benRow, caraRow, samRow] = [await statusOf("Ana Kolkata"), await statusOf("Ben Utc"), await statusOf("Cara Leave"), await statusOf("Sam Super")];
@@ -585,17 +610,25 @@ try {
   const corrText = await text();
   check("workflow: admin sees Ana's correction request (Missing shift) in /corrections", /Ana Kolkata/.test(corrText) && /Missing shift/.test(corrText) && /Web app check: evening shift not recorded/.test(corrText));
 
-  // Overview stat cards vs. seeded data and the API.
+  // Overview stat cards vs. seeded data and the API (W2-OVERVIEW: the page reads /overview for the viewer's date).
   await go("/");
-  const summary = ok(await api("/attendance/summary", { cookie: superCookie }), "summary");
-  const todayDaily = ok(await api(`/attendance/daily?date=${todayUtc}&pageSize=1`, { cookie: superCookie }), "daily today");
+  const viewerDate = await js(`(() => { const d = new Date(); return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0"); })()`);
+  const ov = ok(await api(`/overview?date=${viewerDate}`, { cookie: superCookie }), "overview");
+  const summary = ov.kpis;
+  const todayDaily = ok(await api(`/attendance/daily?date=${viewerDate}&pageSize=1`, { cookie: superCookie }), "daily today");
+  // Independent of the aggregate: the existing summary endpoint for the same date.
+  const legacy = ok(await api(`/attendance/summary?date=${viewerDate}`, { cookie: superCookie }), "summary");
+  await tryWait(`[...document.querySelectorAll('main p')].some((p) => p.textContent.trim() === "Pending corrections")`, "overview cards");
   const cards = {};
   for (const l of ["Active employees", "Working now", "On a break", "Clocked out today", "Not clocked in today", "Screenshots stored today", "Pending leave requests", "Pending corrections", "Late today", "Absent today"]) cards[l] = await statCard(l);
   check("workflow: overview — Working now 1 (Ana), On a break 1 (Ben), 4 active employees, as seeded",
-    cards["Working now"]?.value === "1" && cards["On a break"]?.value === "1" && cards["Active employees"]?.value === "4" && summary.currentlyWorking === 1 && summary.onBreak === 1 && summary.totalActiveEmployees === 4, JSON.stringify(Object.fromEntries(Object.entries(cards).map(([k, v]) => [k, v?.value]))));
+    cards["Working now"]?.value === "1" && cards["On a break"]?.value === "1" && cards["Active employees"]?.value === "4" && summary.workingNow === 1 && summary.onBreak === 1 && summary.totalMembers === 4, JSON.stringify(Object.fromEntries(Object.entries(cards).map(([k, v]) => [k, v?.value]))));
   check("workflow: overview cards equal the API (clocked out, not clocked in, screenshots, pending leave, pending corrections)",
-    cards["Clocked out today"]?.value === String(summary.clockedOutToday) && cards["Not clocked in today"]?.value === String(summary.notClockedInToday) && cards["Screenshots stored today"]?.value === String(summary.screenshotsStoredToday) && cards["Pending leave requests"]?.value === String(summary.pendingLeaveCount) && cards["Pending corrections"]?.value === String(summary.pendingCorrectionCount) && summary.pendingCorrectionCount === 2,
-    JSON.stringify(summary));
+    cards["Clocked out today"]?.value === String(summary.clockedOut) && cards["Not clocked in today"]?.value === String(summary.notStarted) && cards["Screenshots stored today"]?.value === String(summary.screenshotsStored) && cards["Pending leave requests"]?.value === String(ov.pendingApprovals.leave) && cards["Pending corrections"]?.value === String(ov.pendingApprovals.corrections) && ov.pendingApprovals.corrections === 2,
+    JSON.stringify(ov.kpis));
+  check("workflow: overview cards equal /attendance/summary (independent cross-check of the aggregate)",
+    cards["Active employees"]?.value === String(legacy.totalActiveEmployees) && cards["Clocked out today"]?.value === String(legacy.clockedOutToday) && cards["Not clocked in today"]?.value === String(legacy.notClockedInToday) && cards["Screenshots stored today"]?.value === String(legacy.screenshotsStoredToday) && cards["Pending corrections"]?.value === String(legacy.pendingCorrectionCount),
+    JSON.stringify(legacy));
   check("workflow: 'Not clocked in today' is not labelled absent; Late/Absent come only from the enabled schedule (and match the daily view)",
     !/^absent/i.test(cards["Not clocked in today"]?.all ?? "absent") && /Not the same as absent/.test(cards["Not clocked in today"]?.all ?? "") && cards["Late today"]?.value === String(todayDaily.summary.LATE) && cards["Absent today"]?.value === String(todayDaily.summary.ABSENT),
     `${cards["Not clocked in today"]?.all?.replace(/\n/g, " | ")} · late ${cards["Late today"]?.value} absent ${cards["Absent today"]?.value}`);
@@ -614,7 +647,7 @@ try {
   await waitFor(`location.pathname === '/' && !!document.querySelector('nav[aria-label="Main"]')`, "super again");
   await responsiveRoutes(RESPONSIVE_ADMIN, "admin-nav");
   const bad = Object.entries(responsive).flatMap(([r, ws]) => Object.entries(ws).filter(([, v]) => v !== "ok").map(([w, v]) => `${r}@${w}: ${v}`));
-  check(`responsive: ${RESPONSIVE_ADMIN.length + RESPONSIVE_MY.length} routes × ${WIDTHS.join("/")} — no horizontal page scroll; sidebar visible ≥768; Menu opens a drawer with reachable links at 390/360`, bad.length === 0, bad.join(" || "));
+  check(`responsive: ${RESPONSIVE_ADMIN.length + RESPONSIVE_MY.length} routes × ${WIDTHS.join("/")} — no horizontal page scroll; sidebar visible ≥1024; Menu opens a drawer with reachable links at 768/375/360`, bad.length === 0, bad.join(" || "));
 } catch (err) {
   check("run aborted", false, String(err?.stack ?? err?.message ?? err).split("\n").slice(0, 3).join(" "));
   await shot("failure.png").catch(() => undefined);

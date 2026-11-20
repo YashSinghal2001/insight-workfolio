@@ -198,6 +198,22 @@ workfolio-monitor.timer (5 min)    ──▶ monitor.sh   ──▶ webhook / co
 `deploy.sh <ref> --migrate` backs up and migrates first; `deploy.sh --rollback` switches `current` back to the
 previous release (schema stays; restore a backup for a data rollback). Three releases are kept.
 
+### Which commit is deployed
+
+- `curl -s https://api.<domain>/api/v1/health` → `{"status":"ok",…,"version":"0.1.0","commit":"<sha>"}`. The dashboard
+  shows the same on **My account** ("API v0.1.0 (abc1234)"). `commit` is `WORKFOLIO_BUILD_COMMIT`, which
+  `deploy.sh` writes to `<release>/release.env`; `workfolio-api.service` loads it with
+  `EnvironmentFile=-/opt/workfolio/current/release.env`, so a rollback reports the older commit. It is `null` for
+  releases built before this change, and until `install-vps.sh` has been re-run once to install the updated unit.
+  Only a 7–40 character lowercase hex id is echoed; anything else is reported as `null`.
+- Deploy record on the VPS: `deploy.sh` appends one line per activation to `/opt/workfolio/deploys.log`:
+  `2026-11-20T10:00:00Z deploy <sha> ref=origin/main migrate=1 by=workfolio` (rollback:
+  `… rollback <sha> ref=<release dir> migrate=0 …`). Copy that line into `docs/releases/` with the migrations applied
+  (`deploy.sh` prints them) and tag `prod-YYYY-MM-DD[-n]` at `<sha>`. Format: one table row per deploy in
+  [`docs/releases/DEPLOY-RECORD-TEMPLATE.md`](releases/DEPLOY-RECORD-TEMPLATE.md) (date, commit, tag, migrations,
+  operator, smoke result). Checklist, migration dry run on a copy, smoke tests and rollback for the product-parity
+  release: [`docs/status/PRODUCTION-READINESS.md`](status/PRODUCTION-READINESS.md).
+
 ### What is monitored and how alerts reach people
 
 See `deploy/README.md` "Monitoring and alerts": the external `/health` poller is the outage alarm; the on-VPS

@@ -44,7 +44,7 @@ export default function TeamsPage() {
     <div className="mx-auto flex max-w-5xl flex-col gap-6">
       <PageHeader
         title="Teams"
-        description="Group employees into teams. An employee can be in several teams. A team head sees only the members of the active teams they head: their employee records, attendance, activity, screenshots and timelapses. Deactivating a team ends its head's access at once."
+        about="Group employees into teams. An employee can be in several teams. A team head sees only the members of the active teams they head: their employee records, attendance, activity, screenshots and timelapses. Deactivating a team ends its head's access at once."
       />
       <SuccessNotice message={ok} onDismiss={() => setOk(null)} />
 

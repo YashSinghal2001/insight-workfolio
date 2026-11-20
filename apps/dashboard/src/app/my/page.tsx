@@ -20,12 +20,13 @@ import {
   type WebsiteUsageResponse,
 } from "@workfolio/shared";
 import { apiBlob } from "@/lib/api";
-import { Card, Notice } from "@/components/ui";
+import { Card } from "@/components/ui";
 import { EmptyState, PageHeader, StatCard } from "@/components/kit";
 import { UpdatedAt, dayLabel, timeIn, useApi, useMe } from "@/components/my-ui";
 import { CategoryTotals } from "./_components/categories";
 import { DesktopDownloads } from "./_components/desktop-downloads";
 import { LiveStatusLine } from "./_components/live-status";
+import { MissingClockOutBanner } from "./_components/missing-clock-out-banner";
 import { Loaded } from "./_components/states";
 
 const STATE_LABEL: Record<AttendanceCurrent["state"], string> = { CLOCKED_IN: "Clocked in", ON_BREAK: "On a break", CLOCKED_OUT: "Clocked out" };
@@ -58,10 +59,12 @@ export default function MyDashboard() {
         <Loaded load={status.load} reload={status.reload} label="your status" rows={1}>
           {(s) => <LiveStatusLine status={s} tz={me.timezone} />}
         </Loaded>
-        {current.load.state === "ready" && current.load.data.missingClockOut && (
-          <Notice tone="warning">
-            Your shift from an earlier day is still open: it looks like you forgot to clock out. <Link href="/my/attendance#request-correction" className="underline">Request a correction</Link> to add the clock-out time.
-          </Notice>
+        {current.load.state === "ready" && (
+          <MissingClockOutBanner
+            current={current.load.data}
+            tz={me.timezone}
+            action={<Link href="/my/attendance?correct=missing-clock-out#request-correction" className="font-medium underline">Request a correction</Link>}
+          />
         )}
       </section>
 
