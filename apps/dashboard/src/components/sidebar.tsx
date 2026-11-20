@@ -48,7 +48,13 @@ export const ADMIN_NAV: readonly NavSection[] = [
 export const SETTINGS_NAV = [
   { label: "General", href: "/settings" },
   { label: "Work schedule", href: "/settings/schedule" },
+  { label: "Monitoring & notices", href: "/settings/monitoring" },
+  { label: "Screenshots & masks", href: "/settings/screenshots" },
   { label: "App labels", href: "/settings/labels" },
+  { label: "Website policy", href: "/settings/websites" },
+  { label: "Storage", href: "/settings/storage" },
+  { label: "Email & notifications", href: "/settings/notifications" },
+  { label: "Leave types", href: "/settings/leave-types" },
 ] as const;
 
 /** The admin sidebar (`nav#admin-nav[aria-label="Main"]`). Without props it is the desktop sidebar only. */
