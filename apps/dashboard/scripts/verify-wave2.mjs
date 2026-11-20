@@ -334,16 +334,16 @@ try {
   // ---- W18: daily attendance shows HOLIDAY, not ABSENT ------------------------------------------------
   {
     const row = (name) => `([...document.querySelectorAll('main table tr')].find((r) => r.innerText.includes(${JSON.stringify(name)}))?.innerText ?? "")`;
-    await visit("/attendance?view=daily", `!!document.querySelector('main input[type=date]')`, "daily view");
-    await setValue("main input[type=date]", D);
+    await visit("/attendance?tab=daily", `!!document.querySelector('input[type=date][aria-label=Date]')`, "daily view");
+    await setValue("input[type=date][aria-label=Date]", D);
     await expect(`W18 ${D} (holiday): Ben and Hana show Holiday`, `${row(ben.name)}.includes("Holiday") && ${row(hana.name)}.includes("Holiday")`);
     const hol = await js(`[...document.querySelectorAll('main table tr')].map((r) => r.innerText).join("\\n")`);
     check(`W18 ${D}: nobody Absent on the holiday`, !/Absent/.test(hol), hol.replace(/\s+/g, " ").slice(0, 300));
     await shot("w18-attendance-holiday.png");
-    await setValue("main input[type=date]", D0);
+    await setValue("input[type=date][aria-label=Date]", D0);
     await expect(`W18 ${D0} (ordinary workday, no clock-in): Hana shows Absent`, `${row(hana.name)}.includes("Absent")`);
     await shot("w18-attendance-absent-contrast.png");
-    await pageProblems("/attendance?view=daily");
+    await pageProblems("/attendance?tab=daily");
   }
 
   // ---- W35/W36: leave types and balances ---------------------------------------------------------------

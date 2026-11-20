@@ -45,7 +45,7 @@ export default function CorrectionsPage() {
     <div className="mx-auto flex max-w-4xl flex-col gap-6">
       <PageHeader
         title="Corrections"
-        about="Employees request changes to their attendance. Approving applies the change and records the before and after values; the original device events are never altered. You cannot review your own requests."
+        about="Employees request changes to their attendance, and administrators can file a request for an employee (for example a missing clock-out). Approving applies the change and records the before and after values; the original device events are never altered. Whoever filed a request cannot review it: a different administrator must."
       />
       <Tabs label="Status" tabs={FILTERS} value={filter} idPrefix="corr" onChange={(f) => (setData(null), setPage(1), setFilter(f))}>
         <div className="flex flex-col gap-4">
