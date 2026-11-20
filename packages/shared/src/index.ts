@@ -22,3 +22,4 @@ export * from "./notifications.js";
 export * from "./attendance-reports.js";
 export * from "./attendance-anomalies.js";
 export * from "./employee-analytics.js";
+export * from "./summary-report.js";

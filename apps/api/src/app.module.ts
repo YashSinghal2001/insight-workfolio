@@ -21,6 +21,8 @@ import { CorrectionsController } from "./attendance/corrections.controller.js";
 import { CorrectionsService } from "./attendance/corrections.service.js";
 import { TimesheetService } from "./attendance/timesheet.service.js";
 import { MonthlyService } from "./attendance/monthly.service.js";
+import { SummaryReportController } from "./attendance/summary-report.controller.js";
+import { SummaryReportService } from "./attendance/summary-report.service.js";
 import { EmployeeLocks } from "./common/employee-locks.js";
 import { policyProvider } from "./common/policy.js";
 import { AuthController } from "./auth/auth.controller.js";
@@ -108,7 +110,7 @@ import { NotificationRulesService } from "./notifications/notification-rules.ser
     }),
     DatabaseModule,
   ],
-  controllers: [AlertsController, HealthController, AuthController, EmployeesController, DevicesController, AttendanceController, CorrectionsController, ActivityController, MonitoringSettingsController, ScreenshotsController, ScreenshotSettingsController, TimelapseController, LeaveController, HolidaysController, TeamsController, ProjectsController, TaskTimeController, ReportsController, WebsitesController, RolesController, AuditController, ScheduleSettingsController, DailyAttendanceController, EmployeeTrackingController, GoogleDriveOAuthController, OneDriveController, DesktopUpdatesController, NotificationsController, AnomaliesController, EmployeeAnalyticsController],
+  controllers: [AlertsController, HealthController, AuthController, EmployeesController, DevicesController, AttendanceController, CorrectionsController, ActivityController, MonitoringSettingsController, ScreenshotsController, ScreenshotSettingsController, TimelapseController, LeaveController, HolidaysController, TeamsController, ProjectsController, TaskTimeController, ReportsController, WebsitesController, RolesController, AuditController, ScheduleSettingsController, DailyAttendanceController, EmployeeTrackingController, GoogleDriveOAuthController, OneDriveController, DesktopUpdatesController, NotificationsController, AnomaliesController, EmployeeAnalyticsController, SummaryReportController],
   providers: [
     AlertsService,
     AuthService,
@@ -118,6 +120,7 @@ import { NotificationRulesService } from "./notifications/notification-rules.ser
     AnomaliesService,
     TimesheetService,
     MonthlyService,
+    SummaryReportService,
     CorrectionsService,
     EmployeeLocks,
     policyProvider,
