@@ -60,6 +60,7 @@ const ROUTES = {
   "/settings/leave-types": ["Checking your session"],
   "/desktop-updates": ["Checking your session"],
   "/screenshots": ["Checking your session"],
+  "/timeline": ["Checking your session"],
   "/employees/00000000-0000-4000-8000-000000000000": ["Checking your session"],
 };
 

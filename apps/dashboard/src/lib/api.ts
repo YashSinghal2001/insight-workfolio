@@ -81,7 +81,7 @@ export async function apiBlob(path: string, expectedType: string): Promise<Blob>
 }
 
 /** Raw authenticated response (file downloads such as the timesheet export): same refresh and errors as api(). */
-export const apiResponse = (path: string) => request(path, "GET", undefined);
+export const apiResponse = (path: string, { method = "GET", body }: { method?: string; body?: unknown } = {}) => request(path, method, body);
 
 export const errorMessage = (err: unknown) =>
   err instanceof ApiRequestError ? err.message : "Could not reach the API. Check your connection and try again.";
