@@ -190,3 +190,41 @@ test("xlsx: headers, values equal the JSON, totals row, text never a formula, no
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("daily export: tab rows, minutes equal the timesheet, CSV and XLSX, scope, validation", async () => {
+  const D = "date=2026-03-02";
+  // /attendance/daily lists people only from the local date their profile was created.
+  await db.execute("UPDATE employee_profiles SET created_at = '2023-01-01T00:00:00.000Z'");
+  for (const q of ["", `?${D}`, `?${D}&tab=all`, `?date=2026-3-2&tab=worked`, `?${D}&tab=worked&format=pdf`, `?${D}&tab=worked&teamId=nope`]) {
+    assert.equal((await api(`/attendance/daily/export${q}`, { cookie: admin })).status, 400, q);
+  }
+  const csv = await api(`/attendance/daily/export?${D}&tab=worked&teamId=${alpha}`, { cookie: admin });
+  assert.equal(csv.status, 200, csv.text);
+  assert.equal(csv.headers.get("content-disposition"), 'attachment; filename="daily-attendance_worked_2026-03-02.csv"');
+  const lines = csv.text.replace(/^\uFEFF/, "").trim().split("\r\n");
+  assert.equal(lines[0], "Employee code,Employee name,Time zone,Date,Status,Clock in,Clock out,Worked minutes,Late minutes");
+  const sheet = await api(`/attendance/timesheet?employeeId=${ist.id}&from=2026-03-02&to=2026-03-02`, { cookie: admin });
+  assert.deepEqual(lines.slice(1), [`SR-IST,"'=HYPERLINK(""http://x"")",Asia/Kolkata,2026-03-02,NO_POLICY,08:55,18:30,${Math.floor(sheet.body.totals.netMs / 60_000)},`]);
+  assert.equal(csv.headers.get("x-export-rows"), "1");
+  const all = await api(`/attendance/daily/export?${D}&tab=worked`, { cookie: admin });
+  assert.match(all.text, /SR-OUT/);
+  assert.equal((await api(`/attendance/daily/export?${D}&tab=absent`, { cookie: admin })).text.trim().split("\r\n").length, 1, "header only");
+  const x = await api(`/attendance/daily/export?${D}&tab=worked&teamId=${alpha}&format=xlsx`, { cookie: admin });
+  assert.equal(x.headers.get("content-type"), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+  const dir = mkdtempSync(join(tmpdir(), "iw-daily-"));
+  try {
+    writeFileSync(join(dir, "d.xlsx"), x.buf);
+    const xml = execFileSync("unzip", ["-p", join(dir, "d.xlsx")]).toString();
+    assert.match(xml, /SR-IST/);
+    assert.doesNotMatch(xml, /<f>|SecretPlantedApp|@example\.com|SR-OUT/);
+    assert.doesNotMatch(xml, /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+  const own = await api(`/attendance/daily/export?${D}&tab=worked`, { bearer: head.bearer });
+  assert.equal(own.status, 200);
+  assert.doesNotMatch(own.text, /SR-OUT/, "a head sees only their teams");
+  assert.equal((await api(`/attendance/daily/export?${D}&tab=worked&teamId=${beta}`, { bearer: head.bearer })).status, 404);
+  assert.equal((await api(`/attendance/daily/export?${D}&tab=worked&teamId=${randomUUID()}`, { cookie: admin })).status, 404);
+  assert.equal((await api(`/attendance/daily/export?${D}&tab=worked`, { bearer: plain.bearer })).status, 403);
+});

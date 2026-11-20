@@ -7,7 +7,7 @@ import { GlobalFilters, useGlobalFilters } from "@/components/global-filters";
 import { weekRange } from "@/components/range-picker";
 import { secondaryButtonClass } from "@/components/ui";
 import { api, errorMessage } from "@/lib/api";
-import { hm, inOutCell, missedDay, weekDates, weekGrid, weekMonths, type WeekGridRow } from "@/lib/reports";
+import { hm, inOutCell, loadWeekGrid, missedDay, weekDates, type WeekGridRow } from "@/lib/reports";
 import { EmployeeCell, qs, TINT, usePage } from "../reports/_parts";
 
 const PAGE_SIZE = 50;
@@ -36,28 +36,26 @@ function DayCell({ day, show }: { day: MonthlyAttendanceDay | null; show: Set<Fi
   );
 }
 
-type Load = { key: string; rows: WeekGridRow[] | null; total: number; error: string | null };
+type Load = { key: string; rows: WeekGridRow[] | null; error: string | null };
 
-/** Employees × 7 days (IN / OUT / WORK / BREAK), from the monthly attendance reads the week touches. */
+/** Employees × 7 days (IN / OUT / WORK / BREAK), from every page of the monthly attendance reads the week touches (paged here). */
 export function WeekGrid() {
   const { teamId } = useGlobalFilters();
   const [from, setFrom] = useState(() => weekRange().from);
   const [show, setShow] = useState<Set<Field>>(() => new Set(FIELDS));
   const [retry, setRetry] = useState(0);
   const [page, setPage] = usePage(`${from}|${teamId}`);
-  const key = `${from}|${teamId}|${page}|${retry}`;
-  const [load, setLoad] = useState<Load>({ key: "", rows: null, total: 0, error: null });
+  const key = `${from}|${teamId}|${retry}`;
+  const [load, setLoad] = useState<Load>({ key: "", rows: null, error: null });
 
   useEffect(() => {
     let live = true;
-    // ponytail: pages of each month are fetched with the same page number; an employee created mid-week can shift
-    // page boundaries between the two months (their earlier days then show "—"). A range endpoint fixes it if needed.
-    Promise.all(weekMonths(from).map((month) => api<MonthlyAttendanceResponse>(`/attendance/monthly?${qs({ month, page, pageSize: PAGE_SIZE }, teamId)}`))).then(
-      (rs) => live && setLoad({ key, rows: weekGrid(rs.map((r) => r.items), from), total: rs[rs.length - 1]!.total, error: null }),
-      (e) => live && setLoad({ key, rows: null, total: 0, error: errorMessage(e) }),
+    loadWeekGrid((month, p) => api<MonthlyAttendanceResponse>(`/attendance/monthly?${qs({ month, page: p, pageSize: 100 }, teamId)}`), from).then(
+      (rows) => live && setLoad({ key, rows, error: null }),
+      (e) => live && setLoad({ key, rows: null, error: errorMessage(e) }),
     );
     return () => void (live = false);
-  }, [from, teamId, page, key]);
+  }, [from, teamId, key]);
 
   const current = load.key === key ? load : null;
   const dates = weekDates(from);
@@ -92,7 +90,7 @@ export function WeekGrid() {
       ) : (
         <>
           <DataTable label="Week grid" stickyHeader minWidth={200 + 7 * 120 + 140} head={["Employee", ...dates.map(dayLabel), "Total"]}>
-            {current.rows.map((r) => (
+            {current.rows.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE).map((r) => (
               <tr key={r.employee.id} className="align-top">
                 <td className="sticky left-0 z-[1] bg-surface"><EmployeeCell employee={r.employee} /></td>
                 {r.cells.map((c, i) => (
@@ -106,7 +104,7 @@ export function WeekGrid() {
               </tr>
             ))}
           </DataTable>
-          {current.total > PAGE_SIZE && <Pagination page={page} pageCount={Math.ceil(current.total / PAGE_SIZE)} onPage={setPage} />}
+          {current.rows.length > PAGE_SIZE && <Pagination page={page} pageCount={Math.ceil(current.rows.length / PAGE_SIZE)} onPage={setPage} />}
           <p className="text-xs text-muted">
             Local times in each employee&apos;s zone; a shift belongs to the day it started. WORK and BREAK count completed shifts only.
             Red = a scheduled day with nothing worked (absent). LV leave, H holiday, WO not a workday, — no schedule or not listed.

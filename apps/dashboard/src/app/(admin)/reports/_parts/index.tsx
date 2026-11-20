@@ -2,12 +2,11 @@
 
 import { useEffect, useState, type ReactNode } from "react";
 import Link from "next/link";
-import { toCsv, type Cell, type EmployeeRef, type MonthlyAttendanceDay, type MonthlyAttendanceRow } from "@workfolio/shared";
+import { type EmployeeRef, type MonthlyAttendanceDay, type MonthlyAttendanceRow } from "@workfolio/shared";
 import { Button, DataTable, EmptyState, ErrorState, SkeletonRows } from "@/components/kit";
 import { inputClass, Notice } from "@/components/ui";
 import { api, errorMessage } from "@/lib/api";
 import { todayLocal } from "@/lib/global-filters";
-import { xlsxBytes } from "@/lib/reports";
 import { downloadFile } from "../../_components/download";
 
 /** GET `path` (null = wait); a new path clears the old data; retry() refetches. */
@@ -60,29 +59,6 @@ export function Loadable<T>({ state, label, empty, children }: { state: { data: 
   if (!state.data) return <SkeletonRows label={label} />;
   if (empty(state.data)) return <EmptyState title={`No ${label} for this selection.`} />;
   return <>{children(state.data)}</>;
-}
-
-function save(blob: Blob, filename: string) {
-  const url = URL.createObjectURL(blob);
-  Object.assign(document.createElement("a"), { href: url, download: filename }).click();
-  setTimeout(() => URL.revokeObjectURL(url), 10_000);
-}
-
-/** CSV / XLSX built in the browser from rows already on screen (formula-safe both ways). */
-export function LocalExport({ name, header, rows }: { name: string; header: string[]; rows: Cell[][] }) {
-  const disabled = rows.length ? undefined : "Nothing to export";
-  return (
-    <div className="flex flex-wrap gap-2">
-      <Button variant="secondary" disabledReason={disabled} onClick={() => save(new Blob([toCsv([header, ...rows])], { type: "text/csv;charset=utf-8" }), `${name}.csv`)}>Export CSV</Button>
-      <Button
-        variant="secondary"
-        disabledReason={disabled}
-        onClick={() => save(new Blob([xlsxBytes(name, [header, ...rows]) as BlobPart], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" }), `${name}.xlsx`)}
-      >
-        Export XLSX
-      </Button>
-    </div>
-  );
 }
 
 /** Server-built file(s) through the authenticated API. */

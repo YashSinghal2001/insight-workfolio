@@ -1,5 +1,6 @@
 // Session reads shared by attendance, timesheet and correction services.
 import type { DatabaseClient, Row } from "@workfolio/database";
+import { addDays, type ShiftActivity } from "@workfolio/shared";
 import type { AttendanceBreak, AttendanceSession, AttendanceState, DeviceActivityReport, DeviceActivityState, DeviceScreenshotState, EmployeeRef, SessionSource } from "@workfolio/shared";
 import type { AuthContext } from "../auth/auth.service.js";
 import { scopeSql, teamFilterSql } from "../common/scope.js";
@@ -15,14 +16,28 @@ export const SESSION_COLUMNS = `s.id, s.employee_id, s.clock_in_at, s.clock_out_
 export const str = (v: unknown) => (v === null || v === undefined ? null : String(v));
 export const iso = (ms: number) => new Date(ms).toISOString();
 
-/** Rows selected with SESSION_COLUMNS, with their breaks attached (one extra query). */
+/** Splits a list into parts of at most `size` (keeps every query below SQLite's bound-parameter limit). */
+export const chunks = <T>(xs: readonly T[], size: number): T[][] => Array.from({ length: Math.ceil(xs.length / size) }, (_, i) => xs.slice(i * size, (i + 1) * size));
+const BREAK_IDS_PER_QUERY = 5000;
+const EMPLOYEES_PER_QUERY = 500;
+
+/** Rows selected with SESSION_COLUMNS, with their breaks attached (one extra query per 5000 sessions). */
 export async function withBreaks(db: DatabaseClient, rows: Row[]): Promise<AttendanceSession[]> {
   if (!rows.length) return [];
-  const { rows: breaks } = await db.execute({
-    sql: `SELECT id, attendance_session_id, started_at, ended_at FROM break_sessions
-          WHERE attendance_session_id IN (${rows.map(() => "?").join(", ")}) ORDER BY started_at`,
-    args: rows.map((r) => String(r.id)),
-  });
+  const bySession = new Map<string, AttendanceBreak[]>();
+  for (const part of chunks(rows, BREAK_IDS_PER_QUERY)) {
+    const { rows: breaks } = await db.execute({
+      sql: `SELECT id, attendance_session_id, started_at, ended_at FROM break_sessions
+            WHERE attendance_session_id IN (${part.map(() => "?").join(", ")}) ORDER BY started_at`,
+      args: part.map((r) => String(r.id)),
+    });
+    for (const b of breaks) {
+      const key = String(b.attendance_session_id);
+      const list = bySession.get(key) ?? [];
+      list.push({ id: String(b.id), startedAt: String(b.started_at), endedAt: str(b.ended_at) });
+      bySession.set(key, list);
+    }
+  }
   return rows.map((r) => ({
     id: String(r.id),
     clockInAt: String(r.clock_in_at),
@@ -30,10 +45,51 @@ export async function withBreaks(db: DatabaseClient, rows: Row[]): Promise<Atten
     status: r.status as AttendanceSession["status"],
     corrected: Boolean(r.corrected),
     clockInSource: r.clock_in_source as SessionSource,
-    breaks: breaks
-      .filter((b) => b.attendance_session_id === r.id)
-      .map((b): AttendanceBreak => ({ id: String(b.id), startedAt: String(b.started_at), endedAt: str(b.ended_at) })),
+    breaks: bySession.get(String(r.id)) ?? [],
   }));
+}
+
+/**
+ * The employees' sessions clocked in within a UTC window that covers local dates [from, to] in every zone (a day of
+ * slack each side; callers keep each employee's own local dates), with breaks, owner and the recorded ACTIVE / IDLE
+ * sums per session. Queried per 500 employees, so any head count and range stays within SQLite's parameter limit.
+ */
+export async function rangeSessions(
+  db: DatabaseClient,
+  employeeIds: readonly string[],
+  from: string,
+  to: string,
+): Promise<{ byEmployee: Map<string, AttendanceSession[]>; activity: Map<string, ShiftActivity> }> {
+  const byEmployee = new Map<string, AttendanceSession[]>();
+  const activity = new Map<string, ShiftActivity>();
+  const window = [`${addDays(from, -1)}T00:00:00.000Z`, `${addDays(to, 2)}T00:00:00.000Z`];
+  for (const ids of chunks(employeeIds, EMPLOYEES_PER_QUERY)) {
+    const inRange = `employee_id IN (${ids.map(() => "?").join(", ")}) AND clock_in_at >= ? AND clock_in_at < ?`;
+    const args = [...ids, ...window];
+    const [sessions, sums] = await db.batch(
+      [
+        { sql: `SELECT ${SESSION_COLUMNS} FROM attendance_sessions s WHERE s.${inRange}`, args },
+        {
+          sql: `SELECT attendance_session_id AS id,
+                  coalesce(sum(CASE WHEN kind = 'ACTIVE' THEN active_seconds END), 0) AS active,
+                  coalesce(sum(CASE WHEN kind = 'IDLE' THEN idle_seconds END), 0) AS idle
+                FROM activity_intervals WHERE attendance_session_id IN (SELECT id FROM attendance_sessions WHERE ${inRange})
+                GROUP BY attendance_session_id`,
+          args,
+        },
+      ],
+      "read",
+    );
+    for (const r of sums!.rows) activity.set(String(r.id), { activeMs: Number(r.active) * 1000, idleMs: Number(r.idle) * 1000 });
+    const all = await withBreaks(db, sessions!.rows);
+    sessions!.rows.forEach((r, i) => {
+      const owner = String(r.employee_id);
+      const list = byEmployee.get(owner) ?? [];
+      list.push(all[i]!);
+      byEmployee.set(owner, list);
+    });
+  }
+  return { byEmployee, activity };
 }
 
 export function stateOf(session: AttendanceSession | null): AttendanceState {
