@@ -13,13 +13,13 @@ import {
   WORKLOAD_DAYS,
   WORKLOAD_THRESHOLDS,
   workloadDays,
-  zonedToUtc,
   type AttendancePolicy,
   type LeavePortion,
   type OverviewQuery,
   type OverviewResponse,
   type Permission,
 } from "@workfolio/shared";
+import { ActivityService } from "../activity/activity.service.js";
 import { ACTIVE_EMPLOYEE, SESSION_COLUMNS, iso, withBreaks } from "../attendance/sessions.js";
 import { AnomaliesService } from "../attendance/anomalies.service.js";
 import { AttendanceService } from "../attendance/attendance.service.js";
@@ -49,6 +49,7 @@ export class OverviewService {
     private readonly anomalies: AnomaliesService,
     private readonly screenshots: ScreenshotsService,
     private readonly holidays: HolidaysService,
+    private readonly activity: ActivityService,
   ) {}
 
   async get(caller: AuthContext, q: OverviewQuery, now = Date.now()): Promise<OverviewResponse> {
@@ -149,7 +150,10 @@ export class OverviewService {
     return by;
   }
 
-  /** Active members in scope without a registered (non-revoked) device: the desktop app is not installed. */
+  /**
+   * Active members in scope without a registered (non-revoked) device: the desktop app is not installed. Team heads
+   * get this count too (a count only, no device details), as in the reference product: lead decision, W2 review.
+   */
   private async noDevice(scope: { sql: string; args: string[] }): Promise<number> {
     const { rows } = await this.db.execute({
       sql: `SELECT count(*) AS n FROM employee_profiles p JOIN users u ON u.id = p.user_id
@@ -159,22 +163,9 @@ export class OverviewService {
     return Number(rows[0]!.n);
   }
 
-  /** Active time per application on each member's local date, largest first (rule of ActivityService.overview). */
+  /** Active time per application on each member's local date (ActivityService.appTotals), top TOP_APPS + the rest. */
   private async topApps(employees: { id: string; timezone: string }[], date: string): Promise<OverviewResponse["topApps"]> {
-    if (!employees.length) return { totalActiveMs: 0, otherMs: 0, items: [] };
-    // ponytail: 3 parameters per member in one VALUES list; split it beyond ~10k members (SQLite's parameter limit).
-    const bounds = employees.flatMap((e) => [e.id, zonedToUtc(`${date}T00:00`, e.timezone), zonedToUtc(`${addDays(date, 1)}T00:00`, e.timezone)]);
-    const { rows } = await this.db.execute({
-      // The bare application_name comes from the latest interval (max), so a renamed app shows its current name.
-      sql: `WITH b(emp, s, e) AS (VALUES ${employees.map(() => "(?, ?, ?)").join(", ")})
-            SELECT a.application_name AS name, max(a.started_at) AS latest,
-                   sum(max(0, round((julianday(min(a.ended_at, b.e)) - julianday(max(a.started_at, b.s))) * 86400000))) AS ms
-            FROM b JOIN activity_intervals a ON a.employee_id = b.emp AND a.kind = 'ACTIVE' AND a.started_at < b.e AND a.ended_at > b.s
-            GROUP BY coalesce(a.application_identifier, 'name:' || a.application_name)
-            ORDER BY ms DESC, name`,
-      args: bounds,
-    });
-    const all = rows.map((r) => ({ applicationName: String(r.name), activeMs: Number(r.ms) })).filter((a) => a.activeMs > 0);
+    const all = await this.activity.appTotals(employees, date, date);
     const items = all.slice(0, TOP_APPS);
     const totalActiveMs = all.reduce((n, a) => n + a.activeMs, 0);
     return { totalActiveMs, otherMs: totalActiveMs - items.reduce((n, a) => n + a.activeMs, 0), items };
@@ -187,18 +178,11 @@ export class OverviewService {
   private async recentScreenshots(caller: AuthContext, date: string, teamId?: string): Promise<OverviewResponse["recentScreenshots"]> {
     const from = addDays(date, 1 - WORKLOAD_DAYS);
     // The gallery reads dates in one zone; a day of slack each side, then each owner's own local date.
-    const page = await this.screenshots.gallery({ from: addDays(from, -1), to: addDays(date, 1), tz: DEFAULT_TIMEZONE, page: 1, pageSize: 60 }, caller);
-    let team: Set<string> | null = null;
-    if (teamId) {
-      const f = teamFilterSql(teamId, "p.id");
-      const { rows } = await this.db.execute({ sql: `SELECT p.id FROM employee_profiles p WHERE 1${f.sql}`, args: f.args });
-      team = new Set(rows.map((r) => String(r.id)));
-    }
-    // ponytail: newest 60 then filtered (stored, dates, team); a team with nothing among them shows fewer than 12.
+    // Stored and team-filtered in SQL (gallery read, scope unchanged); only the zone slack is filtered here.
+    // ponytail: the newest 60 of the window; more than 48 stored in the slack day after the date would crowd it out.
+    const page = await this.screenshots.gallery({ from: addDays(from, -1), to: addDays(date, 1), tz: DEFAULT_TIMEZONE, page: 1, pageSize: 60, teamId, status: "STORED" }, caller);
     const day = (i: (typeof page.items)[number]) => localDate(i.capturedAt, i.employee.timezone);
-    return page.items
-      .filter((i) => i.uploadStatus === "STORED" && day(i) >= from && day(i) <= date && (!team || team.has(i.employeeId)))
-      .slice(0, RECENT_SCREENSHOTS);
+    return page.items.filter((i) => day(i) >= from && day(i) <= date).slice(0, RECENT_SCREENSHOTS);
   }
 
   private async upcomingHolidays(date: string): Promise<OverviewResponse["upcomingHolidays"]> {

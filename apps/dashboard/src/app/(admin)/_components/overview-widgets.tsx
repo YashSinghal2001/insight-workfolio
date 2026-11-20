@@ -89,7 +89,7 @@ export function TopAppsWidget({ load }: { load: OverviewLoad }) {
 
 export function LateWidget({ load }: { load: OverviewLoad }) {
   return (
-    <Panel title="Late clock-ins" id="ov-late" action={<Count load={load} pick={(d) => d.late} />}>
+    <Panel title="Late clock-ins" id="ov-late" action={<Count load={load} pick={(d) => (d.kpis.late === null ? null : d.late)} />}>
       <Body load={load} label="late clock-ins" select={(d) => (d.kpis.late === null ? null : d.late)} hidden={NO_SCHEDULE} empty={none("Nobody clocked in late.")}>
         {(rows) => (
           <ul className="flex flex-col divide-y divide-border text-sm">
@@ -108,7 +108,7 @@ export function LateWidget({ load }: { load: OverviewLoad }) {
 
 export function AbsentWidget({ load }: { load: OverviewLoad }) {
   return (
-    <Panel title="Absent" id="ov-absent" action={<Count load={load} pick={(d) => d.absent} />}>
+    <Panel title="Absent" id="ov-absent" action={<Count load={load} pick={(d) => (d.kpis.absent === null ? null : d.absent)} />}>
       <Body load={load} label="absences" select={(d) => (d.kpis.absent === null ? null : d.absent)} hidden={NO_SCHEDULE} empty={none("Nobody is absent.")}>
         {(rows) => (
           <ul className="flex flex-wrap gap-2 text-sm">

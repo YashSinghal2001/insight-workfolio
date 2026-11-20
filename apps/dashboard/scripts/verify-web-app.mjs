@@ -616,6 +616,8 @@ try {
   const ov = ok(await api(`/overview?date=${viewerDate}`, { cookie: superCookie }), "overview");
   const summary = ov.kpis;
   const todayDaily = ok(await api(`/attendance/daily?date=${viewerDate}&pageSize=1`, { cookie: superCookie }), "daily today");
+  // Independent of the aggregate: the existing summary endpoint for the same date.
+  const legacy = ok(await api(`/attendance/summary?date=${viewerDate}`, { cookie: superCookie }), "summary");
   await tryWait(`[...document.querySelectorAll('main p')].some((p) => p.textContent.trim() === "Pending corrections")`, "overview cards");
   const cards = {};
   for (const l of ["Active employees", "Working now", "On a break", "Clocked out today", "Not clocked in today", "Screenshots stored today", "Pending leave requests", "Pending corrections", "Late today", "Absent today"]) cards[l] = await statCard(l);
@@ -624,6 +626,9 @@ try {
   check("workflow: overview cards equal the API (clocked out, not clocked in, screenshots, pending leave, pending corrections)",
     cards["Clocked out today"]?.value === String(summary.clockedOut) && cards["Not clocked in today"]?.value === String(summary.notStarted) && cards["Screenshots stored today"]?.value === String(summary.screenshotsStored) && cards["Pending leave requests"]?.value === String(ov.pendingApprovals.leave) && cards["Pending corrections"]?.value === String(ov.pendingApprovals.corrections) && ov.pendingApprovals.corrections === 2,
     JSON.stringify(ov.kpis));
+  check("workflow: overview cards equal /attendance/summary (independent cross-check of the aggregate)",
+    cards["Active employees"]?.value === String(legacy.totalActiveEmployees) && cards["Clocked out today"]?.value === String(legacy.clockedOutToday) && cards["Not clocked in today"]?.value === String(legacy.notClockedInToday) && cards["Screenshots stored today"]?.value === String(legacy.screenshotsStoredToday) && cards["Pending corrections"]?.value === String(legacy.pendingCorrectionCount),
+    JSON.stringify(legacy));
   check("workflow: 'Not clocked in today' is not labelled absent; Late/Absent come only from the enabled schedule (and match the daily view)",
     !/^absent/i.test(cards["Not clocked in today"]?.all ?? "absent") && /Not the same as absent/.test(cards["Not clocked in today"]?.all ?? "") && cards["Late today"]?.value === String(todayDaily.summary.LATE) && cards["Absent today"]?.value === String(todayDaily.summary.ABSENT),
     `${cards["Not clocked in today"]?.all?.replace(/\n/g, " | ")} · late ${cards["Late today"]?.value} absent ${cards["Absent today"]?.value}`);

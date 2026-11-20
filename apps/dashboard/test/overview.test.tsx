@@ -68,6 +68,7 @@ test("hidden (null) sections say so; empty ones show their own message; no sched
   assert.match(html(<MissingClockOutsWidget load={ok} />), /No open shift looks forgotten/);
   const none: OverviewLoad = { status: "ok", data: { ...DATA, kpis: { ...DATA.kpis, late: null, absent: null }, topApps: { totalActiveMs: 0, otherMs: 0, items: [] }, workload: { ...DATA.workload, days: [] } } };
   assert.match(html(<LateWidget load={none} />), /Work schedule not configured[^]*href="\/settings\/schedule"/);
+  assert.doesNotMatch(html(<LateWidget load={none} />), /rounded-full[^"]*">0</, "no count badge without a schedule");
   assert.match(html(<TopAppsWidget load={none} />), /No application activity/);
   assert.match(html(<WorkloadWidget load={none} />), /No completed work/);
   const empty: OverviewLoad = { status: "ok", data: { ...DATA, kpis: { ...DATA.kpis, totalMembers: 0 } } };
