@@ -84,6 +84,8 @@ export interface EmployeeTopApp {
 
 export interface EmployeeAnalyticsResponse {
   employee: EmployeeRef;
+  /** Names of the active teams the employee belongs to. */
+  teams: string[];
   from: string;
   to: string;
   generatedAt: string;
@@ -119,6 +121,7 @@ export function medianLocalTime(times: string[]): string | null {
 /** Pure aggregation behind the endpoint: timesheet rules from buildTimesheet, activity passed in (or null). */
 export function buildEmployeeAnalytics(input: {
   employee: EmployeeRef;
+  teams?: string[];
   from: string;
   to: string;
   sessions: TimesheetSessionInput[];
@@ -174,7 +177,7 @@ export function buildEmployeeAnalytics(input: {
   const activeMs = activity ? activity.days.reduce((n, d) => n + d.activeMs, 0) : 0;
   const idleMs = activity ? activity.days.reduce((n, d) => n + d.idleMs, 0) : 0;
   return {
-    employee, from, to,
+    employee, teams: input.teams ?? [], from, to,
     generatedAt: new Date(now).toISOString(),
     kpis: {
       workedMinutes: minutes(sheet.totals.netMs),

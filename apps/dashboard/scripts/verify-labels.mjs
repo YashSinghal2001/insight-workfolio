@@ -242,7 +242,7 @@ try {
 
   // ---- F08: deny self-view for one employee on the employee page --------------------------------
   {
-    await visit(`/employees/${sam.id}`, `!!document.querySelector('select[name=screenshotSelfView]')`, "self-view control");
+    await visit(`/employees/${sam.id}?tab=edit`, `!!document.querySelector('select[name=screenshotSelfView]')`, "self-view control");
     await setValue("select[name=screenshotSelfView]", "deny");
     await setValue("textarea[name=trackingReason]", "verify-labels privacy request");
     await click("Save these settings");

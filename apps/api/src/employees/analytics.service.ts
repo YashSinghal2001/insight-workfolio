@@ -45,18 +45,20 @@ export class EmployeeAnalyticsService {
         [
           { sql: `SELECT ${SESSION_COLUMNS} FROM attendance_sessions s WHERE s.employee_id = ? AND s.clock_in_at >= ? AND s.clock_in_at < ? ORDER BY s.clock_in_at`, args: [employee.id, start, end] },
           { sql: "SELECT status, count(*) AS n FROM correction_requests WHERE employee_id = ? AND created_at >= ? AND created_at < ? GROUP BY status", args: [employee.id, start, end] },
+          { sql: "SELECT t.name FROM team_members tm JOIN teams t ON t.id = tm.team_id WHERE tm.employee_id = ? AND t.active = 1 ORDER BY t.name", args: [employee.id] },
           { sql: "SELECT start_date, end_date, portion, start_time, end_time, status FROM leave_requests WHERE employee_id = ? AND start_date <= ? AND end_date >= ?", args: [employee.id, to, from] },
         ],
         "read",
       ),
       seeActivity ? this.activity.summary(employee, from, to) : null,
     ]);
-    const [sessions, corrections, leave] = batch;
+    const [sessions, corrections, teams, leave] = batch;
     const correctionCounts = Object.fromEntries(CORRECTION_STATUSES.map((s) => [s, 0])) as Record<CorrectionStatus, number>;
     for (const r of corrections!.rows) correctionCounts[r.status as CorrectionStatus] = Number(r.n);
 
     const result = buildEmployeeAnalytics({
       employee: { id: employee.id, fullName: employee.fullName, employeeCode: employee.employeeCode, timezone: employee.timezone },
+      teams: teams!.rows.map((r) => String(r.name)),
       from, to, now, policy: this.policy,
       sessions: await withBreaks(this.db, sessions!.rows),
       activity,

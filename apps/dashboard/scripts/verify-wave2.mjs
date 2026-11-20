@@ -380,7 +380,7 @@ try {
 
   // ---- W17/W21: per-person tracking overrides ----------------------------------------------------------------
   {
-    await visit(`/employees/${ben.id}`, `!!document.querySelector('input[name=expectedStart]')`, "tracking overrides form");
+    await visit(`/employees/${ben.id}?tab=edit`, `!!document.querySelector('input[name=expectedStart]')`, "tracking overrides form");
     await setValue("input[name=expectedStart]", "10:30");
     await setValue("input[name=idleThresholdSeconds]", "120");
     await js(`[...document.querySelectorAll('input[name=workday]')].filter((c) => Number(c.value) <= 5 && !c.checked).forEach((c) => c.click())`);

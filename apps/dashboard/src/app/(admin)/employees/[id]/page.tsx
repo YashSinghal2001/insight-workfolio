@@ -2,14 +2,16 @@
 
 import { Suspense, useCallback, useEffect, useState, type FormEvent } from "react";
 import Link from "next/link";
-import { useParams } from "next/navigation";
-import type { Device, Employee, InvitationResponse, ScreenshotBlurOverridesResponse, SetupToken } from "@workfolio/shared";
+import { useParams, useSearchParams } from "next/navigation";
+import { analyticsRange, type Device, type Employee, type EmployeeAnalyticsResponse, type InvitationResponse, type ScreenshotBlurOverridesResponse, type SetupToken } from "@workfolio/shared";
 import { EmployeeForm, InvitationSummary, SetupLinkNotice } from "@/components/employee-form";
 import { TrackingOverrides } from "@/components/tracking-overrides";
 import { activeDevice, AdminDeviceTable, OS_LABEL } from "@/components/devices";
-import { ConfirmDialog, ErrorState, PageHeader, SkeletonRows, StatusBadge, SuccessNotice } from "@/components/kit";
+import { ConfirmDialog, ErrorState, PageHeader, SkeletonRows, StatusBadge, SuccessNotice, Tabs } from "@/components/kit";
+import type { Range } from "@/components/range-picker";
 import { Card, Field, formatInZone, inputClass, Notice, secondaryButtonClass } from "@/components/ui";
 import { api, ApiRequestError, errorMessage } from "@/lib/api";
+import { ProfileOverview, type Loadable } from "./_components/profile-overview";
 
 export default function EmployeePage() {
   // useParams suspends for request-time params under cacheComponents.
@@ -21,6 +23,8 @@ export default function EmployeePage() {
 }
 
 type Confirm = { kind: "status" } | { kind: "setup" } | { kind: "invite" };
+type Tab = "overview" | "edit";
+const TABS = [{ id: "overview", label: "Overview" }, { id: "edit", label: "Edit" }] as const;
 
 function EmployeeDetail() {
   const { id } = useParams<{ id: string }>();
@@ -30,6 +34,10 @@ function EmployeeDetail() {
   const [notice, setNotice] = useState<string | null>(null);
   const [setup, setSetup] = useState<SetupToken | null>(null);
   const [confirm, setConfirm] = useState<Confirm | null>(null);
+  // ?tab=edit deep-links the edit form (browser suites and "Manage devices" use it).
+  const [tab, setTab] = useState<Tab>(useSearchParams().get("tab") === "edit" ? "edit" : "overview");
+  const [range, setRange] = useState<Range | null>(null);
+  const [analytics, setAnalytics] = useState<Loadable<EmployeeAnalyticsResponse>>({ data: null, error: null });
 
   const load = useCallback(async () => {
     try {
@@ -46,6 +54,23 @@ function EmployeeDetail() {
     // eslint-disable-next-line react-hooks/set-state-in-effect -- fetch on mount
     load();
   }, [load]);
+
+  const timezone = employee?.timezone;
+  const shown = range ?? (timezone ? analyticsRange({}, timezone) : null);
+  const loadAnalytics = useCallback(async () => {
+    if (!shown) return;
+    setAnalytics({ data: null, error: null });
+    try {
+      setAnalytics({ data: await api<EmployeeAnalyticsResponse>(`/employees/${id}/analytics?from=${shown.from}&to=${shown.to}`), error: null });
+    } catch (err) {
+      setAnalytics({ data: null, error: errorMessage(err) });
+    }
+  }, [id, shown?.from, shown?.to]); // eslint-disable-line react-hooks/exhaustive-deps -- keyed by the range dates
+
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- fetch when the range changes
+    loadAnalytics();
+  }, [loadAnalytics]);
 
   if (loadError) {
     const missing = loadError.status === 404 || loadError.status === 400;
@@ -75,11 +100,11 @@ function EmployeeDetail() {
   };
 
   return (
-    <div className="mx-auto flex max-w-3xl flex-col gap-6">
+    <div className="mx-auto flex max-w-6xl flex-col gap-6">
       <PageHeader
         title={employee.fullName}
         breadcrumbs={[{ label: "Employees", href: "/employees" }, { label: employee.fullName }]}
-        description={`${employee.employeeCode} · created ${formatInZone(employee.createdAt, employee.timezone)}`}
+        description={[employee.employeeCode, employee.email, analytics.data?.teams.length ? `Team: ${analytics.data.teams.join(", ")}` : null, `created ${formatInZone(employee.createdAt, employee.timezone)}`].filter(Boolean).join(" · ")}
         actions={
           <StatusBadge tone={disabled ? "danger" : employee.passwordSet ? "success" : "warning"}>
             {disabled ? "Disabled" : employee.passwordSet ? "Active" : "Pending setup"}
@@ -93,80 +118,97 @@ function EmployeeDetail() {
         <Link href={`/screenshots?employeeId=${employee.id}`} className={secondaryButtonClass}>Screenshots</Link>
       </nav>
 
-      <SuccessNotice message={notice} onDismiss={() => setNotice(null)} />
-      {setup && <SetupLinkNotice setup={setup} email={employee.email} />}
+      <Tabs label={`${employee.fullName} profile`} tabs={TABS} value={tab} onChange={setTab} idPrefix="profile">
+        {tab === "overview" ? (
+          <ProfileOverview
+            employeeId={employee.id}
+            timeZone={employee.timezone}
+            range={shown!}
+            onRange={setRange}
+            analytics={analytics}
+            onRetry={() => void loadAnalytics()}
+            devices={{ data: devices, error: null }}
+            onEditTab={() => setTab("edit")}
+          />
+        ) : (
+          <div className="flex flex-col gap-6">
+          <SuccessNotice message={notice} onDismiss={() => setNotice(null)} />
+          {setup && <SetupLinkNotice setup={setup} email={employee.email} />}
 
-      <Card title="Details">
-        <EmployeeForm
-          key={employee.updatedAt}
-          initial={employee}
-          submitLabel="Save changes"
-          onSubmit={async (values) => {
-            try {
-              setEmployee(await api<Employee>(`/employees/${id}`, { method: "PATCH", body: values }));
-              setNotice("Changes saved.");
-              return null;
-            } catch (err) {
-              return errorMessage(err);
-            }
-          }}
-        />
-      </Card>
-
-      <Card title="Account access">
-        <div className="flex flex-col gap-4 text-sm">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <p className="text-muted">
-              {disabled ? "Sign-in is blocked for this account." : "Disabling blocks sign-in and ends all active sessions immediately."}
-            </p>
-            <button type="button" className={secondaryButtonClass} onClick={() => setConfirm({ kind: "status" })}>
-              {disabled ? "Enable account" : "Disable account"}
-            </button>
-          </div>
-          <div className="flex flex-wrap items-center justify-between gap-3 border-t border-border pt-4">
-            <p className="text-muted">
-              {employee.passwordSet ? "Issue a new setup link to let the employee choose a new password." : "The employee has not set a password yet."}
-            </p>
-            <button type="button" className={secondaryButtonClass} onClick={() => setConfirm({ kind: "setup" })}>New setup link</button>
-          </div>
-          {employee.invitation && (
-            <div className="flex flex-wrap items-center justify-between gap-3 border-t border-border pt-4">
-              <InvitationSummary invitation={employee.invitation} timezone={employee.timezone} />
-              {!employee.passwordSet && !disabled && (
-                <button type="button" className={secondaryButtonClass} onClick={() => setConfirm({ kind: "invite" })}>Resend invitation</button>
-              )}
-            </div>
-          )}
-        </div>
-      </Card>
-
-      <Card title={`Devices (${devices?.length ?? 0} registered)`}>
-        {devices?.length ? (
-          <div className="flex flex-col gap-3">
-            <p className="text-sm">
-              {(() => {
-                const active = activeDevice(devices);
-                return active ? <>Signed in on <span className="font-medium">{active.deviceName}</span> ({OS_LABEL[active.platform] ?? active.platform}) since {formatInZone(active.sessionStartedAt, employee.timezone)}.</> : "Not signed in on any device.";
-              })()}
-            </p>
-            <AdminDeviceTable
-              devices={devices}
-              timeZone={employee.timezone}
-              onChanged={async (message) => {
-                setDevices(await api<Device[]>(`/employees/${id}/devices`));
-                setNotice(message);
+          <Card title="Details">
+            <EmployeeForm
+              key={employee.updatedAt}
+              initial={employee}
+              submitLabel="Save changes"
+              onSubmit={async (values) => {
+                try {
+                  setEmployee(await api<Employee>(`/employees/${id}`, { method: "PATCH", body: values }));
+                  setNotice("Changes saved.");
+                  return null;
+                } catch (err) {
+                  return errorMessage(err);
+                }
               }}
             />
+          </Card>
+
+          <Card title="Account access">
+            <div className="flex flex-col gap-4 text-sm">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <p className="text-muted">
+                  {disabled ? "Sign-in is blocked for this account." : "Disabling blocks sign-in and ends all active sessions immediately."}
+                </p>
+                <button type="button" className={secondaryButtonClass} onClick={() => setConfirm({ kind: "status" })}>
+                  {disabled ? "Enable account" : "Disable account"}
+                </button>
+              </div>
+              <div className="flex flex-wrap items-center justify-between gap-3 border-t border-border pt-4">
+                <p className="text-muted">
+                  {employee.passwordSet ? "Issue a new setup link to let the employee choose a new password." : "The employee has not set a password yet."}
+                </p>
+                <button type="button" className={secondaryButtonClass} onClick={() => setConfirm({ kind: "setup" })}>New setup link</button>
+              </div>
+              {employee.invitation && (
+                <div className="flex flex-wrap items-center justify-between gap-3 border-t border-border pt-4">
+                  <InvitationSummary invitation={employee.invitation} timezone={employee.timezone} />
+                  {!employee.passwordSet && !disabled && (
+                    <button type="button" className={secondaryButtonClass} onClick={() => setConfirm({ kind: "invite" })}>Resend invitation</button>
+                  )}
+                </div>
+              )}
+            </div>
+          </Card>
+
+          <Card title={`Devices (${devices?.length ?? 0} registered)`}>
+            {devices?.length ? (
+              <div className="flex flex-col gap-3">
+                <p className="text-sm">
+                  {(() => {
+                    const active = activeDevice(devices);
+                    return active ? <>Signed in on <span className="font-medium">{active.deviceName}</span> ({OS_LABEL[active.platform] ?? active.platform}) since {formatInZone(active.sessionStartedAt, employee.timezone)}.</> : "Not signed in on any device.";
+                  })()}
+                </p>
+                <AdminDeviceTable
+                  devices={devices}
+                  timeZone={employee.timezone}
+                  onChanged={async (message) => {
+                    setDevices(await api<Device[]>(`/employees/${id}/devices`));
+                    setNotice(message);
+                  }}
+                />
+              </div>
+            ) : (
+              <p className="text-sm text-muted">No devices registered. A device appears after the employee signs in on the desktop app and registers it. An employee may register several devices; one at a time is signed in.</p>
+            )}
+          </Card>
+
+          <ScreenshotBlur employeeId={employee.id} timezone={employee.timezone} />
+          <TrackingOverrides employeeId={employee.id} timezone={employee.timezone} />
+
+          {disabled && <Notice tone="info">This account is disabled. Its recorded attendance, activity and screenshots are kept.</Notice>}
           </div>
-        ) : (
-          <p className="text-sm text-muted">No devices registered. A device appears after the employee signs in on the desktop app and registers it. An employee may register several devices; one at a time is signed in.</p>
         )}
-      </Card>
-
-      <ScreenshotBlur employeeId={employee.id} timezone={employee.timezone} />
-      <TrackingOverrides employeeId={employee.id} timezone={employee.timezone} />
-
-      {disabled && <Notice tone="info">This account is disabled. Its recorded attendance, activity and screenshots are kept.</Notice>}
+      </Tabs>
 
       <ConfirmDialog
         open={confirm?.kind === "status"}

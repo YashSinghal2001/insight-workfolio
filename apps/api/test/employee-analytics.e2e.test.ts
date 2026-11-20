@@ -100,6 +100,7 @@ test("admin: default range (last 14 days), KPIs, log, corrections, leave, activi
   const r = await api(`/employees/${member.id}/analytics`, { cookie: admin });
   assert.equal(r.status, 200, r.text);
   assert.equal(r.body.employee.id, member.id);
+  assert.deepEqual(r.body.teams, ["Alpha"]);
   assert.equal(r.body.days.length, 14);
   assert.equal(r.body.kpis.workedMinutes, 60);
   assert.equal(r.body.kpis.daysWorked, 1);
