@@ -1,3 +1,5 @@
+import { latestOnly } from "./latest";
+
 type VisibilityDoc = Pick<Document, "visibilityState" | "addEventListener" | "removeEventListener">;
 
 /**
@@ -12,12 +14,12 @@ export function pollWhileVisible<T>(
   everyMs: number,
   doc: VisibilityDoc = document,
 ): () => void {
-  let seq = 0;
+  const latest = latestOnly();
   let stopped = false;
   let timer: ReturnType<typeof setInterval> | undefined;
   const refresh = () => {
-    const mine = ++seq;
-    const current = () => !stopped && mine === seq;
+    const isLatest = latest.begin();
+    const current = () => !stopped && isLatest();
     load().then((d) => current() && onData(d), (e) => current() && onError(e));
   };
   const sync = () => {
