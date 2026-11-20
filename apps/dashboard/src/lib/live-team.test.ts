@@ -2,7 +2,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { AttendanceSession } from "@workfolio/shared";
-import { ago, countByChip, describeMember, matches, NO_EXTRAS, type MemberRow } from "./live-team.ts";
+import { ago } from "./attendance-ui.ts";
+import { countByChip, describeMember, matches, NO_EXTRAS, type MemberRow } from "./live-team.ts";
 
 // 2026-11-20 15:00 IST (09:30Z).
 const NOW = Date.parse("2026-11-20T09:30:00Z");

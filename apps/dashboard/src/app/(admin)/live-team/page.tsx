@@ -8,6 +8,7 @@ import { GlobalFilters, useGlobalFilters } from "@/components/global-filters";
 import { inputClass } from "@/components/ui";
 import { api, errorMessage } from "@/lib/api";
 import { todayLocal } from "@/lib/global-filters";
+import { pollWhileVisible } from "@/lib/poll";
 import { CHIPS, countByChip, describeMember, matches, NO_EXTRAS, STATE_META, type Chip, type MemberCard, type MemberExtras, type MemberRow } from "@/lib/live-team";
 
 const REFRESH_MS = 30_000;
@@ -79,36 +80,20 @@ function LiveTeam() {
   const [chip, setChip] = useState<Chip>("ALL");
   const [q, setQ] = useState("");
 
-  useEffect(() => {
-    let active = true;
-    let timer: ReturnType<typeof setInterval> | undefined;
-    const refresh = () =>
-      load(teamId).then(
-        (d) => active && (setData(d), setError(null)),
-        (e) => active && setError(errorMessage(e)),
-      );
-    // Refresh every 30 s while the tab is visible; catch up as soon as it is shown again.
-    const sync = () => {
-      clearInterval(timer);
-      if (document.visibilityState === "hidden") return;
-      refresh();
-      timer = setInterval(refresh, REFRESH_MS);
-    };
-    sync();
-    document.addEventListener("visibilitychange", sync);
-    return () => {
-      active = false;
-      clearInterval(timer);
-      document.removeEventListener("visibilitychange", sync);
-    };
-  }, [teamId, retry]);
+  // Refresh every 30 s while the tab is visible; only the newest response is applied.
+  useEffect(
+    () => pollWhileVisible(() => load(teamId), (d) => (setData(d), setError(null)), (e) => setError(errorMessage(e)), REFRESH_MS),
+    [teamId, retry],
+  );
 
   const members = useMemo(
     () => (data?.rows ?? []).map((row) => ({ row, card: describeMember(row, data!.extras.get(row.employeeId) ?? NO_EXTRAS, data!.at) })),
     [data],
   );
   const counts = countByChip(members.map((m) => m.card.state));
-  const shown = members.filter((m) => matches({ ...m.row, state: m.card.state }, chip, q));
+  // The Offline chip is hidden at 0; a selection on it falls back to All rather than an invisible filter.
+  const active: Chip = chip === "OFFLINE" && counts.OFFLINE === 0 ? "ALL" : chip;
+  const shown = members.filter((m) => matches({ ...m.row, state: m.card.state }, active, q));
 
   return (
     <div className="mx-auto flex max-w-7xl flex-col gap-6">
@@ -128,10 +113,10 @@ function LiveTeam() {
                 <button
                   key={c}
                   type="button"
-                  aria-pressed={chip === c}
+                  aria-pressed={active === c}
                   onClick={() => setChip(c)}
                   className={`rounded-full border px-3 py-1 text-sm font-medium focus-visible:ring-2 focus-visible:ring-brand focus-visible:outline-none ${
-                    chip === c ? "border-brand bg-brand text-white" : "border-border bg-surface hover:bg-surface-muted"
+                    active === c ? "border-brand bg-brand text-white" : "border-border bg-surface hover:bg-surface-muted"
                   }`}
                 >
                   {CHIP_LABEL[c]} <span className="tabular-nums">{counts[c]}</span>
@@ -150,7 +135,7 @@ function LiveTeam() {
             {data.missing.length > 0 && <p className="text-xs text-muted">Not available right now: {data.missing.join(", ")}.</p>}
           </div>
           {shown.length === 0 ? (
-            <EmptyState title={q ? "Nobody matches your search." : EMPTY[chip]} />
+            <EmptyState title={q ? "Nobody matches your search." : EMPTY[active]} />
           ) : (
             <ul aria-label="Team members" className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
               {shown.map((m) => <MemberCardView key={m.row.employeeId} row={m.row} m={m.card} />)}

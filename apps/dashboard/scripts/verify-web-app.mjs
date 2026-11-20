@@ -518,9 +518,11 @@ try {
   const sched = ok(await api("/settings/schedule", { cookie: superCookie }), "schedule");
   check("workflow: admin saves an enabled work schedule; history lists it", saved && sched.current.enabled && sched.current.expectedStart === "11:00" && sched.current.workdays === "1234567" && sched.history.length === 2, JSON.stringify(sched.current));
 
-  await go("/attendance?view=daily");
-  await js(setReact(`document.querySelector('main input[type=date]')`, D));
-  await waitFor(`document.querySelector('main input[type=date]').value === ${JSON.stringify(D)}`, "date set");
+  await go("/attendance?tab=daily");
+  // Daily follows the global date filter in the top bar (W2-ATTENDANCE-UI).
+  await waitFor(`!!document.querySelector('input[type=date][aria-label=Date]')`, "global date filter");
+  await js(setReact(`document.querySelector('input[type=date][aria-label=Date]')`, D));
+  await waitFor(`document.querySelector('input[type=date][aria-label=Date]').value === ${JSON.stringify(D)}`, "date set");
   await waitFor(`(document.querySelector('table[aria-label="Daily attendance"]')?.innerText ?? '').includes('Cara Leave')`, "daily table");
   const statusOf = (name) => js(`(() => { const r = [...document.querySelectorAll('table[aria-label="Daily attendance"] tbody tr')].find((x) => x.innerText.includes(${JSON.stringify(name)})); return r ? [...r.cells].map((c) => c.innerText.trim()) : null; })()`);
   const [anaRow, benRow, caraRow, samRow] = [await statusOf("Ana Kolkata"), await statusOf("Ben Utc"), await statusOf("Cara Leave"), await statusOf("Sam Super")];

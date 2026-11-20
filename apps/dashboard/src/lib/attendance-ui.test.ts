@@ -1,10 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { ANOMALY_THRESHOLDS, MISSING_CLOCK_OUT_REASONS, type MonthlyAttendanceDay } from "@workfolio/shared";
-import { DAY_CODE, dayTitle, eventSourceLabel, lastSeenLabel, parseAttendanceTab, reasonText, relativeTime } from "./attendance-ui";
+import { ago, DAY_CODE, dayTitle, eventSourceLabel, lastSeenLabel, parseAttendanceTab, reasonText } from "./attendance-ui";
 
 const NOW = Date.parse("2026-11-20T12:00:00Z");
-const ago = (min: number) => new Date(NOW - min * 60_000).toISOString();
+const minsAgo = (min: number) => new Date(NOW - min * 60_000).toISOString();
 
 test("tab: ?tab= wins, legacy ?view= still read, unknown falls back to live", () => {
   assert.equal(parseAttendanceTab(new URLSearchParams("tab=monthly")), "monthly");
@@ -38,21 +38,22 @@ test("every missing clock-out reason has a label and an explanation using the th
   assert.match(reasonText("LONG_BREAK", { ...ANOMALY_THRESHOLDS, longBreakMinutes: 90 }).explain, /1h 30m/);
 });
 
-test("relative time boundaries", () => {
-  assert.equal(relativeTime(ago(0), NOW), "just now");
-  assert.equal(relativeTime(ago(-5), NOW), "just now"); // device clock ahead
-  assert.equal(relativeTime(ago(59), NOW), "59 min ago");
-  assert.equal(relativeTime(ago(60), NOW), "1 h ago");
-  assert.equal(relativeTime(ago(23 * 60 + 59), NOW), "23 h ago");
-  assert.equal(relativeTime(ago(24 * 60), NOW), "1 day ago");
-  assert.equal(relativeTime(ago(26 * 60 * 3), NOW), "3 days ago");
+test("ago boundaries", () => {
+  const M = 60_000;
+  assert.equal(ago(0), "just now");
+  assert.equal(ago(-5 * M), "just now"); // device clock ahead
+  assert.equal(ago(59 * M), "59 m ago");
+  assert.equal(ago(60 * M), "1 h ago");
+  assert.equal(ago((23 * 60 + 59) * M), "23 h 59 m ago");
+  assert.equal(ago(24 * 60 * M), "1 d ago");
+  assert.equal(ago(26 * 60 * 3 * M), "3 d ago");
 });
 
 test("regression: an online *event* never makes a stale device look online", () => {
   // Production: last event sent online at 17:06, device silent for 6 h → must not read "Online".
-  assert.equal(lastSeenLabel(false, ago(6 * 60), NOW), "Last seen 6 h ago");
-  assert.equal(lastSeenLabel(true, ago(1), NOW), "Online");
-  assert.equal(lastSeenLabel(false, null, NOW), "Device never seen");
+  assert.equal(lastSeenLabel(false, minsAgo(6 * 60), NOW), "Last seen 6 h ago");
+  assert.equal(lastSeenLabel(true, minsAgo(1), NOW), "Online");
+  assert.equal(lastSeenLabel(false, null, NOW), "Never seen");
   assert.equal(eventSourceLabel("ONLINE"), "Sent online");
   assert.equal(eventSourceLabel("OFFLINE_SYNC"), "Synced later");
 });

@@ -14,7 +14,7 @@ import {
 import { Button, EmptyState, ErrorState, FormField, SkeletonRows, StatusBadge, SuccessNotice } from "@/components/kit";
 import { formatInZone, inputClass } from "@/components/ui";
 import { api, errorMessage } from "@/lib/api";
-import { reasonText, relativeTime } from "@/lib/attendance-ui";
+import { ago, reasonText } from "@/lib/attendance-ui";
 
 /** Open shifts that look forgotten. Flag only: the fix is a correction request another admin approves. */
 export function MissingTab({ teamId }: { teamId: string | null }) {
@@ -68,7 +68,7 @@ export function MissingTab({ teamId }: { teamId: string | null }) {
                 <dt className="text-muted">Open for</dt>
                 <dd className="tabular-nums">{formatDuration(a.openForMinutes * 60_000)}</dd>
                 <dt className="text-muted">Last device contact</dt>
-                <dd>{a.lastDeviceSeenAt ? <>{relativeTime(a.lastDeviceSeenAt, now)} <span className="text-xs text-muted">({formatInZone(a.lastDeviceSeenAt, a.employee.timezone)})</span></> : "Never"}</dd>
+                <dd>{a.lastDeviceSeenAt ? <>{ago(now - Date.parse(a.lastDeviceSeenAt))} <span className="text-xs text-muted">({formatInZone(a.lastDeviceSeenAt, a.employee.timezone)})</span></> : "Never"}</dd>
                 {a.openBreakSince && (
                   <>
                     <dt className="text-muted">Break open since</dt>
