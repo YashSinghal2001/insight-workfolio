@@ -17,6 +17,8 @@ import { AnomaliesController } from "./attendance/anomalies.controller.js";
 import { AnomaliesService } from "./attendance/anomalies.service.js";
 import { OverviewController } from "./overview/overview.controller.js";
 import { OverviewService } from "./overview/overview.service.js";
+import { TeamTimelineController } from "./timeline/team-timeline.controller.js";
+import { TeamTimelineService } from "./timeline/team-timeline.service.js";
 import { AttendanceController } from "./attendance/attendance.controller.js";
 import { AttendanceService } from "./attendance/attendance.service.js";
 import { CorrectionsController } from "./attendance/corrections.controller.js";
@@ -112,7 +114,7 @@ import { NotificationRulesService } from "./notifications/notification-rules.ser
     }),
     DatabaseModule,
   ],
-  controllers: [AlertsController, HealthController, AuthController, EmployeesController, DevicesController, AttendanceController, CorrectionsController, ActivityController, MonitoringSettingsController, ScreenshotsController, ScreenshotSettingsController, TimelapseController, LeaveController, HolidaysController, TeamsController, ProjectsController, TaskTimeController, ReportsController, WebsitesController, RolesController, AuditController, ScheduleSettingsController, DailyAttendanceController, EmployeeTrackingController, GoogleDriveOAuthController, OneDriveController, DesktopUpdatesController, NotificationsController, AnomaliesController, EmployeeAnalyticsController, SummaryReportController, OverviewController],
+  controllers: [AlertsController, HealthController, AuthController, EmployeesController, DevicesController, AttendanceController, CorrectionsController, ActivityController, MonitoringSettingsController, ScreenshotsController, ScreenshotSettingsController, TimelapseController, LeaveController, HolidaysController, TeamsController, ProjectsController, TaskTimeController, ReportsController, WebsitesController, RolesController, AuditController, ScheduleSettingsController, DailyAttendanceController, EmployeeTrackingController, GoogleDriveOAuthController, OneDriveController, DesktopUpdatesController, NotificationsController, AnomaliesController, EmployeeAnalyticsController, SummaryReportController, OverviewController, TeamTimelineController],
   providers: [
     AlertsService,
     AuthService,
@@ -121,6 +123,7 @@ import { NotificationRulesService } from "./notifications/notification-rules.ser
     AttendanceService,
     AnomaliesService,
     OverviewService,
+    TeamTimelineService,
     TimesheetService,
     MonthlyService,
     SummaryReportService,

@@ -25,6 +25,7 @@ export const ADMIN_NAV: readonly NavSection[] = [
     title: "Monitoring",
     items: [
       { label: "Activity", href: "/activity" },
+      { label: "Timeline", href: "/timeline" },
       { label: "Screenshots", href: "/screenshots" },
       { label: "Websites", href: "/websites" },
     ],
