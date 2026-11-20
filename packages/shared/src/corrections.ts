@@ -7,6 +7,8 @@ export type CorrectionStatus = (typeof CORRECTION_STATUSES)[number];
 
 const instant = z.iso.datetime({ offset: true }).transform((v) => new Date(v).toISOString());
 const reason = z.string().trim().min(3, "Please give a reason (at least 3 characters)").max(1000);
+/** Omitted or the caller's own: their own request. Another employee: only attendance:review holders (else 404). */
+const employeeId = z.uuid().optional();
 
 /**
  * What an employee may ask to change. All times are UTC instants; clients convert from the
@@ -15,11 +17,11 @@ const reason = z.string().trim().min(3, "Please give a reason (at least 3 charac
 export const createCorrectionSchema = z
   .discriminatedUnion("type", [
     // A whole shift was never recorded.
-    z.strictObject({ type: z.literal("MISSING_CLOCK_IN"), clockInAt: instant, clockOutAt: instant, reason }),
+    z.strictObject({ type: z.literal("MISSING_CLOCK_IN"), clockInAt: instant, clockOutAt: instant, reason, employeeId }),
     // The shift is still open (forgotten clock-out). An open break must be closed too.
-    z.strictObject({ type: z.literal("MISSING_CLOCK_OUT"), sessionId: z.uuid(), clockOutAt: instant, breakEndedAt: instant.optional(), reason }),
-    z.strictObject({ type: z.literal("BREAK_TIME"), sessionId: z.uuid(), breakId: z.uuid(), startedAt: instant, endedAt: instant, reason }),
-    z.strictObject({ type: z.literal("ATTENDANCE_TIME"), sessionId: z.uuid(), clockInAt: instant.optional(), clockOutAt: instant.optional(), reason }),
+    z.strictObject({ type: z.literal("MISSING_CLOCK_OUT"), sessionId: z.uuid(), clockOutAt: instant, breakEndedAt: instant.optional(), reason, employeeId }),
+    z.strictObject({ type: z.literal("BREAK_TIME"), sessionId: z.uuid(), breakId: z.uuid(), startedAt: instant, endedAt: instant, reason, employeeId }),
+    z.strictObject({ type: z.literal("ATTENDANCE_TIME"), sessionId: z.uuid(), clockInAt: instant.optional(), clockOutAt: instant.optional(), reason, employeeId }),
   ])
   .superRefine((v, ctx) => {
     const pair = (a?: string, b?: string, msg = "End must be after start") => a && b && a >= b && ctx.addIssue({ code: "custom", message: msg });
