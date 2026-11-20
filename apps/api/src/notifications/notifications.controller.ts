@@ -1,5 +1,5 @@
 import { Body, Controller, Get, HttpCode, Param, ParseUUIDPipe, Patch, Post, Put, Query } from "@nestjs/common";
-import { createNotificationRuleSchema, listNotificationsQuerySchema, notificationRuleRecipientsSchema, updateNotificationRuleSchema } from "@workfolio/shared";
+import { createNotificationRuleSchema, listNotificationsQuerySchema, notificationRuleRecipientsSchema, recipientCandidatesQuerySchema, updateNotificationRuleSchema } from "@workfolio/shared";
 import type { z } from "zod";
 import { CurrentUser, RequirePermission } from "../auth/auth.guard.js";
 import type { AuthContext } from "../auth/auth.service.js";
@@ -34,6 +34,13 @@ export class NotificationsController {
   @RequirePermission("settings:manage")
   listRules(@CurrentUser() user: AuthContext) {
     return this.rules.list(user);
+  }
+
+  /** Accounts PUT recipients accepts for a rule of this scope (organisation-wide, or ?teamId= for a team rule). */
+  @Get("rules/recipient-candidates")
+  @RequirePermission("settings:manage")
+  recipientCandidates(@Query(new ZodPipe(recipientCandidatesQuerySchema)) q: z.infer<typeof recipientCandidatesQuerySchema>) {
+    return this.rules.recipientCandidates(q.teamId ?? null);
   }
 
   @Post("rules")

@@ -9,7 +9,6 @@ import { buttonClass, formatInZone, inputClass, Notice, secondaryButtonClass } f
 import { api, errorMessage } from "@/lib/api";
 import { LeaveSummary } from "../_components/leave-summary";
 import { LeaveBalances } from "./leave-balances";
-import { LeaveTypes } from "./leave-types";
 
 const FILTERS = [
   { id: "PENDING", label: "Pending" },
@@ -23,7 +22,6 @@ const VIEWS = [
   { id: "requests", label: "Requests" },
   { id: "summary", label: "Summary" },
   { id: "balances", label: "Balances" },
-  { id: "types", label: "Leave types" },
 ] as const;
 const STATUS: Record<LeaveStatus, Tone> = { PENDING: "warning", APPROVED: "success", REJECTED: "danger", CANCELLED: "neutral" };
 const ACTION = { SUBMITTED: "Requested", APPROVED: "Approved", REJECTED: "Rejected", CANCELLED: "Cancelled" } as const;
@@ -147,15 +145,13 @@ export default function LeavePage() {
         title="Leave"
         about="Employees request leave from the desktop app or the web panel (My leave). Approving or rejecting records your decision only: attendance and timesheets are not changed, and approved leave shows in the daily attendance view. You cannot decide your own requests."
       />
-      <Notice tone="info">Approval is refused when it would exceed the employee&apos;s balance for the leave type (yearly days, or monthly hours for short leave). Requests from the desktop app use the General type.</Notice>
+      <Notice tone="info">Approval is refused when it would exceed the employee&apos;s balance for the leave type (yearly days, or monthly hours for short leave). Requests from the desktop app use the General type. Leave types and their allowances are set in <Link href="/settings/leave-types" className="underline">Settings → Leave types</Link>.</Notice>
 
       <Tabs label="Leave views" tabs={VIEWS} value={view} idPrefix="leave-view" onChange={setView}>
       {view === "summary" ? (
         <LeaveSummary />
       ) : view === "balances" ? (
         <LeaveBalances />
-      ) : view === "types" ? (
-        <LeaveTypes />
       ) : (
       <Tabs label="Status" tabs={FILTERS} value={filter} idPrefix="leave" onChange={(f) => (setData(null), setPage(1), setFilter(f))}>
         <div className="flex flex-col gap-4">
