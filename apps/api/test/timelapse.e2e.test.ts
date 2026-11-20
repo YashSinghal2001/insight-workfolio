@@ -65,7 +65,12 @@ async function api(path: string, { method = "GET", body, raw, cookie, bearer, de
 }
 const iso = (ms: number) => new Date(ms).toISOString();
 const sha = (b: Uint8Array) => createHash("sha256").update(b).digest("hex");
-const today = () => iso(Date.now()).slice(0, 10);
+/** P7-11: seeded instants are "N minutes before ANCHOR" (≤ 130 min back), all on ANCHOR's UTC date: ANCHOR is now,
+ * or the last instant of yesterday during the first 130 minutes after UTC midnight. Date-based queries use `today()`. */
+const DAY0 = Date.parse(`${iso(Date.now()).slice(0, 10)}T00:00:00Z`);
+const ANCHOR = Date.now() - DAY0 >= 130 * M ? Date.now() : DAY0 - 1;
+const ago = (minutes: number) => ANCHOR - minutes * M;
+const today = () => iso(ANCHOR).slice(0, 10);
 
 /** Header-valid WebP (not decodable): enough for the job logic with the fake encoder. */
 function fakeWebp(width: number, height: number, payload: number): Uint8Array {
@@ -98,8 +103,8 @@ async function employee() {
   const login = await api("/auth/login", { method: "POST", body: { email: `tl${n}@example.com`, password: PASSWORD, client: "desktop" } });
   const e = { id: r.body.employee.id as string, bearer: login.body.accessToken as string, device: randomUUID(), session: "" };
   await api("/devices/register", { method: "POST", bearer: e.bearer, body: { installationId: e.device, deviceName: "Mac", platform: "macos" } });
-  await db.execute({ sql: "INSERT INTO monitoring_consents (id, employee_id, notice_version, acknowledged_at) VALUES (?, ?, ?, ?)", args: [randomUUID(), e.id, DEFAULT_SCREENSHOT_NOTICE_VERSION, iso(Date.now() - 3 * 60 * M)] });
-  const c = await api("/attendance/sync", { method: "POST", bearer: e.bearer, device: e.device, body: { sentAt: iso(Date.now()), events: [{ id: randomUUID(), type: "CLOCK_IN", occurredAt: iso(Date.now() - 120 * M) }] } });
+  await db.execute({ sql: "INSERT INTO monitoring_consents (id, employee_id, notice_version, acknowledged_at) VALUES (?, ?, ?, ?)", args: [randomUUID(), e.id, DEFAULT_SCREENSHOT_NOTICE_VERSION, iso(ago(180))] });
+  const c = await api("/attendance/sync", { method: "POST", bearer: e.bearer, device: e.device, body: { sentAt: iso(Date.now()), events: [{ id: randomUUID(), type: "CLOCK_IN", occurredAt: iso(ago(120)) }] } });
   assert.equal(c.body.results[0].status, "ACCEPTED");
   e.session = String((await db.execute({ sql: "SELECT id FROM attendance_sessions WHERE employee_id = ?", args: [e.id] })).rows[0]!.id);
   return e;
@@ -109,7 +114,7 @@ type Emp = Awaited<ReturnType<typeof employee>>;
 /** Registers and uploads through the real API; returns the server id. */
 async function stored(e: Emp, minutesAgo: number, bytes: Uint8Array, width: number, height: number) {
   const id = randomUUID();
-  const meta = { capturedAt: iso(Date.now() - minutesAgo * M), width, height, sizeBytes: bytes.length, checksum: sha(bytes), mimeType: "image/webp" };
+  const meta = { capturedAt: iso(ago(minutesAgo)), width, height, sizeBytes: bytes.length, checksum: sha(bytes), mimeType: "image/webp" };
   const reg = await api("/screenshots/register", { method: "POST", bearer: e.bearer, device: e.device, body: { id, sentAt: iso(Date.now()), ...meta } });
   assert.equal(reg.body.status, "REGISTERED", reg.text);
   assert.equal((await api(`/screenshots/${id}/content`, { method: "PUT", bearer: e.bearer, device: e.device, raw: bytes })).status, 200);
@@ -356,7 +361,7 @@ describe("timelapse (fake encoder: job logic, not real video)", () => {
       sql: `INSERT INTO screenshots (id, employee_id, device_id, attendance_session_id, idempotency_key, captured_at, device_captured_at, width, height,
               mime_type, file_size_bytes, checksum, storage_provider, storage_key, upload_status, stored_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, 1920, 1080, 'image/webp', 100, ?, 'LOCAL_DEV', ?, 'STORED', ?)`,
-      args: [randomUUID(), e.id, device, e.session, randomUUID(), iso(Date.now() - 100 * M + (from + i) * 1000), iso(Date.now()), "0".repeat(64), `x/${randomUUID()}`, iso(Date.now())],
+      args: [randomUUID(), e.id, device, e.session, randomUUID(), iso(ago(100) + (from + i) * 1000), iso(Date.now()), "0".repeat(64), `x/${randomUUID()}`, iso(Date.now())],
     })), "write");
     await insert(TIMELAPSE_LIMITS.confirmAboveFrames + 1, 0);
     const unconfirmed = await create({ sessionId: e.session });

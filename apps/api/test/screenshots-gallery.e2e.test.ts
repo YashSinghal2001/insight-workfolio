@@ -84,8 +84,8 @@ type Emp = Awaited<ReturnType<typeof employee>>;
 /** Clocked in two hours ago with the screenshot notice acknowledged before that. */
 async function ready() {
   const e = await employee();
-  await db.execute({ sql: "INSERT INTO monitoring_consents (id, employee_id, notice_version, acknowledged_at) VALUES (?, ?, ?, ?)", args: [randomUUID(), e.id, DEFAULT_SCREENSHOT_NOTICE_VERSION, iso(Date.now() - 3 * 60 * M)] });
-  const r = await api("/attendance/sync", { method: "POST", bearer: e.bearer, device: e.device, body: { sentAt: iso(Date.now()), events: [{ id: randomUUID(), type: "CLOCK_IN", occurredAt: iso(Date.now() - 120 * M) }] } });
+  await db.execute({ sql: "INSERT INTO monitoring_consents (id, employee_id, notice_version, acknowledged_at) VALUES (?, ?, ?, ?)", args: [randomUUID(), e.id, DEFAULT_SCREENSHOT_NOTICE_VERSION, iso(ago(180))] });
+  const r = await api("/attendance/sync", { method: "POST", bearer: e.bearer, device: e.device, body: { sentAt: iso(Date.now()), events: [{ id: randomUUID(), type: "CLOCK_IN", occurredAt: iso(ago(120)) }] } });
   assert.equal(r.body.results[0].status, "ACCEPTED");
   return e;
 }
@@ -106,7 +106,12 @@ async function stored(e: Emp, at: number, database = db) {
 }
 const settings = (patch: object, root = base, cookie = admin) =>
   api("/settings/screenshots", { method: "PUT", cookie, body: { ...DEFAULT_SCREENSHOT_SETTINGS, enabled: true, intervalSeconds: 60, reason: "test", ...patch } }, root);
-const today = () => iso(Date.now()).slice(0, 10);
+/** P7-11: seeded instants are "N minutes before ANCHOR" (≤ 130 min back), all on ANCHOR's UTC date: ANCHOR is now,
+ * or the last instant of yesterday during the first 130 minutes after UTC midnight. Date-based queries use `today()`. */
+const DAY0 = Date.parse(`${iso(Date.now()).slice(0, 10)}T00:00:00Z`);
+const ANCHOR = Date.now() - DAY0 >= 130 * M ? Date.now() : DAY0 - 1;
+const ago = (minutes: number) => ANCHOR - minutes * M;
+const today = () => iso(ANCHOR).slice(0, 10);
 async function backdatedPolicy(database: Db) {
   await database.execute({
     sql: `INSERT INTO screenshot_policies (screenshots_enabled, interval_seconds, webp_quality, max_dimension, capture_scope, retention_days,
@@ -141,9 +146,9 @@ describe("gallery", () => {
   test("admin-only; filters by employee and date range; paginated newest first; real counts", async () => {
     const [a, b] = [await ready(), await ready()];
     const ids: string[] = [];
-    for (let k = 0; k < 5; k++) ids.push(await stored(a, Date.now() - (100 - k * 10) * M));
-    await stored(b, Date.now() - 50 * M);
-    const pendingShot = shot(Date.now() - 30 * M);
+    for (let k = 0; k < 5; k++) ids.push(await stored(a, ago(100 - k * 10)));
+    await stored(b, ago(50));
+    const pendingShot = shot(ago(30));
     await register(a, pendingShot); // registered, never uploaded
 
     const q = (extra: string) => `/screenshots/gallery?from=${today()}&to=${today()}&tz=UTC${extra}`;
@@ -169,7 +174,7 @@ describe("gallery", () => {
     assert.deepEqual([zoneOf(a.id), zoneOf(b.id)], ["UTC", "America/New_York"]);
     assert.ok(!("storageKey" in page2.body.items[0]) && !JSON.stringify(page2.body).includes(STORAGE_DIR), "no storage keys or paths");
 
-    const yesterday = iso(Date.now() - D).slice(0, 10);
+    const yesterday = iso(ANCHOR - D).slice(0, 10);
     assert.equal((await api(`/screenshots/gallery?from=${yesterday}&to=${yesterday}&employeeId=${a.id}`, { cookie: admin })).body.total, 0, "date filter");
     for (const bad of ["from=2026-10-13&to=2026-10-12", "from=2026-08-01&to=2026-10-01", `from=${today()}&to=${today()}&tz=Mars/Base`, `from=${today()}&to=${today()}&pageSize=500`]) {
       assert.equal((await api(`/screenshots/gallery?${bad}`, { cookie: admin })).status, 400, bad);
@@ -185,7 +190,7 @@ describe("gallery", () => {
 describe("screenshot authorization and delivery", () => {
   test("metadata and image: admin and owner only; every access audited; safe headers; self-view policy", async () => {
     const [a, b] = [await ready(), await ready()];
-    const id = await stored(a, Date.now() - 60 * M);
+    const id = await stored(a, ago(60));
 
     // Metadata endpoint.
     const asOwner = await api(`/screenshots/${id}`, { bearer: a.bearer });
@@ -230,7 +235,7 @@ describe("screenshot authorization and delivery", () => {
 
   test("a stored file that fails validation is not delivered, and errors reveal no paths", async () => {
     const a = await ready();
-    const id = await stored(a, Date.now() - 70 * M);
+    const id = await stored(a, ago(70));
     const key = (await db.execute({ sql: "SELECT storage_key FROM screenshots WHERE id = ?", args: [id] })).rows[0]!.storage_key as string;
     writeFileSync(join(STORAGE_DIR, key), "<html><script>alert(1)</script></html>");
     const r = await api(`/screenshots/${id}/content`, { cookie: admin });
@@ -249,7 +254,7 @@ describe("cloud confirmation and reliability", () => {
     const a = await ready();
     const storage = app.get(SCREENSHOT_STORAGE);
     const stat = storage.stat.bind(storage);
-    const s = shot(Date.now() - 80 * M);
+    const s = shot(ago(80));
     await register(a, s);
     storage.stat = async (key: string) => ({ ...(await stat(key))!, quickXorHash: "AAAAAAAAAAAAAAAAAAAAAAAAAAA=" });
     assert.equal((await upload(a, s)).status, 502, "provider hash differs: not complete");
@@ -269,7 +274,7 @@ describe("cloud confirmation and reliability", () => {
     assert.equal(await status(), "STORED");
 
     // Two concurrent uploads of the same screenshot: both succeed, one stored file.
-    const t = shot(Date.now() - 90 * M);
+    const t = shot(ago(90));
     await register(a, t);
     const [u1, u2] = await Promise.all([upload(a, t), upload(a, t)]);
     assert.deepEqual([u1.body.status, u2.body.status], ["STORED", "STORED"]);
@@ -277,7 +282,7 @@ describe("cloud confirmation and reliability", () => {
 
   test("an interrupted upload leaves the screenshot registered and a later upload completes it", async () => {
     const a = await ready();
-    const s = shot(Date.now() - 100 * M);
+    const s = shot(ago(100));
     await register(a, s);
     const url = new URL(`${base}/api/v1/screenshots/${s.id}/content`);
     await new Promise<void>((resolve) => {
@@ -301,7 +306,7 @@ describe("cloud confirmation and reliability", () => {
 describe("retention runs", () => {
   test("dry run, gated, run log with deletion mode; failures retried; expired unuploaded screenshots are never reported stored", async () => {
     const a = await ready();
-    const s = shot(Date.now() - 30 * M);
+    const s = shot(ago(30));
     await register(a, s);
     await upload(a, s);
     const base = (await db.execute({ sql: "SELECT device_id, attendance_session_id FROM screenshots WHERE idempotency_key = ?", args: [s.id] })).rows[0]!;
