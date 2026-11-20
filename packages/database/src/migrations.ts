@@ -1401,6 +1401,19 @@ export const MIGRATIONS: Migration[] = [
       "CREATE INDEX notification_deliveries_event ON notification_deliveries(event_id)",
     ],
   },
+  {
+    id: "0035_report_schedule_kinds",
+    statements: [
+      // Report kinds (docs/email-reports.md): the existing worked-hours summary, or late / absent lists.
+      "ALTER TABLE report_schedules ADD COLUMN kind TEXT NOT NULL DEFAULT 'WORKED_HOURS' CHECK (kind IN ('WORKED_HOURS', 'LATE', 'ABSENT'))",
+      // Local HH:MM in the schedule's zone on the day after the period; NULL = the first scheduler check after it ends.
+      "ALTER TABLE report_schedules ADD COLUMN send_at_local_time TEXT CHECK (send_at_local_time IS NULL OR (send_at_local_time GLOB '[0-2][0-9]:[0-5][0-9]' AND send_at_local_time <= '23:59'))",
+      // One team's active members; NULL = organisation (or employee_id). Never both: ALTER cannot add a table CHECK, so triggers.
+      "ALTER TABLE report_schedules ADD COLUMN team_id TEXT REFERENCES teams(id) ON DELETE RESTRICT",
+      "CREATE TRIGGER report_schedules_one_scope_insert BEFORE INSERT ON report_schedules WHEN NEW.employee_id IS NOT NULL AND NEW.team_id IS NOT NULL BEGIN SELECT RAISE(ABORT, 'report_scope'); END",
+      "CREATE TRIGGER report_schedules_one_scope_update BEFORE UPDATE ON report_schedules WHEN NEW.employee_id IS NOT NULL AND NEW.team_id IS NOT NULL BEGIN SELECT RAISE(ABORT, 'report_scope'); END",
+    ],
+  },
 ];
 
 const checksum = (m: Migration) => createHash("sha256").update(JSON.stringify(m.statements)).digest("hex");
