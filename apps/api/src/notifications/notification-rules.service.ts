@@ -13,6 +13,7 @@ import {
   type AccountAuditAction,
   type AttendanceEventType,
   type AttendanceNotificationType,
+  type NotificationRecipientCandidate,
   type NotificationRecipientRole,
   type NotificationRule,
   type NotificationRuleInput,
@@ -60,6 +61,12 @@ const roleOf = (u: Row): NotificationRecipientRole => {
  * ponytail: one in-process timer (single API instance, like the alert evaluator); dedupe keys keep a second
  * instance or a restart from sending anything twice.
  */
+/**
+ * Who may receive a rule's emails (alias `u` = users; one `?` = the rule's team id or NULL): an ACTIVE admin account
+ * or the head of that active team. Used by PUT recipients (validation) and recipient-candidates (the picker).
+ */
+const ELIGIBLE = `u.status = 'ACTIVE' AND (u.role = 'ADMIN' OR EXISTS (SELECT 1 FROM teams t WHERE t.id = ? AND t.head_user_id = u.id AND t.active = 1))`;
+
 @Injectable()
 export class NotificationRulesService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(NotificationRulesService.name);
@@ -151,8 +158,7 @@ export class NotificationRulesService implements OnModuleInit, OnModuleDestroy {
     const rule = await this.get(id);
     if (userIds.length) {
       const ok = await this.db.execute({
-        sql: `SELECT u.id FROM users u WHERE u.id IN (${userIds.map(() => "?").join(", ")}) AND u.status = 'ACTIVE'
-                AND (u.role = 'ADMIN' OR EXISTS (SELECT 1 FROM teams t WHERE t.id = ? AND t.head_user_id = u.id AND t.active = 1))`,
+        sql: `SELECT u.id FROM users u WHERE u.id IN (${userIds.map(() => "?").join(", ")}) AND ${ELIGIBLE}`,
         args: [...userIds, rule.teamId],
       });
       if (ok.rows.length !== userIds.length) throw new BadRequestException("Recipients must be active admin accounts, or the head of this rule's team");
@@ -176,6 +182,23 @@ export class NotificationRulesService implements OnModuleInit, OnModuleDestroy {
       await this.db.batch(statements, "write");
     }
     return this.get(id);
+  }
+
+  /** Every account PUT recipients would accept for a rule of this scope (same ELIGIBLE check). Unknown team → 404. */
+  async recipientCandidates(teamId: string | null): Promise<NotificationRecipientCandidate[]> {
+    if (teamId && !(await this.db.execute({ sql: "SELECT 1 FROM teams WHERE id = ?", args: [teamId] })).rows[0]) throw new NotFoundException("Team not found");
+    const { rows } = await this.db.execute({
+      sql: `SELECT u.id, u.email, u.role, u.admin_title, p.full_name FROM users u LEFT JOIN employee_profiles p ON p.user_id = u.id
+            WHERE ${ELIGIBLE} ORDER BY coalesce(p.full_name, u.email) COLLATE NOCASE, u.id`,
+      args: [teamId],
+    });
+    return rows.map((r) => ({
+      userId: String(r.id),
+      fullName: r.full_name === null ? null : String(r.full_name),
+      email: String(r.email),
+      platformRole: platformRoleOf(r.role as Role, r.admin_title as string | null),
+      teamHead: r.role !== "ADMIN",
+    }));
   }
 
   private async recipients(ruleId?: string) {

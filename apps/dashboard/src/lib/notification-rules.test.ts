@@ -12,7 +12,7 @@ const teams: TeamLite[] = [
   { id: "t2", name: "Alpha", active: true, head: null },
   { id: "t3", name: "Gone", active: false, head: { id: "h3", email: "h3@example.com", fullName: null } },
 ];
-const admins = [{ userId: "a1", label: "Zed Admin", email: "a1@example.com" }, { userId: "h1", label: "Hana Head", email: "h1@example.com" }];
+const elig = (userId: string, fullName: string | null, teamHead = false) => ({ userId, fullName, email: `${userId}@example.com`, platformRole: teamHead ? "EMPLOYEE" as const : "ADMIN" as const, teamHead });
 
 test("groupRules: six types in fixed order, org rule first, team rules by team name", () => {
   const rules = [rule({ id: "x", teamId: "t1" }), rule({ id: "o" }), rule({ id: "y", teamId: "t2" }), rule({ id: "c", type: "ATTENDANCE_CLOCK_IN" })];
@@ -25,15 +25,14 @@ test("groupRules: six types in fixed order, org rule first, team rules by team n
   assert.deepEqual(groupRules([], () => "").flatMap((x) => x.teams), []);
 });
 
-test("candidatesFor: admins everywhere; the team head only on that team's rule; current recipients kept; no duplicates", () => {
-  assert.deepEqual(candidatesFor(rule({}), admins.slice(0, 1), teams).map((c) => c.userId), ["a1"]);
-  const team = candidatesFor(rule({ teamId: "t1" }), admins.slice(0, 1), teams);
-  assert.deepEqual(team.map((c) => [c.userId, c.kind]), [["h1", "head"], ["a1", "admin"]]);
-  assert.equal(candidatesFor(rule({ teamId: "t3" }), [], teams).length, 0, "inactive team's head not offered");
-  const dup = candidatesFor(rule({ teamId: "t1", recipients: [{ userId: "h1", fullName: "Hana Head", email: "h1@example.com" }] }), admins, teams);
-  assert.deepEqual(dup.map((c) => [c.userId, c.kind]), [["h1", "admin"], ["a1", "admin"]]);
-  const gone = candidatesFor(rule({ recipients: [{ userId: "old", fullName: null, email: "old@example.com" }] }), [], teams);
-  assert.deepEqual(gone.map((c) => [c.label, c.kind]), [["old@example.com", "current"]]);
+test("candidatesFor: the API's eligible accounts (head marked), current recipients kept, no duplicates, by name", () => {
+  assert.deepEqual(candidatesFor(rule({}), []), []);
+  const c = candidatesFor(rule({ teamId: "t1" }), [elig("a1", "Zed Admin"), elig("h1", "Hana Head", true), elig("a2", null)]);
+  assert.deepEqual(c.map((x) => [x.userId, x.kind, x.label]), [["a2", "admin", "a2@example.com"], ["h1", "head", "Hana Head"], ["a1", "admin", "Zed Admin"]]);
+  const dup = candidatesFor(rule({ recipients: [{ userId: "a1", fullName: "Zed Admin", email: "a1@example.com" }] }), [elig("a1", "Zed Admin")]);
+  assert.deepEqual(dup.map((x) => [x.userId, x.kind]), [["a1", "admin"]]);
+  const gone = candidatesFor(rule({ recipients: [{ userId: "old", fullName: null, email: "old@example.com" }] }), []);
+  assert.deepEqual(gone.map((x) => [x.label, x.kind]), [["old@example.com", "current"]]);
 });
 
 test("teamsWithoutRule: active teams lacking a rule of the type, by name", () => {

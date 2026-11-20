@@ -3,51 +3,29 @@
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import {
-  can,
   NOTIFICATION_RULE_MODES,
   type AttendanceNotificationType,
-  type Employee,
   type NotificationOverview,
+  type NotificationRecipientCandidate,
   type NotificationRule,
   type NotificationRuleMode,
-  type Paginated,
-  type RoleUser,
   type Team,
 } from "@workfolio/shared";
-import { useAuth } from "@/components/auth-provider";
 import { Button, EmptyState, ErrorState, PageHeader, SkeletonRows, StatusBadge } from "@/components/kit";
 import { Card, Field, inputClass, Notice } from "@/components/ui";
 import { api, errorMessage } from "@/lib/api";
 import { candidatesFor, groupRules, MODE_LABEL, ruleChanges, ruleSummary, teamsWithoutRule, TYPE_LABEL, type Candidate, type TeamLite } from "@/lib/notification-rules";
 
-type Admin = Omit<Candidate, "kind">;
 const TIMEZONES = typeof Intl.supportedValuesOf === "function" ? Intl.supportedValuesOf("timeZone") : [];
-
-/**
- * Active admin accounts. A Super Admin reads every account (GET /roles/users, includes admins without an employee
- * profile); others read admin employees (GET /employees?role=…). The signed-in admin is always included.
- */
-async function loadAdmins(superAdmin: boolean, me: { id: string; email: string }): Promise<Admin[]> {
-  let list: Admin[];
-  if (superAdmin) {
-    const users = await api<RoleUser[]>("/roles/users");
-    list = users.filter((u) => u.status === "ACTIVE" && u.platformRole !== "EMPLOYEE").map((u) => ({ userId: u.id, label: u.employee?.fullName ?? u.email, email: u.email }));
-  } else {
-    const pages = await Promise.all(["ADMIN", "SUPER_ADMIN"].map((role) => api<Paginated<Employee>>(`/employees?role=${role}&pageSize=100`)));
-    list = pages.flatMap((p) => p.items).filter((e) => e.accountStatus === "ACTIVE").map((e) => ({ userId: e.userId, label: e.fullName, email: e.email }));
-  }
-  return list.some((a) => a.userId === me.id) ? list : [...list, { userId: me.id, label: me.email, email: me.email }];
-}
 
 /** Settings → Email & notifications: attendance notification rules (docs/notifications.md §9). */
 export default function NotificationRulesPage() {
-  const { auth } = useAuth();
-  const me = auth.status === "authenticated" ? auth.me.user : null;
   const [rules, setRules] = useState<NotificationRule[] | null>(null);
   const [rulesError, setRulesError] = useState<string | null>(null);
   const [email, setEmail] = useState<NotificationOverview["email"] | null>(null);
   const [teams, setTeams] = useState<TeamLite[]>([]);
-  const [admins, setAdmins] = useState<Admin[]>([]);
+  // Eligible recipients per scope ("" = organisation-wide, else team id), from the API's own eligibility check.
+  const [eligible, setEligible] = useState<Record<string, NotificationRecipientCandidate[]>>({});
   const [lookupError, setLookupError] = useState<string | null>(null);
 
   const loadRules = useCallback(() => {
@@ -57,16 +35,18 @@ export default function NotificationRulesPage() {
   useEffect(() => {
     api<NotificationOverview>("/notifications?show=critical").then((o) => setEmail(o.email), () => setEmail(null));
   }, []);
-  const isSuper = !!me && can(me, "roles:manage");
-  const meId = me?.id;
-  const meEmail = me?.email;
+  const scopes = rules ? [...new Set(["", ...rules.map((r) => r.teamId ?? "")])].sort().join(",") : null;
   const loadLookups = useCallback(() => {
-    if (!meId || !meEmail) return;
-    Promise.all([api<Team[]>("/teams"), loadAdmins(isSuper, { id: meId, email: meEmail })]).then(
-      ([t, a]) => (setTeams(t), setAdmins(a), setLookupError(null)),
+    if (scopes === null) return;
+    const list = scopes.split(",");
+    Promise.all([
+      api<Team[]>("/teams"),
+      ...list.map((id) => api<NotificationRecipientCandidate[]>(`/notifications/rules/recipient-candidates${id ? `?teamId=${id}` : ""}`)),
+    ]).then(
+      ([t, ...c]) => (setTeams(t as Team[]), setEligible(Object.fromEntries(list.map((id, i) => [id, c[i] as NotificationRecipientCandidate[]]))), setLookupError(null)),
       (e) => setLookupError(errorMessage(e)),
     );
-  }, [isSuper, meId, meEmail]);
+  }, [scopes]);
   useEffect(loadLookups, [loadLookups]);
 
   const teamName = (id: string) => teams.find((t) => t.id === id)?.name ?? "Unknown team";
@@ -101,9 +81,9 @@ export default function NotificationRulesPage() {
         groupRules(rules, teamName).map((g) => (
           <Card key={g.type} title={TYPE_LABEL[g.type]}>
             <div className="flex flex-col gap-4">
-              {g.org && <RuleEditor rule={g.org} scope="All employees" candidates={candidatesFor(g.org, admins, teams)} onSaved={replace} />}
+              {g.org && <RuleEditor rule={g.org} scope="All employees" candidates={candidatesFor(g.org, eligible[""] ?? [])} onSaved={replace} />}
               {g.teams.map((r) => (
-                <RuleEditor key={r.id} rule={r} scope={`Team: ${teamName(r.teamId!)}`} candidates={candidatesFor(r, admins, teams)} onSaved={replace} />
+                <RuleEditor key={r.id} rule={r} scope={`Team: ${teamName(r.teamId!)}`} candidates={candidatesFor(r, eligible[r.teamId!] ?? [])} onSaved={replace} />
               ))}
               <AddTeamRule type={g.type} teams={teamsWithoutRule(teams, [g.org, ...g.teams].filter((r) => r !== null))} onAdded={replace} />
             </div>

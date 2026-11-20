@@ -1,4 +1,5 @@
 import { z } from "zod";
+import type { PlatformRole } from "./roles.js";
 import { DEFAULT_TIMEZONE, timeZoneSchema } from "./schemas.js";
 
 /**
@@ -130,6 +131,16 @@ export const updateNotificationRuleSchema = z
   .strictObject({ mode: z.enum(NOTIFICATION_RULE_MODES).optional(), digestLocalTime: localTime.optional(), timezone: timeZoneSchema.optional() })
   .refine((u) => Object.keys(u).length > 0, "Nothing to change");
 export type NotificationRuleUpdate = z.infer<typeof updateNotificationRuleSchema>;
+/** GET /notifications/rules/recipient-candidates: accounts PUT recipients accepts for this scope (team rule: teamId). */
+export const recipientCandidatesQuerySchema = z.strictObject({ teamId: z.uuid().optional() });
+export interface NotificationRecipientCandidate {
+  userId: string;
+  fullName: string | null;
+  email: string;
+  platformRole: PlatformRole;
+  /** Eligible as the head of the given team (not as an admin). */
+  teamHead: boolean;
+}
 /** The full recipient list (replaces the current one). Accounts only; at most 50. */
 export const notificationRuleRecipientsSchema = z.strictObject({
   userIds: z.array(z.uuid()).max(50).refine((ids) => new Set(ids).size === ids.length, "Duplicate user id"),

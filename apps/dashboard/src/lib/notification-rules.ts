@@ -1,5 +1,5 @@
 // Pure helpers for the notification-rules settings page (/settings/notifications).
-import { ATTENDANCE_NOTIFICATION_TYPES, type AttendanceNotificationType, type NotificationRule, type NotificationRuleMode } from "@workfolio/shared";
+import { ATTENDANCE_NOTIFICATION_TYPES, type AttendanceNotificationType, type NotificationRecipientCandidate, type NotificationRule, type NotificationRuleMode } from "@workfolio/shared";
 
 export const MODE_LABEL: Record<NotificationRuleMode, string> = { OFF: "Off", IMMEDIATE: "Immediate", DAILY_DIGEST: "Daily digest" };
 export const TYPE_LABEL: Record<AttendanceNotificationType, string> = {
@@ -38,14 +38,12 @@ export function groupRules(rules: NotificationRule[], teamName: (id: string) => 
 }
 
 /**
- * Who can be picked for a rule: every active admin, plus the head of the rule's team (team rules only, active team),
+ * Who can be picked for a rule: the accounts the API accepts for its scope (GET /notifications/rules/recipient-candidates),
  * plus anyone already a recipient (so they can be removed even if no longer eligible). One entry per account.
  */
-export function candidatesFor(rule: Pick<NotificationRule, "teamId" | "recipients">, admins: Omit<Candidate, "kind">[], teams: TeamLite[]): Candidate[] {
+export function candidatesFor(rule: Pick<NotificationRule, "recipients">, eligible: NotificationRecipientCandidate[]): Candidate[] {
   const out = new Map<string, Candidate>();
-  for (const a of admins) out.set(a.userId, { ...a, kind: "admin" });
-  const team = rule.teamId ? teams.find((t) => t.id === rule.teamId) : undefined;
-  if (team?.active && team.head && !out.has(team.head.id)) out.set(team.head.id, { userId: team.head.id, label: team.head.fullName ?? team.head.email, email: team.head.email, kind: "head" });
+  for (const c of eligible) out.set(c.userId, { userId: c.userId, label: c.fullName ?? c.email, email: c.email, kind: c.teamHead ? "head" : "admin" });
   for (const r of rule.recipients) if (!out.has(r.userId)) out.set(r.userId, { userId: r.userId, label: r.fullName ?? r.email, email: r.email, kind: "current" });
   return [...out.values()].sort((a, b) => a.label.localeCompare(b.label));
 }
