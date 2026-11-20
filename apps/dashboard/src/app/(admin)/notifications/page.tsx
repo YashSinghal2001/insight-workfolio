@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import Link from "next/link";
 import {
   NOTIFICATION_RECIPIENT_LABEL,
   NOTIFICATION_ROUTES,
@@ -72,7 +73,7 @@ export default function NotificationsPage() {
     <div className="mx-auto flex max-w-6xl flex-col gap-6">
       <PageHeader
         title="Notifications"
-        about="Emails the system sends from the IT mailbox. Recipients are chosen by the server from the event and each account's role; they cannot be set here. Times are in your time zone."
+        about="Emails the system sends from the IT mailbox. Recipients of system events are chosen by the server from the event and each account's role. Attendance events (clock-in, late arrival, absence, …) are emailed only under the rules in Settings → Email & notifications. Times are in your time zone."
         actions={<Button variant="secondary" onClick={() => setReload((n) => n + 1)}>Refresh</Button>}
       />
 
@@ -179,7 +180,13 @@ export default function NotificationsPage() {
                 <tr key={t}>
                   <td>{NOTIFICATION_ROUTES[t].label}</td>
                   <td><StatusBadge tone={SEVERITY_TONE[NOTIFICATION_ROUTES[t].severity]}>{NOTIFICATION_ROUTES[t].severity === "CRITICAL" ? "Critical" : NOTIFICATION_ROUTES[t].severity === "WARNING" ? "Warning" : "Information"}</StatusBadge></td>
-                  <td>{NOTIFICATION_ROUTES[t].roles.map((r) => (r === "EMPLOYEE" ? "Affected employee" : NOTIFICATION_RECIPIENT_LABEL[r])).join(", ")}</td>
+                  <td>
+                    {NOTIFICATION_ROUTES[t].roles.length === 0 ? (
+                      <Link href="/settings/notifications" className="text-brand underline">Set per rule (off by default)</Link>
+                    ) : (
+                      NOTIFICATION_ROUTES[t].roles.map((r) => (r === "EMPLOYEE" ? "Affected employee" : NOTIFICATION_RECIPIENT_LABEL[r])).join(", ")
+                    )}
+                  </td>
                 </tr>
               ))}
             </DataTable>

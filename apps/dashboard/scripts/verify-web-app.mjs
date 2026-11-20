@@ -264,9 +264,9 @@ async function downloaded(ext) {
   return null;
 }
 
-const ADMIN_ROUTES = ["/", "/employees", "/employees/new", `/employees/${ana.id}`, "/attendance", "/attendance?view=daily", "/timesheets", `/timesheets/${ana.id}`, "/corrections", "/leave", "/activity", "/websites", "/screenshots", "/projects", "/reports", "/roles", "/audit", "/settings", "/settings/schedule", "/settings/labels", "/account"];
+const ADMIN_ROUTES = ["/", "/employees", "/employees/new", `/employees/${ana.id}`, "/attendance", "/attendance?view=daily", "/timesheets", `/timesheets/${ana.id}`, "/corrections", "/leave", "/activity", "/websites", "/screenshots", "/projects", "/reports", "/roles", "/audit", "/settings", "/settings/schedule", "/settings/monitoring", "/settings/screenshots", "/settings/labels", "/settings/websites", "/settings/storage", "/settings/notifications", "/settings/leave-types", "/account"];
 const MY_ROUTES = ["/my", "/my/attendance", "/my/activity", "/my/websites", "/my/screenshots", "/my/projects", "/my/tasks", "/my/leave", "/my/reports", "/my/profile"];
-const RESPONSIVE_ADMIN = ["/", "/attendance?view=daily", "/timesheets", "/reports/scheduled", "/screenshots", "/settings/schedule", "/settings/labels", "/audit", `/employees/${ana.id}`];
+const RESPONSIVE_ADMIN = ["/", "/attendance?view=daily", "/timesheets", "/reports/scheduled", "/screenshots", "/settings/schedule", "/settings/monitoring", "/settings/screenshots", "/settings/notifications", "/settings/labels", "/audit", `/employees/${ana.id}`];
 const RESPONSIVE_MY = ["/my", "/my/attendance", "/my/leave", "/my/reports", "/my/profile"];
 const WIDTHS = [1440, 1024, 768, 375, 360];
 const responsive = {};
@@ -471,8 +471,14 @@ try {
     await js(`document.querySelectorAll('dialog[open]').forEach((d) => d.close())`);
     await go("/settings");
     await waitFor(`/In force now/.test(document.querySelector('main').innerText)`, "in-force summary");
-    await waitFor(`document.querySelectorAll('main input[name=retentionDays]').length === 2`, "retention inputs");
-    const retentionLocked = await js(`[...document.querySelectorAll('main input[name=retentionDays], main input[name=retentionApproved]')].map((i) => i.disabled).join()`);
+    // Retention lives on two settings sub-pages: activity (Monitoring & notices) and screenshots.
+    const locked = [];
+    for (const sub of ["/settings/monitoring", "/settings/screenshots"]) {
+      await go(sub);
+      await waitFor(`document.querySelectorAll('main input[name=retentionDays]').length === 1`, `retention input on ${sub}`);
+      locked.push(await js(`[...document.querySelectorAll('main input[name=retentionDays], main input[name=retentionApproved]')].map((i) => i.disabled).join()`));
+    }
+    const retentionLocked = locked.join();
     check(`roles: ${label} sees the retention inputs ${isSuper ? "enabled" : "disabled"} in Settings`, retentionLocked === Array(4).fill(String(!isSuper)).join(), retentionLocked);
     check(`roles: ${label} ${isSuper ? "is" : "is not"} offered the Roles link, the roles table and "Delete screenshot"; Settings shows what is in force`,
       rolesLink === isSuper && rolesPage && deleteOffered === isSuper, `link ${rolesLink}, page ${rolesPage}, delete ${deleteOffered}`);

@@ -162,7 +162,7 @@ try {
   await waitFor(`location.pathname !== "/login"`, "sign-in");
 
   // ---- Settings editor ----
-  await cdp("Page.navigate", { url: `${DASH}/settings` });
+  await cdp("Page.navigate", { url: `${DASH}/settings/screenshots` });
   await waitFor(`!!${form}`, "screenshot settings form");
   check("editor: 'Privacy masks' group with an explanation and 'No masks' state", await js(`${form}.querySelector('fieldset legend')?.textContent === 'Privacy masks' && ${form}.innerText.includes('No masks: the whole main screen is captured') && ${form}.innerText.includes('before')`));
   const add = `[...${form}.querySelectorAll('button')].find((b) => b.textContent === 'Add mask')`;

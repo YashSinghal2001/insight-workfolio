@@ -253,11 +253,13 @@ try {
   {
     const last = String((await db.execute("SELECT max(stored_at) AS at FROM screenshots")).rows[0].at);
     const shown = new Intl.DateTimeFormat("en-GB", { dateStyle: "medium", timeStyle: "short" }).format(new Date(last));
-    await visit("/settings", `!!document.querySelector('input[name=autoTimelapse]') && !!document.querySelector('[data-testid=storage-last-upload]')`, "settings page");
+    await visit("/settings/storage", `!!document.querySelector('[data-testid=storage-last-upload]')`, "settings storage page");
     await expect(`AW-04 Storage card shows "Last upload" = ${shown}`, `document.querySelector('[data-testid=storage-last-upload]')?.textContent === ${JSON.stringify(shown)} && ${has("Last upload")}`);
     const ready = await fetch(`http://localhost:${API_PORT}/api/v1/ready`).then((r) => r.text());
     check("AW-04 the public /ready does not expose the last upload", !/lastUpload/i.test(ready));
     await shot("aw04-storage-last-upload.png");
+    await pageProblems("/settings/storage");
+    await visit("/settings/screenshots", `!!document.querySelector('input[name=autoTimelapse]')`, "screenshot settings page");
 
     check("F01 toggle is off by default", (await js("document.querySelector('input[name=autoTimelapse]').checked")) === false);
     await js(`(() => { const box = document.querySelector('input[name=autoTimelapse]'); box.click(); box.form.querySelector('[name=reason]').id = 'auto-reason'; return true; })()`);
@@ -267,7 +269,7 @@ try {
     const saved = await api("/settings/screenshots", { cookie: adminCookie });
     check("F01 API: effective.autoTimelapse = true, previous version kept off", saved.body.effective.autoTimelapse === true && saved.body.history[1]?.autoTimelapse === false, JSON.stringify(saved.body.history.map((h) => h.autoTimelapse)));
     await shot("f01-auto-timelapse-toggle.png");
-    await pageProblems("/settings");
+    await pageProblems("/settings/screenshots");
 
     // Scheduler tick with an injected clock: one hour after Tia's local (UTC) day ends.
     const service = app.get(TimelapseService);

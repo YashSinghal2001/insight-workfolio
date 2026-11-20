@@ -140,7 +140,7 @@ function RuleEditor({ rule, scope, candidates, onSaved }: { rule: NotificationRu
   }
 
   return (
-    <fieldset className="rounded-md border border-border p-3" aria-label={legend}>
+    <fieldset className="min-w-0 rounded-md border border-border p-3" aria-label={legend}>
       <legend className="flex flex-wrap items-center gap-2 px-1 text-sm font-medium">
         {scope}
         <StatusBadge tone={rule.mode === "OFF" ? "neutral" : "success"}>{ruleSummary(rule)}</StatusBadge>
