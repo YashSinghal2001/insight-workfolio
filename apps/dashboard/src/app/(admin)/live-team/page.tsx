@@ -2,7 +2,7 @@
 
 import { Suspense, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { formatDuration, type ActivityOverviewResponse, type DailyAttendanceResponse, type Paginated } from "@workfolio/shared";
+import { formatDuration, type ActivityOverviewResponse, type DailyAttendanceResponse, type Paginated, type TimesheetSummaryRow } from "@workfolio/shared";
 import { EmptyState, ErrorState, PageHeader, SkeletonRows, StatusBadge, type Tone } from "@/components/kit";
 import { GlobalFilters, useGlobalFilters } from "@/components/global-filters";
 import { inputClass } from "@/components/ui";
@@ -33,17 +33,19 @@ interface Data {
 async function load(teamId: string | null): Promise<Data> {
   const team: Record<string, string> = teamId ? { teamId } : {};
   const today = todayLocal();
-  const [rows, daily, activity] = await Promise.all([
+  const [rows, daily, timesheets, activity] = await Promise.all([
     all<MemberRow>("/attendance/overview", team),
     all<DailyAttendanceResponse["items"][number]>("/attendance/daily", { ...team, date: today }).catch(() => null),
+    all<TimesheetSummaryRow>("/attendance/timesheets", { ...team, from: today, to: today }).catch(() => null),
     all<ActivityOverviewResponse["items"][number]>("/activity/overview", { from: today, to: today }).catch(() => null),
   ]);
   const extras = new Map<string, MemberExtras>();
   const get = (id: string) => extras.get(id) ?? extras.set(id, { ...NO_EXTRAS }).get(id)!;
   for (const d of daily ?? []) Object.assign(get(d.employee.id), { onLeave: d.status === "ON_LEAVE", scheduled: d.scheduled });
+  for (const t of timesheets ?? []) get(t.employee.id).closed = { date: today, netMs: t.totals.netMs };
   // No observed time (activity off, no consent, no data): no percentage rather than 0 %.
   for (const a of activity ?? []) get(a.employee.id).activeShare = a.clockedInMs > 0 && a.activeMs + a.idleMs > 0 ? a.activeMs / a.clockedInMs : null;
-  const missing = [daily ? null : "leave and schedule", activity ? null : "active time"].filter((x): x is string => !!x);
+  const missing = [daily ? null : "leave and schedule", timesheets ? null : "worked today", activity ? null : "active time"].filter((x): x is string => !!x);
   return { rows, extras, missing, at: Date.now(), teamId };
 }
 
@@ -170,7 +172,7 @@ const TINT: Record<Tone, string> = {
 
 function MemberCardView({ row, m }: { row: MemberRow; m: MemberCard }) {
   const meta = STATE_META[m.state];
-  const pct = m.scheduledMs ? Math.min(100, Math.round((m.workedMs / m.scheduledMs) * 100)) : null;
+  const pct = m.scheduledMs && m.workedMs !== null ? Math.min(100, Math.round((m.workedMs / m.scheduledMs) * 100)) : null;
   return (
     <li className="min-w-0">
       <Link
@@ -194,7 +196,7 @@ function MemberCardView({ row, m }: { row: MemberRow; m: MemberCard }) {
         </div>
         <dl className="grid grid-cols-3 gap-2 text-xs">
           <div><dt className="text-muted">Clock-in</dt><dd className="tabular-nums">{m.clockIn ?? "—"}</dd></div>
-          <div><dt className="text-muted">Worked</dt><dd className="tabular-nums">{formatDuration(m.workedMs)}</dd></div>
+          <div><dt className="text-muted">Worked today</dt><dd className="tabular-nums">{m.workedMs === null ? "—" : formatDuration(m.workedMs)}</dd></div>
           <div><dt className="text-muted">Active</dt><dd className="tabular-nums">{m.activeShare === null ? "—" : `${Math.round(m.activeShare * 100)} %`}</dd></div>
         </dl>
         {pct !== null && (

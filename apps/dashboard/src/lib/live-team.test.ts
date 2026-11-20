@@ -9,6 +9,8 @@ const NOW = Date.parse("2026-11-20T09:30:00Z");
 const TZ = "Asia/Kolkata";
 const min = (n: number) => new Date(NOW - n * 60_000).toISOString();
 
+/** Timesheet total read for a date: closed shifts clocked in that day. */
+const ts = (netMs = 0, date = "2026-11-20") => ({ ...NO_EXTRAS, closed: { date, netMs } });
 const session = (p: Partial<AttendanceSession>): AttendanceSession => ({
   id: "s1", clockInAt: "2026-11-20T03:42:00Z", clockOutAt: null, status: "OPEN", breaks: [], corrected: false, clockInSource: "ONLINE", ...p,
 });
@@ -18,7 +20,7 @@ const row = (p: Partial<MemberRow> = {}): MemberRow => ({
 });
 
 test("working: open session, device fresh", () => {
-  const c = describeMember(row({ session: session({}) }), NO_EXTRAS, NOW);
+  const c = describeMember(row({ session: session({}) }), ts(), NOW);
   assert.equal(c.state, "WORKING");
   assert.equal(c.statusLine, "Working since 09:12");
   assert.equal(c.presence, "Online");
@@ -29,7 +31,7 @@ test("working: open session, device fresh", () => {
 
 test("on break: open break wins, even with a stale device", () => {
   const s = session({ breaks: [{ startedAt: "2026-11-20T07:30:00Z", endedAt: null } as AttendanceSession["breaks"][number]] });
-  const c = describeMember(row({ session: s, lastSeenAt: min(90), online: false }), NO_EXTRAS, NOW);
+  const c = describeMember(row({ session: s, lastSeenAt: min(90), online: false }), ts(), NOW);
   assert.equal(c.state, "ON_BREAK");
   assert.equal(c.statusLine, "On break since 13:00");
   assert.equal(c.presence, "Last seen 1 h 30 m ago");
@@ -45,7 +47,7 @@ test("stale device while clocked in is Offline, never Working; fresh-but-not-onl
 
 test("open session from yesterday: flagged, only today's part counted", () => {
   const s = session({ clockInAt: "2026-11-19T04:00:00Z" });
-  const stale = describeMember(row({ session: s, missingClockOut: true, lastSeenAt: min(6 * 60), online: false }), NO_EXTRAS, NOW);
+  const stale = describeMember(row({ session: s, missingClockOut: true, lastSeenAt: min(6 * 60), online: false }), ts(), NOW);
   assert.equal(stale.state, "OFFLINE");
   assert.equal(stale.presence, "Last seen 6 h ago");
   assert.equal(stale.missingClockOut, true);
@@ -63,7 +65,7 @@ test("stopped today", () => {
 
 test("not started: no session, or last session closed on an earlier day", () => {
   assert.equal(describeMember(row({ state: "CLOCKED_OUT" }), NO_EXTRAS, NOW).state, "NOT_STARTED");
-  const c = describeMember(row({ state: "CLOCKED_OUT", session: session({ clockInAt: "2026-11-19T03:00:00Z", clockOutAt: "2026-11-19T12:00:00Z", status: "CLOSED" }) }), NO_EXTRAS, NOW);
+  const c = describeMember(row({ state: "CLOCKED_OUT", session: session({ clockInAt: "2026-11-19T03:00:00Z", clockOutAt: "2026-11-19T12:00:00Z", status: "CLOSED" }) }), ts(), NOW);
   assert.equal(c.state, "NOT_STARTED");
   assert.equal(c.statusLine, "Not started yet today");
   assert.equal(c.workedMs, 0);
@@ -85,8 +87,26 @@ test("no device: App not installed, never seen", () => {
   assert.equal(describeMember(row({ session: session({}), lastSeenAt: null, online: false }), NO_EXTRAS, NOW).state, "OFFLINE");
 });
 
+test("two-session day: closed morning shift (timesheet total) + open afternoon shift", () => {
+  // Morning 09:00–12:30 IST closed (3 h 30 m net, from /attendance/timesheets); open again since 13:30 IST (08:00Z).
+  const c = describeMember(row({ session: session({ clockInAt: "2026-11-20T08:00:00Z" }) }), ts(3.5 * 3_600_000), NOW);
+  assert.equal(c.statusLine, "Working since 13:30");
+  assert.equal(c.workedMs, 5 * 3_600_000);
+  // Both shifts closed: the latest one is already in the total, not added twice.
+  const stopped = describeMember(row({ state: "CLOCKED_OUT", session: session({ clockInAt: "2026-11-20T08:00:00Z", clockOutAt: "2026-11-20T09:00:00Z", status: "CLOSED" }) }), ts(4.5 * 3_600_000), NOW);
+  assert.equal(stopped.state, "STOPPED");
+  assert.equal(stopped.workedMs, 4.5 * 3_600_000);
+});
+
+test("worked today is unknown without a timesheet total for the employee's today", () => {
+  assert.equal(describeMember(row({ session: session({}) }), NO_EXTRAS, NOW).workedMs, null);
+  // Read for the viewer's date, but it is already the 21st for this employee.
+  const tokyoNext = Date.parse("2026-11-20T16:00:00Z");
+  assert.equal(describeMember(row({ timezone: "Asia/Tokyo" }), ts(), tokyoNext).workedMs, null);
+});
+
 test("non-workday has no scheduled bar; active share passes through", () => {
-  const c = describeMember(row(), { onLeave: false, scheduled: false, activeShare: 0.82 }, NOW);
+  const c = describeMember(row(), { ...NO_EXTRAS, scheduled: false, activeShare: 0.82 }, NOW);
   assert.equal(c.scheduledMs, null);
   assert.equal(c.activeShare, 0.82);
 });
@@ -94,7 +114,7 @@ test("non-workday has no scheduled bar; active share passes through", () => {
 test("America/New_York across the DST change uses the local day", () => {
   // 2026-11-01 02:00 EDT → 01:00 EST. Clocked in 00:30 EDT (04:30Z), now 09:00 EST (14:00Z).
   const now = Date.parse("2026-11-01T14:00:00Z");
-  const c = describeMember(row({ timezone: "America/New_York", session: session({ clockInAt: "2026-11-01T04:30:00Z" }), lastSeenAt: new Date(now).toISOString() }), NO_EXTRAS, now);
+  const c = describeMember(row({ timezone: "America/New_York", session: session({ clockInAt: "2026-11-01T04:30:00Z" }), lastSeenAt: new Date(now).toISOString() }), ts(0, "2026-11-01"), now);
   assert.equal(c.statusLine, "Working since 00:30");
   assert.equal(c.workedMs, 9.5 * 3_600_000);
 });

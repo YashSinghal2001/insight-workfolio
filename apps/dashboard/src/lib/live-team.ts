@@ -11,16 +11,18 @@ import type { Tone } from "@/components/kit";
 
 export type MemberRow = AttendanceOverviewRow & OverviewFreshness;
 
-/** Per-member data from the optional reads (/attendance/daily, /activity/overview); null/false when unavailable. */
+/** Per-member data from the other reads (/attendance/daily, /attendance/timesheets, /activity/overview); null/false when unavailable. */
 export interface MemberExtras {
   onLeave: boolean;
   /** Today is a workday under the schedule; null = unknown or no schedule (the 8 h default applies). */
   scheduled: boolean | null;
   /** activeMs / clockedInMs today, 0..1; null when not monitored or nothing clocked in. */
   activeShare: number | null;
+  /** /attendance/timesheets totals for one local date: net time of the shifts clocked in that day and already closed (open shifts excluded). */
+  closed: { date: string; netMs: number } | null;
 }
 
-export const NO_EXTRAS: MemberExtras = { onLeave: false, scheduled: null, activeShare: null };
+export const NO_EXTRAS: MemberExtras = { onLeave: false, scheduled: null, activeShare: null, closed: null };
 
 export const MEMBER_STATES = ["WORKING", "ON_BREAK", "STOPPED", "ON_LEAVE", "APP_NOT_INSTALLED", "NOT_STARTED", "OFFLINE"] as const;
 export type MemberState = (typeof MEMBER_STATES)[number];
@@ -46,8 +48,11 @@ export interface MemberCard {
   presence: string;
   /** Clock-in of the open or today's session, "HH:MM" in the employee's zone. */
   clockIn: string | null;
-  /** Net worked time today (latest session, clipped to the employee's local day). */
-  workedMs: number;
+  /**
+   * Net worked time today: every closed shift clocked in today (timesheet totals) + the open shift's part since local
+   * midnight. Null when the timesheet total is unavailable or was read for another date than the employee's today.
+   */
+  workedMs: number | null;
   /** Scheduled time today; null on a non-workday. */
   scheduledMs: number | null;
   activeShare: number | null;
@@ -89,17 +94,18 @@ export function describeMember(row: MemberRow, extras: MemberExtras, now: number
           ? ["STOPPED", `Stopped ${ago(now - Date.parse(s.clockOutAt))}`]
           : ["NOT_STARTED", "Not started yet today"];
 
-  // Today's part of the latest session: every interval clipped to the employee's local midnight.
+  // The open shift's part since the employee's local midnight (closed shifts come from the timesheet total).
   const midnight = Date.parse(zonedToUtc(`${today}T00:00`, tz));
   const clip = (iso: string) => new Date(Math.max(Date.parse(iso), midnight)).toISOString();
-  const touchesToday = s && (!s.clockOutAt || Date.parse(s.clockOutAt) > midnight);
-  const workedMs = touchesToday
+  const openTodayMs = open
     ? attendanceTotals(
-        { start: clip(s.clockInAt), end: s.clockOutAt && clip(s.clockOutAt) },
-        s.breaks.filter((b) => !b.endedAt || Date.parse(b.endedAt) > midnight).map((b) => ({ start: clip(b.startedAt), end: b.endedAt && clip(b.endedAt) })),
+        { start: clip(open.clockInAt), end: null },
+        open.breaks.filter((b) => !b.endedAt || Date.parse(b.endedAt) > midnight).map((b) => ({ start: clip(b.startedAt), end: b.endedAt && clip(b.endedAt) })),
         now,
       ).netMs
     : 0;
+  const workedMs = extras.closed?.date === today ? extras.closed.netMs + openTodayMs : null;
+  const touchesToday = s && (!s.clockOutAt || Date.parse(s.clockOutAt) > midnight);
 
   return {
     state,

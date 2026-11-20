@@ -6,6 +6,7 @@ Branch `agent/w2-liveteam`. Scope: new `app/(admin)/live-team/**`, `src/lib/live
 - `GET /attendance/overview?teamId=&pageSize=100` (all pages) — session, state, `online`/`lastSeenAt`, `missingClockOut`. Required; failure = page ErrorState.
 - `GET /attendance/daily?date=<today>&teamId=` (all pages) — approved leave + whether today is a workday. Optional; failure = no leave/schedule info (note shown).
 - `GET /activity/overview?from=today&to=today` (all pages) — `activeMs / clockedInMs` = active-time %. Optional (needs `activity:read-all`); failure or no data = "—".
+- `GET /attendance/timesheets?from=today&to=today&teamId=` (all pages) — net time of closed shifts clocked in today; worked today = that + the open shift since local midnight. Failure or another local date = "—" (never approximated).
 - Scheduled minutes: shared `DEFAULT_POLICY.scheduledDailyMinutes` (8 h) on workdays; no bar on non-workdays.
 - Current/last app: not in the overview payload → not shown (no data added).
 
