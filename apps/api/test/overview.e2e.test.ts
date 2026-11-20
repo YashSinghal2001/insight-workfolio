@@ -82,13 +82,13 @@ const interval = (e: Emp, sessionId: string, app: string, from: number, to: numb
   sql: intervalSql,
   args: [randomUUID(), e.id, e.device, sessionId, `com.${app.toLowerCase()}`, app, iso(from), iso(to), (to - from) / 1000, iso(from), iso(to), randomUUID()],
 });
-async function screenshot(e: Emp, sessionId: string, capturedAt: number) {
+async function screenshot(e: Emp, sessionId: string, capturedAt: number, status: "STORED" | "REGISTERED" = "STORED") {
   const id = randomUUID();
   await db.execute({
     sql: `INSERT INTO screenshots (id, employee_id, device_id, attendance_session_id, idempotency_key, captured_at, device_captured_at, width, height,
             mime_type, file_size_bytes, checksum, storage_provider, storage_key, upload_status, stored_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, 100, 100, 'image/webp', 100, ?, 'MICROSOFT_GRAPH', ?, 'STORED', ?)`,
-    args: [id, e.id, e.device, sessionId, randomUUID(), iso(capturedAt), iso(capturedAt), "a".repeat(64), `k/${id}`, iso(capturedAt)],
+          VALUES (?, ?, ?, ?, ?, ?, ?, 100, 100, 'image/webp', 100, ?, 'MICROSOFT_GRAPH', ?, ?, ?)`,
+    args: [id, e.id, e.device, sessionId, randomUUID(), iso(capturedAt), iso(capturedAt), "a".repeat(64), `k/${id}`, status, status === "STORED" ? iso(capturedAt) : null],
   });
   return id;
 }
@@ -148,7 +148,7 @@ test("validation and unknown team", async () => {
 
 describe("one organisation", () => {
   let ana: Emp, ben: Emp, cy: Emp, di: Emp, ed: Emp, fi: Emp, head: Emp;
-  let alpha: string, beta: string, shotId: string, edSession: string;
+  let alpha: string, beta: string, shotId: string, edSession: string, anaSession: string, fiSession: string;
 
   before(async () => {
     await db.execute({
@@ -162,14 +162,14 @@ describe("one organisation", () => {
     ed = await person("Ed Forgot");
     fi = await person("Fi Break");
     head = await person("Hal Head", { device: false });
-    const a = await shift(ana, at(D, "09:00"), at(D, "17:30"), [at(D, "12:00"), at(D, "12:30")]); // 480 min
+    const a = (anaSession = await shift(ana, at(D, "09:00"), at(D, "17:30"), [at(D, "12:00"), at(D, "12:30")])); // 480 min
     await db.batch([interval(ana, a, "Editor", at(D, "09:00"), at(D, "11:00")), interval(ana, a, "Browser", at(D, "13:00"), at(D, "14:00"))], "write");
     shotId = await screenshot(ana, a, at(D, "10:00"));
     await shift(ben, at(D, "10:00"), at(D, "18:00")); // late, 480 min
     await shift(cy, at(addDays(D, -2), "09:00"), at(addDays(D, -2), "11:00")); // 120 min, less utilised
     await shift(cy, at(addDays(D, -1), "08:00"), at(addDays(D, -1), "20:00")); // yesterday: 720 min, over-worked
     edSession = await shift(ed, at(addDays(D, -2), "09:00"), null); // open since two days: missing clock-out
-    await shift(fi, at(D, "15:00"), null, [at(D, "15:30"), null]); // late, on a break now
+    fiSession = await shift(fi, at(D, "15:00"), null, [at(D, "15:30"), null]); // late, on a break now
     await leave(di, D, addDays(D, 2), "APPROVED");
     await leave(ana, addDays(D, 20), addDays(D, 20), "APPROVED"); // beyond 14 days
     await leave(ben, addDays(D, 3), addDays(D, 3), "PENDING");
@@ -253,6 +253,27 @@ describe("one organisation", () => {
     assert.equal((await api(`/overview?date=${D}&teamId=${beta}`, h)).status, 404);
     assert.equal((await api(`/overview?date=${D}&teamId=${randomUUID()}`, h)).status, 404);
     assert.equal((await api(`/overview?date=${D}`, await login(cy.email))).status, 403);
+  });
+
+  test("top apps: the same per-application totals as the employee's activity summary", async () => {
+    const summary = await api(`/activity/summary?employeeId=${ana.id}&from=${D}&to=${D}`, admin);
+    assert.equal(summary.status, 200, summary.text);
+    const team = (await api(`/overview?date=${D}&teamId=${alpha}`, admin)).body.topApps;
+    assert.deepEqual(team.items, summary.body.applications.map((a: { applicationName: string; activeMs: number }) => ({ applicationName: a.applicationName, activeMs: a.activeMs })));
+    assert.equal(team.totalActiveMs, summary.body.activeMs);
+  });
+
+  test("recent screenshots: stored and team-filtered in the query, not after the newest 60 (regression)", async () => {
+    // 70 newer rows that do not qualify for Alpha: 30 not yet stored (Ana), 40 stored but outside the team (Fi).
+    for (let i = 0; i < 30; i++) await screenshot(ana, anaSession, at(D, "10:01") + i * 60_000, "REGISTERED");
+    for (let i = 0; i < 40; i++) await screenshot(fi, fiSession, at(D, "15:01") + i * 20_000);
+    const a = (await api(`/overview?date=${D}&teamId=${alpha}`, admin)).body;
+    assert.deepEqual(a.recentScreenshots.map((x: { id: string }) => x.id), [shotId]);
+    const all = (await api(`/overview?date=${D}`, admin)).body;
+    assert.equal(all.recentScreenshots.length, 12);
+    assert.ok(all.recentScreenshots.every((x: { uploadStatus: string }) => x.uploadStatus === "STORED"));
+    const mine = (await api(`/overview?date=${D}`, await login(head.email))).body;
+    assert.deepEqual(mine.recentScreenshots.map((x: { id: string }) => x.id), [shotId], "team head: own team only");
   });
 
   test("a past date: that day's hours and statuses; 'now' figures stay now", async () => {

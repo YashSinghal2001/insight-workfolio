@@ -52,7 +52,7 @@ import { RateLimiter } from "../auth/crypto.js";
 import type { AuthContext } from "../auth/auth.service.js";
 import { EmployeeLocks } from "../common/employee-locks.js";
 import { POLICY } from "../common/policy.js";
-import { canReadEmployee, scopeSql } from "../common/scope.js";
+import { canReadEmployee, scopeSql, teamFilterSql } from "../common/scope.js";
 import type { Env } from "../config/env.js";
 import { DATABASE } from "../database/database.module.js";
 import type { DeviceContext } from "../devices/devices.service.js";
@@ -72,6 +72,8 @@ const RETENTION_CHUNK = 100;
 
 /** Registered but not uploaded for longer than this: the desktop is offline or retrying. */
 const STALLED_MS = 3_600_000;
+/** Gallery filters; `teamId` and `status` are for server-side callers (Overview), not the HTTP query. */
+type GalleryFilter = ScreenshotGalleryQuery & { teamId?: string; status?: ScreenshotUploadStatus };
 const GALLERY_COLUMNS = `s.id, s.employee_id, s.captured_at, s.width, s.height, s.file_size_bytes, s.upload_status, s.storage_provider, s.stored_at, s.mask_count, s.blurred,
   p.full_name, p.employee_code, p.timezone`;
 const ITEM_COLUMNS = "id, employee_id, captured_at, width, height, file_size_bytes, upload_status, storage_provider, stored_at, mask_count, blurred";
@@ -335,7 +337,7 @@ export class ScreenshotsService implements OnModuleInit, OnModuleDestroy {
   }
 
   /** Admin gallery: newest first, all employees or one, dates in the viewer's time zone. Metadata only. */
-  async gallery(q: ScreenshotGalleryQuery, caller: AuthContext): Promise<Paginated<ScreenshotGalleryItem>> {
+  async gallery(q: GalleryFilter, caller: AuthContext): Promise<Paginated<ScreenshotGalleryItem>> {
     const { where, args } = this.galleryFilter(q, caller);
     // ponytail: only a gallery filtered to one employee is audited here. The all-employees page is not (a row
     // per page per employee would drown the audit); each image actually opened is logged in screenshot_access_log.
@@ -679,11 +681,16 @@ export class ScreenshotsService implements OnModuleInit, OnModuleDestroy {
   }
 
   /** Team heads (W41): only their teams' members; another employeeId simply matches nothing. */
-  private galleryFilter(q: ScreenshotGalleryQuery, caller: AuthContext) {
+  private galleryFilter(q: GalleryFilter, caller: AuthContext) {
     const args: string[] = [zonedToUtc(`${q.from}T00:00`, q.tz), zonedToUtc(`${addDays(q.to, 1)}T00:00`, q.tz)];
     if (q.employeeId) args.push(q.employeeId);
+    if (q.status) args.push(q.status);
     const scope = scopeSql(caller, "screenshots:read", "s.employee_id");
-    return { where: `s.captured_at >= ? AND s.captured_at < ?${q.employeeId ? " AND s.employee_id = ?" : ""}${scope.sql}`, args: [...args, ...scope.args] };
+    const team = teamFilterSql(q.teamId, "s.employee_id");
+    return {
+      where: `s.captured_at >= ? AND s.captured_at < ?${q.employeeId ? " AND s.employee_id = ?" : ""}${q.status ? " AND s.upload_status = ?" : ""}${scope.sql}${team.sql}`,
+      args: [...args, ...scope.args, ...team.args],
+    };
   }
 
   private throttle(employeeId: string) {
