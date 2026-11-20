@@ -19,3 +19,4 @@ export * from "./alerts.js";
 export * from "./teams.js";
 export * from "./desktop-updates.js";
 export * from "./notifications.js";
+export * from "./attendance-reports.js";

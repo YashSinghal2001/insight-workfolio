@@ -4,6 +4,7 @@ import { guardViolation, isUniqueViolation, type DatabaseClient, type InStatemen
 import {
   addDays,
   deriveLiveStatus,
+  deviceOnline,
   invalidTransitionMessage,
   missingClockOut,
   screenshotFeatureState,
@@ -23,6 +24,7 @@ import {
   type AttendanceTimelineResponse,
   type EmployeeRef,
   type ListEmployeesQuery,
+  type OverviewFreshness,
   type Paginated,
   type SyncRequest,
   type SyncResponse,
@@ -31,15 +33,14 @@ import {
 import type { AuthContext } from "../auth/auth.service.js";
 import { EmployeeLocks } from "../common/employee-locks.js";
 import { POLICY } from "../common/policy.js";
-import { scopeSql } from "../common/scope.js";
+import { assertTeamReadable, scopeSql, teamFilterSql } from "../common/scope.js";
 import { DATABASE } from "../database/database.module.js";
 import type { DeviceContext } from "../devices/devices.service.js";
-import { EmployeesService } from "../employees/employees.service.js";
 import { employeeReadAudit } from "../audit/account-audit.js";
 import { ScreenshotSettingsService } from "../screenshots/screenshot-settings.service.js";
 import { ScreenshotsService } from "../screenshots/screenshots.service.js";
 import { MonitoringSettingsService } from "../settings/monitoring-settings.service.js";
-import { ACTIVE_EMPLOYEE, activityReport, DEVICE_LIVE_COLUMNS, iso, screenshotReport, SESSION_COLUMNS, stateOf, str, withBreaks } from "./sessions.js";
+import { ACTIVE_EMPLOYEE, activityReport, DEVICE_LIVE_COLUMNS, iso, scopedEmployees, screenshotReport, SESSION_COLUMNS, stateOf, str, withBreaks } from "./sessions.js";
 
 /** Device timestamps may lead the send time by this much (sub-second clock jitter, rounding). */
 const FUTURE_TOLERANCE_MS = 5_000;
@@ -73,7 +74,6 @@ export class AttendanceService {
   constructor(
     @Inject(DATABASE) private readonly db: DatabaseClient,
     @Inject(POLICY) private readonly policy: AttendancePolicy,
-    private readonly employees: EmployeesService,
     private readonly locks: EmployeeLocks,
     private readonly screenshotSettings: ScreenshotSettingsService,
     private readonly monitoring: MonitoringSettingsService,
@@ -203,9 +203,14 @@ export class AttendanceService {
     return { items: await withBreaks(this.db, rows!.rows), total: Number(count!.rows[0]!.n), page: q.page, pageSize: q.pageSize };
   }
 
-  /** Admin view: one row per employee with their latest session and last sync. Read-only. Team heads: their teams. */
-  async overview(query: ListEmployeesQuery, caller: AuthContext): Promise<Paginated<AttendanceOverviewRow>> {
-    const page = await this.employees.list(query, caller, "attendance:read-all");
+  /**
+   * Admin view: one row per employee with their latest session and last sync. Read-only. Team heads: their teams.
+   * Optional team filter. `lastSeenAt`/`online`: the most recently seen registered device (freshness only; the
+   * attendance state stays what was recorded).
+   */
+  async overview(query: ListEmployeesQuery & { teamId?: string }, caller: AuthContext): Promise<Paginated<AttendanceOverviewRow & OverviewFreshness>> {
+    await assertTeamReadable(this.db, caller, "attendance:read-all", query.teamId);
+    const page = { ...(await scopedEmployees(this.db, caller, query)), page: query.page, pageSize: query.pageSize };
     const ids = page.items.map((e) => e.id);
     if (!ids.length) return { ...page, items: [] };
     const marks = ids.map(() => "?").join(", ");
@@ -224,7 +229,8 @@ export class AttendanceService {
           args: ids,
         },
         {
-          sql: `SELECT ${DEVICE_LIVE_COLUMNS} FROM devices WHERE revoked_at IS NULL AND employee_id IN (${marks})`,
+          // Ascending, so the map below keeps each employee's most recently seen device.
+          sql: `SELECT ${DEVICE_LIVE_COLUMNS} FROM devices WHERE revoked_at IS NULL AND employee_id IN (${marks}) ORDER BY last_seen_at`,
           args: ids,
         },
         {
@@ -249,6 +255,7 @@ export class AttendanceService {
       items: page.items.map((e) => {
         const session = sessionBy.get(e.id) ?? null;
         const ev = eventBy.get(e.id);
+        const lastSeenAt = str(deviceBy.get(e.id)?.last_seen_at);
         return {
           employeeId: e.id,
           fullName: e.fullName,
@@ -264,7 +271,9 @@ export class AttendanceService {
                 outcome: ev.outcome as "ACCEPTED" | "REJECTED",
               }
             : null,
-          deviceLastSeenAt: str(deviceBy.get(e.id)?.last_seen_at),
+          deviceLastSeenAt: lastSeenAt,
+          lastSeenAt,
+          online: deviceOnline(lastSeenAt, now),
           ...deriveLiveStatus(session, monitored.has(e.id) ? activityReport(deviceBy.get(e.id)) : null, now),
           missingClockOut: missingClockOut(session, e.timezone, now),
           screenshotState: screenshotFeatureState({ enabled: shots.enabled, consented: consented.has(e.id), report: screenshotReport(deviceBy.get(e.id)) }, now),
@@ -279,8 +288,14 @@ export class AttendanceService {
    * Team heads (W41): people, pending leave/corrections and screenshots of their teams only; project and
    * task counts stay organisation-wide (not per employee).
    */
-  async summary(date?: string, now = Date.now(), caller?: AuthContext): Promise<AttendanceSummary> {
-    const scope = (column: string) => (caller ? scopeSql(caller, "attendance:read-all", column) : { sql: "", args: [] });
+  async summary(date?: string, now = Date.now(), caller?: AuthContext, teamId?: string): Promise<AttendanceSummary> {
+    if (caller) await assertTeamReadable(this.db, caller, "attendance:read-all", teamId);
+    // The caller's scope, narrowed to one team's active members when teamId is given.
+    const scope = (column: string) => {
+      const own = caller ? scopeSql(caller, "attendance:read-all", column) : { sql: "", args: [] };
+      const team = teamFilterSql(teamId, column);
+      return { sql: own.sql + team.sql, args: [...own.args, ...team.args] };
+    };
     const [emps, zones, counts] = await this.db.batch(
       [
         { sql: `SELECT p.id, p.timezone FROM employee_profiles p JOIN users u ON u.id = p.user_id WHERE ${ACTIVE_EMPLOYEE}${scope("p.id").sql}`, args: scope("p.id").args },

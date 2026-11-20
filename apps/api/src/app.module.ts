@@ -18,6 +18,7 @@ import { AttendanceService } from "./attendance/attendance.service.js";
 import { CorrectionsController } from "./attendance/corrections.controller.js";
 import { CorrectionsService } from "./attendance/corrections.service.js";
 import { TimesheetService } from "./attendance/timesheet.service.js";
+import { MonthlyService } from "./attendance/monthly.service.js";
 import { EmployeeLocks } from "./common/employee-locks.js";
 import { policyProvider } from "./common/policy.js";
 import { AuthController } from "./auth/auth.controller.js";
@@ -110,6 +111,7 @@ import { NotificationsService } from "./notifications/notifications.service.js";
     DevicesService,
     AttendanceService,
     TimesheetService,
+    MonthlyService,
     CorrectionsService,
     EmployeeLocks,
     policyProvider,
