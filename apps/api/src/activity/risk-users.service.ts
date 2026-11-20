@@ -3,6 +3,7 @@ import type { DatabaseClient } from "@workfolio/database";
 import {
   addDays,
   lessHours,
+  localDate,
   RISK_LESS_HOURS_SHARE,
   RISK_TRIGGERS,
   riskRules,
@@ -66,7 +67,7 @@ export class RiskUsersService {
 
     const items: RiskUser[] = [];
     for (const [id, row] of rows) {
-      const short = lessHours(row.days, this.policy.scheduledDailyMinutes);
+      const short = lessHours(row.days, this.policy.scheduledDailyMinutes, localDate(now, row.employee.timezone));
       const m = counts.get(id) ?? new Map<RiskTrigger, number>();
       if (short) m.set("LESS_WORKING_HOURS", short.shortDays);
       const triggers = RISK_TRIGGERS.filter((t) => (m.get(t) ?? 0) > 0).map((trigger) => ({ trigger, count: m.get(trigger)! }));

@@ -23,6 +23,13 @@ export function ActivityOverview({ range, onOpen, teamId }: { range: Range; onOp
   const [data, setData] = useState<ActivityOverviewResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [retry, setRetry] = useState(0);
+  // A different team (or range) starts again at page 1 (state adjusted during render, not in an effect).
+  const [filter, setFilter] = useState({ range, teamId });
+  if (filter.range !== range || filter.teamId !== teamId) {
+    setFilter({ range, teamId });
+    setPage(1);
+    setData(null);
+  }
 
   useEffect(() => {
     let live = true;

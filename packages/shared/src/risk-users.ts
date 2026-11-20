@@ -34,9 +34,12 @@ export interface LessHours {
   thresholdMinutes: number;
 }
 
-/** The less-working-hours figures of one employee's days, or null when it does not trigger. */
-export function lessHours(days: readonly Pick<MonthlyAttendanceDay, "status" | "workedMinutes">[], scheduledDailyMinutes: number, share = RISK_LESS_HOURS_SHARE): LessHours | null {
-  const scheduled = days.filter((d) => SCHEDULED.includes(d.status));
+/**
+ * The less-working-hours figures of one employee's days, or null when it does not trigger. Days on or after `today`
+ * (the employee's current local date) never count: an unfinished day would drag the average down.
+ */
+export function lessHours(days: readonly Pick<MonthlyAttendanceDay, "date" | "status" | "workedMinutes">[], scheduledDailyMinutes: number, today: string, share = RISK_LESS_HOURS_SHARE): LessHours | null {
+  const scheduled = days.filter((d) => d.date < today && SCHEDULED.includes(d.status));
   if (!scheduled.length || scheduledDailyMinutes <= 0) return null;
   const thresholdMinutes = Math.round(scheduledDailyMinutes * share);
   const averageWorkedMinutes = Math.round(scheduled.reduce((n, d) => n + d.workedMinutes, 0) / scheduled.length);

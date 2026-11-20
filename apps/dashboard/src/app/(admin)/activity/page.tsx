@@ -34,6 +34,7 @@ const CATEGORY: Record<ApplicationCategory, { label: string; tone: Tone }> = {
 };
 
 const PAGE_SIZE = 50;
+const APPS_PAGE_SIZE = 50;
 const time = (iso: string, tz: string) => new Intl.DateTimeFormat("en-GB", { dateStyle: "short", timeStyle: "medium", timeZone: tz }).format(new Date(iso));
 const FRESHNESS = {
   CURRENT: ["Up to date", true],
@@ -99,20 +100,24 @@ function Activity() {
 
   // GET /activity/apps for the Summary, Per employee, App history and Review tabs (one read per range/team).
   const [appsRetry, setAppsRetry] = useState(0);
-  const appsKey = `${range.from}|${range.to}|${teamId ?? ""}|${appsRetry}`;
+  // Page of the per-employee section; a new range or team starts again at page 1.
+  const filterKey = `${range.from}|${range.to}|${teamId ?? ""}`;
+  const [empPage, setEmpPage] = useState({ key: filterKey, page: 1 });
+  const page = empPage.key === filterKey ? empPage.page : 1;
+  const appsKey = `${filterKey}|${page}|${appsRetry}`;
   const [apps, setApps] = useState<{ key: string; load: AppsLoad } | null>(null);
   const needApps = tab !== "employee";
   useEffect(() => {
     if (!needApps) return;
     let live = true;
-    const q = new URLSearchParams({ from: range.from, to: range.to });
+    const q = new URLSearchParams({ from: range.from, to: range.to, page: String(page), pageSize: String(APPS_PAGE_SIZE) });
     if (teamId) q.set("teamId", teamId);
     api<ActivityAppsResponse>(`/activity/apps?${q}`).then(
       (data) => live && setApps({ key: appsKey, load: { status: "ok", data } }),
       (e) => live && setApps({ key: appsKey, load: { status: "error", message: errorMessage(e) } }),
     );
     return () => void (live = false);
-  }, [needApps, range, teamId, appsKey]);
+  }, [needApps, range, teamId, page, appsKey]);
   const appsLoad: AppsLoad = apps?.key === appsKey ? apps.load : { status: "loading" };
   const retryApps = () => setAppsRetry((n) => n + 1);
 
@@ -148,7 +153,7 @@ function Activity() {
             <ActivityOverview key={teamId ?? "all"} range={range} teamId={teamId} onOpen={(id) => go("employee", id)} />
           </div>
         )}
-        {tab === "employees" && <EmployeesTab load={appsLoad} onRetry={retryApps} />}
+        {tab === "employees" && <EmployeesTab load={appsLoad} onRetry={retryApps} onPage={(p) => setEmpPage({ key: filterKey, page: p })} />}
         {tab === "history" && <HistoryTab load={appsLoad} range={range} teamId={teamId} onRetry={retryApps} />}
         {tab === "review" && <ReviewTab load={appsLoad} onRetry={retryApps} />}
         {tab === "employee" && <OneEmployee key={preset ?? ""} preset={preset} range={range} />}

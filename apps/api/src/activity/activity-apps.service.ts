@@ -42,6 +42,7 @@ export class ActivityAppsService {
   ) {}
 
   async apps(caller: AuthContext, q: ActivityAppsQuery): Promise<ActivityAppsResponse> {
+    // ponytail: totals need every member's usage, so all are aggregated and only the page is returned.
     const members = await this.members(caller, q.teamId);
     const labels = await this.categories.labelsFor(members.map((m) => m.id));
     const categories = emptyTotals();
@@ -92,7 +93,12 @@ export class ActivityAppsService {
       categoriesConfigured: labels.configured,
       categories,
       applications,
-      employees: [...rows.values()].map(({ top, ...r }) => ({ ...r, topApplication: top.name })),
+      employees: {
+        items: [...rows.values()].slice((q.page - 1) * q.pageSize, q.page * q.pageSize).map(({ top, ...r }) => ({ ...r, topApplication: top.name })),
+        total: rows.size,
+        page: q.page,
+        pageSize: q.pageSize,
+      },
     };
   }
 

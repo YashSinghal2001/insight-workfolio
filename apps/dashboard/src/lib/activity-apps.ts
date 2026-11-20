@@ -35,8 +35,8 @@ export function appDonut(apps: ActivityAppsResponse["applications"], max = 8): D
   return rest > 0 ? [...top, { label: "Other apps", value: rest, color: "var(--border-strong)" }] : top;
 }
 
-/** One 100 % bar per group: label share of active time (everyone, then each employee with usage). */
-export function categoryShare(data: Pick<ActivityAppsResponse, "categories" | "employees">, employees = 0): { series: StackedSeries[]; rows: StackedRow[] } {
+/** One 100 % bar per group: label share of active time (everyone, then the most active employees of `employees`). */
+export function categoryShare(data: { categories: ActivityAppsResponse["categories"]; employees: ActivityAppsResponse["employees"]["items"] }, employees = 0): { series: StackedSeries[]; rows: StackedRow[] } {
   const series = ORDER.map((c) => ({ label: CATEGORY_LABEL[c], color: CATEGORY_COLOR[c] }));
   const row = (label: string, t: Record<ApplicationCategory, number>) => ({ label, values: ORDER.map((c) => t[c]) });
   const people = data.employees.filter((e) => e.activeMs > 0).sort((a, b) => b.activeMs - a.activeMs).slice(0, employees);
