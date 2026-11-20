@@ -23,11 +23,11 @@ resolves textual conflicts): `apps/api/src/app.module.ts`, `packages/shared/src/
 
 | ID | Feature | Owns |
 |---|---|---|
-| W1-UI | UI foundation, theme, shell, navigation, global filters | `apps/dashboard/src/app/{layout.tsx,globals.css,loading.tsx,error.tsx}`, `app/(admin)/layout.tsx`, `app/my/layout.tsx`, `components/{app-shell,sidebar,my-nav,kit,ui,api-status}.tsx`, new `components/{theme-toggle,global-filters,sub-nav}.tsx`, every existing `app/**/page.tsx` **except** `app/(admin)/reports/**` and `app/(admin)/desktop-updates/**`, dashboard `package.json` scripts, the dashboard steps of `.github/workflows/ci.yml`, nav assertions in `apps/dashboard/scripts/verify-*.mjs` |
-| W1-CHARTS | SVG chart library | new `apps/dashboard/src/components/charts/**`, new `apps/dashboard/src/lib/charts*.ts` (+ tests) |
+| W1-UI | UI foundation, theme, shell, navigation, global filters | `apps/dashboard/src/app/{layout.tsx,globals.css,loading.tsx,error.tsx}`, `app/(admin)/layout.tsx`, `app/my/layout.tsx`, `components/{app-shell,sidebar,my-nav,kit,ui,api-status}.tsx`, new `components/{theme-toggle,global-filters,sub-nav}.tsx`, every existing `app/**/page.tsx` **except** `app/(admin)/reports/**` and `app/(admin)/desktop-updates/**`, nav assertions in `apps/dashboard/scripts/verify-*.mjs` |
+| W1-CHARTS | SVG chart library + dashboard unit-test runner | new `apps/dashboard/src/components/charts/**`, new `apps/dashboard/src/lib/charts*.ts` (+ tests), new `apps/dashboard/test/**` (incl. `register-tsx.mjs`), the `test:unit` / `test` scripts in dashboard `package.json`, a "Dashboard unit tests" step in `.github/workflows/ci.yml` |
 | W1-ATT-ANOMALY | Missing clock-out / stale device / long break detection; admin-initiated corrections | new `apps/api/src/attendance/anomalies.{service,controller}.ts`, `attendance/corrections.{service,controller}.ts`, new `packages/shared/src/attendance-anomalies.ts`, `packages/shared/src/corrections.ts` |
 | W1-ATT-DATA | `teamId` filter, monthly / late data, overtime, export, live-status freshness | `apps/api/src/attendance/{attendance.service,attendance.controller,timesheet.service,timesheet-xlsx,sessions}.ts`, new `attendance/monthly.service.ts`, `apps/api/src/schedule/**`, `apps/api/src/common/scope.ts`, `packages/shared/src/{attendance,schedule,timesheet}.ts`, new `packages/shared/src/attendance-reports.ts` |
-| W1-NOTIFY | Notification rules, attendance event emails, daily digest | `apps/api/src/notifications/**`, `packages/shared/src/notifications.ts`, migration `0034_notification_rules`, `docs/notifications.md`. May add **≤ 10 lines** to `attendance.service.ts` (one injected dependency + one call after a committed clock-in / clock-out); nothing else in that file |
+| W1-NOTIFY | Notification rules, attendance event emails, daily digest | `apps/api/src/notifications/**`, the `sendAlertEmails` hook in `apps/api/src/alerts/**`, `packages/shared/src/notifications.ts`, migration `0034_notification_rules`, `docs/notifications.md`. May add **≤ 10 lines** to `attendance.service.ts` (one injected dependency + one call after a committed clock-in / clock-out); nothing else in that file |
 | W1-REPORTS-SCHED | Scheduled report kinds, send time, team scope, Graph transport | `apps/api/src/reports/**`, `packages/shared/src/reports.ts`, migration `0035_report_schedule_kinds`, `app/(admin)/reports/**` (incl. new `/reports/scheduled`), `docs/email-reports.md` |
 | W1-RELEASE | Build version visibility, desktop update telemetry, desktop attendance banner | `apps/api/src/health/**`, `HealthResponse` in `packages/shared/src/api.ts`, `apps/api/src/desktop-updates/**`, `apps/api/src/devices/**`, `packages/shared/src/desktop-updates.ts`, `apps/desktop/**`, `deploy/**`, `app/(admin)/desktop-updates/**`, `app/(admin)/account/**`, `docs/desktop/**`, `docs/deployment.md` |
 
@@ -53,10 +53,10 @@ resolves textual conflicts): `apps/api/src/app.module.ts`, `packages/shared/src/
   filter); add a machine-readable `code` only when a client must react to it.
 - **Team filter**: optional query `teamId` (uuid). Semantics: rows restricted to *active* members of that team,
   intersected with the caller's scope. Admin + unknown team → 404. Team head + a team they do not head → 404.
-  Helper (owned by W1-ATT-DATA, in `common/scope.ts`):
+  Helpers (lead-owned, already in `apps/api/src/common/scope.ts`, use them):
   `teamFilterSql(teamId: string | undefined, column: string): { sql: string; args: string[] }` and
-  `assertTeamReadable(db, caller, teamId?: string): Promise<void>` (throws `NotFoundException`).
-  Until it lands, other agents may only *declare* `teamId` in their schemas.
+  `assertTeamReadable(db, caller, permission, teamId): Promise<void>` (throws `NotFoundException`).
+  Validate with `teamId: z.uuid().optional()` in the shared query schema.
 - Pagination: `page`, `pageSize` (≤ 100) → `Paginated<T>` (`items,total,page,pageSize`).
 - Dates and time [contract]: instants are UTC ISO strings; a *local date* is `YYYY-MM-DD` read in **each
   employee's own IANA zone** (as `/attendance/daily` does); a month is `YYYY-MM`; a local time is `HH:MM`
@@ -148,7 +148,7 @@ export interface NotificationRule {
   · `/audit` · `/desktop-updates` · `/settings` (sub-menu: `/settings/schedule`, `/settings/monitoring`,
   `/settings/screenshots`, `/settings/labels`, `/settings/websites`, `/settings/storage`,
   `/settings/notifications`, `/settings/leave-types`) · `/account`.
-  Nav links to pages that do not exist yet are allowed only in the nav config; they are built in later waves.
+  The nav lists **only routes that exist**; whoever builds a new page adds its one-line nav entry (and smoke route).
 
 ## 7. Tests [contract]
 
@@ -156,7 +156,7 @@ export interface NotificationRule {
 |---|---|
 | Shared + database units | `packages/*/src/*.test.ts`, `node --test` (via `pnpm --filter … test`) |
 | API integration | `apps/api/test/<feature>.e2e.test.ts`: in-process Nest app, `DATABASE_URL=:memory:`, synthetic people (`*@example.com`), built from `dist` (`pnpm --filter @workfolio/api test` runs `nest build` first). While iterating run one file: `pnpm --filter @workfolio/api build && cd apps/api && node --test test/<file>` |
-| Dashboard units | pure logic in `src/lib/*.ts` with `*.test.ts`/`*.test.mjs` next to it, `node --test` (W1-UI wires a `test:unit` script into `test` and CI). React components: `react-dom/server` render assertions in node tests |
+| Dashboard units | `pnpm --filter @workfolio/dashboard test:unit` (W1-CHARTS wires it): `node --import ./test/register-tsx.mjs --test "src/**/*.test.{ts,mjs}" "test/**/*.test.{ts,tsx,mjs}"`. Pure logic in `src/lib/*.ts`; React components rendered with `react-dom/server` in node tests (the loader transpiles `.tsx` with the installed `typescript`) |
 | Browser (CDP) | existing `apps/dashboard/scripts/verify-*.mjs` use **fixed ports 4000/3105/9345** → only the lead (and W1-UI in wave 1) runs them. New browser suites must read `IW_API_PORT`, `IW_APP_PORT`, `IW_CDP_PORT` from env (defaults 4000/3105/9345) |
 | Desktop | `node --test` + `cargo test` / `cargo clippy -- -D warnings` in `apps/desktop` |
 

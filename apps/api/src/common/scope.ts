@@ -1,3 +1,4 @@
+import { NotFoundException } from "@nestjs/common";
 import type { DatabaseClient } from "@workfolio/database";
 import { hasPermission, isTeamHeadPermission, type Permission } from "@workfolio/shared";
 import type { AuthContext } from "../auth/auth.service.js";
@@ -49,4 +50,33 @@ export async function canReadEmployee(db: DatabaseClient, caller: AuthContext, p
     args: [employeeId, caller.id, ...team.args],
   });
   return rows.length > 0;
+}
+
+/**
+ * Optional team filter (`?teamId=`, docs/IMPLEMENTATION-CONTRACTS.md §4): SQL to append to a WHERE that keeps
+ * `column` (an employee_profiles id) to the members of one active team. Empty when no team is given. Combine
+ * with scopeSql (the caller's own scope); call assertTeamReadable first so a foreign team is a 404.
+ */
+export function teamFilterSql(teamId: string | null | undefined, column: string): { sql: string; args: string[] } {
+  if (!teamId) return { sql: "", args: [] };
+  return {
+    sql: ` AND ${column} IN (SELECT tm.employee_id FROM team_members tm JOIN teams t ON t.id = tm.team_id WHERE t.id = ? AND t.active = 1)`,
+    args: [teamId],
+  };
+}
+
+/**
+ * 404 unless the caller may filter by this team under `permission`: "all" scope (admins) any existing team;
+ * "team" scope (heads) only an active team they head; "own" scope never. No-op without a team.
+ */
+export async function assertTeamReadable(db: DatabaseClient, caller: AuthContext, permission: Permission, teamId: string | null | undefined): Promise<void> {
+  if (!teamId) return;
+  const scope = readScope(caller, permission);
+  const { rows } =
+    scope === "all"
+      ? await db.execute({ sql: "SELECT 1 FROM teams WHERE id = ?", args: [teamId] })
+      : scope === "team"
+        ? await db.execute({ sql: "SELECT 1 FROM teams WHERE id = ? AND head_user_id = ? AND active = 1", args: [teamId, caller.id] })
+        : { rows: [] };
+  if (!rows.length) throw new NotFoundException("Team not found");
 }
