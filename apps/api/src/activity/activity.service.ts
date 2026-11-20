@@ -59,8 +59,8 @@ const toItem = (r: Record<string, unknown>): ActivityTimelineItem => ({
 const CLIPPED_MS = "round((julianday(min(ended_at, ?)) - julianday(max(started_at, ?))) * 86400000)";
 const minutes = (ms: number) => `${Math.round(ms / 60_000)} min`;
 /** Same grouping key as the per-application totals (identifier, else the name). */
-const APP_KEY = "coalesce(a.application_identifier, 'name:' || a.application_name)";
-const appKey = (a: { applicationIdentifier: string | null; applicationName: string | null }) => a.applicationIdentifier ?? `name:${a.applicationName}`;
+export const APP_KEY = "coalesce(a.application_identifier, 'name:' || a.application_name)";
+export const appKey = (a: { applicationIdentifier: string | null; applicationName: string | null }) => a.applicationIdentifier ?? `name:${a.applicationName}`;
 type Split = Record<ApplicationCategory, number>;
 const emptySplit = (): Split => ({ PRODUCTIVE: 0, NEUTRAL: 0, UNPRODUCTIVE: 0, UNCLASSIFIED: 0 });
 
