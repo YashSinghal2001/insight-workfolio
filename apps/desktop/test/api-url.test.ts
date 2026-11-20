@@ -47,17 +47,17 @@ test("rejected API URLs", () => {
 
 test("release config: connect-src gets exactly the API origin in place of the dev API", () => {
   const base = JSON.parse(readFileSync(new URL("../src-tauri/tauri.conf.json", import.meta.url), "utf8")).app.security.csp as string;
-  const { apiUrl, origin, config } = releaseConfig("https://api.example.com/workfolio/", base);
-  assert.equal(apiUrl, "https://api.example.com/workfolio");
-  assert.equal(origin, "https://api.example.com");
+  const { apiUrl, origin, config } = releaseConfig("https://api.acme.test/workfolio/", base);
+  assert.equal(apiUrl, "https://api.acme.test/workfolio");
+  assert.equal(origin, "https://api.acme.test");
   const csp: string = config.app.security.csp;
   const connect = csp.split("; ").find((d) => d.startsWith("connect-src "));
-  assert.equal(connect, "connect-src 'self' ipc: http://ipc.localhost https://api.example.com");
+  assert.equal(connect, "connect-src 'self' ipc: http://ipc.localhost https://api.acme.test");
   assert.ok(!csp.includes("localhost:4000"));
-  assert.equal(csp.replace("https://api.example.com", "http://localhost:4000"), base, "other directives unchanged");
+  assert.equal(csp.replace("https://api.acme.test", "http://localhost:4000"), base, "other directives unchanged");
   assert.deepEqual(Object.keys(config), ["app"], "only the CSP is overridden");
 
   assert.throws(() => releaseConfig("http://localhost:4000", base), /https/);
   assert.throws(() => releaseConfig(undefined, base), /No API URL/);
-  assert.throws(() => releaseConfig("https://api.example.com", "default-src 'self'"), /connect-src/);
+  assert.throws(() => releaseConfig("https://api.acme.test", "default-src 'self'"), /connect-src/);
 });

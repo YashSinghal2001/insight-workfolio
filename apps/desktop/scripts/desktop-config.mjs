@@ -1,4 +1,4 @@
-// Release build for a production API: `WORKFOLIO_API_URL=https://api.example.com pnpm package [tauri build args]`.
+// Release build for a production API: `WORKFOLIO_API_URL=https://<your API host> pnpm package [tauri build args]`.
 // Validates the URL (https only), merges a CSP whose connect-src allows exactly that API origin (instead of
 // the dev http://localhost:4000) into tauri.conf.json via `tauri build --config <file>`, and passes the URL
 // to the front end as VITE_API_URL. `--print` writes nothing and prints the override instead.
@@ -27,8 +27,23 @@ const DESKTOP = join(dirname(fileURLToPath(import.meta.url)), "..");
 export const DEV_CONNECT = "http://localhost:4000";
 
 /** The tauri.conf.json override for a release build against `rawUrl`. */
+/**
+ * Why `url` is a documentation placeholder rather than a server, or null. RFC 2606 example domains
+ * (example.com/.net/.org and their subdomains) are what the docs show: a build for one is always offline.
+ * The reserved .invalid TLD is CI's deliberate test placeholder, allowed only as the test identity.
+ */
+export function placeholderHost(url) {
+  const host = new URL(url).hostname.replace(/\.$/, "");
+  if (/(^|\.)example\.(com|net|org)$/.test(host)) return `${host} is the documentation example domain, not a real server`;
+  if (host.endsWith(".invalid")) return `${host} is the reserved .invalid test placeholder`;
+  return null;
+}
+
 export function releaseConfig(rawUrl, baseCsp) {
   const apiUrl = resolveApiUrl(rawUrl, "production");
+  const placeholder = placeholderHost(apiUrl);
+  // .invalid stays buildable for CI's unsigned test installer (environmentIdentity forces the test identity).
+  if (placeholder && !new URL(apiUrl).hostname.endsWith(".invalid")) throw new Error(placeholder);
   const origin = new URL(apiUrl).origin;
   const directives = baseCsp.split(";").map((d) => d.trim()).filter(Boolean);
   const connect = directives.findIndex((d) => d.startsWith("connect-src "));
@@ -50,7 +65,11 @@ export function releaseDashboardUrl(raw, apiUrl) {
     if (new URL(apiUrl).hostname.endsWith(".invalid")) return "https://app.example.invalid";
     throw new Error("is not set: release builds need the https:// web dashboard URL shown to administrators");
   }
-  return resolveApiUrl(raw, "production");
+  const url = resolveApiUrl(raw, "production");
+  const placeholder = placeholderHost(url);
+  // A test build (.invalid API) may keep a placeholder dashboard; a real release may not.
+  if (placeholder && !new URL(apiUrl).hostname.endsWith(".invalid")) throw new Error(placeholder);
+  return url;
 }
 
 /** Bundle identity per WORKFOLIO_ENV. Production is exactly tauri.conf.json, so existing installs are unaffected. */

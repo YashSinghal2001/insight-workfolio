@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 // @ts-expect-error -- plain .mjs script without type declarations
-import { environmentIdentity, releaseDashboardUrl, signingPlan, tauriBuildArgs, updaterPlan, windowsSigningPlan } from "../scripts/desktop-config.mjs";
+import { environmentIdentity, placeholderHost, releaseConfig, releaseDashboardUrl, signingPlan, tauriBuildArgs, updaterPlan, windowsSigningPlan } from "../scripts/desktop-config.mjs";
 
 test("WORKFOLIO_ENV: production keeps tauri.conf.json's identity, staging gets its own identifier, name and keychain service", () => {
   const conf = JSON.parse(readFileSync(new URL("../src-tauri/tauri.conf.json", import.meta.url), "utf8"));
@@ -49,7 +49,7 @@ test("a placeholder (.invalid) API always builds the separate test identity, and
 });
 
 test("release dashboard URL: https and required, except the CI placeholder API on the reserved .invalid TLD", () => {
-  assert.equal(releaseDashboardUrl("https://app.example.com/", "https://api.example.com"), "https://app.example.com");
+  assert.equal(releaseDashboardUrl("https://app.acme.test/", "https://api.acme.test"), "https://app.acme.test");
   assert.throws(() => releaseDashboardUrl(undefined, "https://api.example.com"), /not set/);
   assert.throws(() => releaseDashboardUrl("  ", "https://api.example.com"), /not set/);
   assert.throws(() => releaseDashboardUrl("http://localhost:3000", "https://api.example.com"), /https/);
@@ -57,6 +57,32 @@ test("release dashboard URL: https and required, except the CI placeholder API o
   assert.equal(releaseDashboardUrl(undefined, "https://api.example.invalid"), "https://app.example.invalid", "CI test installer keeps building");
   assert.equal(releaseDashboardUrl("https://app.example.com", "https://api.example.invalid"), "https://app.example.com");
   assert.throws(() => releaseDashboardUrl(undefined, "https://invalid.example.com"), /not set/, "only the .invalid TLD is exempt");
+});
+
+test("release builds refuse documentation placeholders; CI's .invalid test build still builds", () => {
+  const csp = "default-src 'self'; connect-src 'self' ipc: http://localhost:4000";
+  for (const url of [
+    "https://api.example.com", "https://api.example.net", "https://api.example.org", "https://example.com",
+    "https://API.Example.COM/", "https://deep.api.example.org:8443/v1", "https://api.example.com.",
+  ]) {
+    assert.throws(() => releaseConfig(url, csp), /documentation example domain/, url);
+    assert.throws(() => releaseDashboardUrl(url, "https://api.acme.test"), /documentation example domain/, url);
+  }
+  // Empty and malformed values are refused before the placeholder check.
+  for (const url of [undefined, "", "  ", "not a url", "http://api.acme.test", "ftp://api.acme.test"]) {
+    assert.throws(() => releaseConfig(url, csp), /URL/, String(url));
+  }
+  // .invalid: a real API may not point administrators at a placeholder dashboard...
+  assert.throws(() => releaseDashboardUrl("https://app.example.invalid", "https://api.acme.test"), /\.invalid test placeholder/);
+  // ...but CI's test installer (separate test identity, see environmentIdentity) keeps building.
+  assert.equal(releaseConfig("https://api.example.invalid", csp).origin, "https://api.example.invalid");
+  assert.equal(environmentIdentity(undefined, "https://api.example.invalid").env, "test");
+  // Real hosts, including look-alikes and bare IPs, are accepted.
+  for (const url of ["https://189.72.144.117", "https://api.acme.test", "https://notexample.com", "https://example.com.au", "https://example.co"]) {
+    assert.equal(placeholderHost(url), null, url);
+    assert.equal(releaseConfig(url, csp).apiUrl, url);
+  }
+  assert.match(releaseConfig("https://189.72.144.117", csp).config.app.security.csp, /connect-src 'self' ipc: https:\/\/189\.72\.144\.117$/);
 });
 
 test("signing is optional, and a half-configured signing/notarization setup is refused", () => {
