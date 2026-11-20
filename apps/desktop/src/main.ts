@@ -28,7 +28,7 @@ import { project, staleClockInSince, SyncEngine, type QueuedEvent } from "./sync
 import { resolveApiUrl, type ApiUrlMode } from "./api-url.ts";
 import { trayBridge, trayUpdate, type TrayState } from "./tray-bridge.ts";
 import { edgeNotifier } from "./notify.ts";
-import { applyStaticWording, platformOf, setPlatform, words } from "./platform.ts";
+import { applyStaticWording, platformOf, setPlatform, setText, words } from "./platform.ts";
 import { initPrefs } from "./prefs-ui.ts";
 import { initUpdates } from "./updates-ui.ts";
 import { manifestPath } from "./update-policy.ts";
@@ -461,7 +461,7 @@ function render() {
           ? "Connect to the internet to register this device."
           : null;
   $("#device-blocked").hidden = !blocked;
-  $("#device-blocked-text").textContent = blocked ?? "";
+  setText($("#device-blocked-text"), blocked ?? "");
   $("#attendance").hidden = status !== "ACTIVE";
   $("#sync").hidden = status !== "ACTIVE";
 
@@ -505,7 +505,7 @@ function renderAttendance() {
   // Flag only (owner decision): nothing is clocked out or corrected automatically.
   const staleSince = p && app.profile ? staleClockInSince(p, app.profile.timezone) : null;
   $("#att-stale").hidden = !staleSince;
-  $("#att-stale").textContent = staleSince ? `You are still clocked in since ${formatTime(staleSince)}. Clock out, then request a correction of the real end time.` : "";
+  if (staleSince) setText($("#att-stale"), `You are still clocked in since ${formatTime(staleSince)}. Clock out, then request a correction of the real end time.`);
 
   for (const button of document.querySelectorAll<HTMLButtonElement>("[data-action]")) {
     const type = button.dataset.action as AttendanceEventType;
