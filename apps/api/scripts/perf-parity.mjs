@@ -180,7 +180,7 @@ if (PAGE) {
 }
 await app.close();
 if (KEEP) copyFileSync(DB_FILE, KEEP);
-rmSync(RUN, { recursive: true, force: true });
+rmSync(RUN, { recursive: true, force: true, maxRetries: 10, retryDelay: 300 });
 
 console.log(`\n${"endpoint".padEnd(36)} ${"p50 ms".padStart(8)} ${"p95 ms".padStart(8)}   (10 calls each, ${N} employees)`);
 for (const [n, a, b] of rows) console.log(`${n.padEnd(36)} ${a.toFixed(0).padStart(8)} ${b.toFixed(0).padStart(8)}`);

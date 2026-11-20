@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { useSearchParams } from "next/navigation";
 import {
   addDays,
   attendanceTotals,
@@ -46,7 +47,10 @@ export default function MyAttendancePage() {
   const corrections = useApi<Paginated<CorrectionRequest>>(`/attendance/corrections?mine=true&page=${correctionsPage}&pageSize=${PAGE_SIZE}`);
   const [ok, setOk] = useState<string | null>(null);
   // Bumped by the banner (or ?correct=missing-clock-out from /my): remounts the form pre-filled as a missing clock-out.
-  const [prefill, setPrefill] = useState(() => (typeof window !== "undefined" && new URLSearchParams(window.location.search).get("correct") === "missing-clock-out" ? 1 : 0));
+  // From the router, not window.location: on a client-side navigation from /my the address bar is not updated yet
+  // when this first renders, so the link's ?correct= was missed (found by verify-parity).
+  const params = useSearchParams();
+  const [prefill, setPrefill] = useState(() => (params.get("correct") === "missing-clock-out" ? 1 : 0));
   const stale = current.load.state === "ready" && stillClockedInSince(current.load.data, tz) ? current.load.data.session : null;
 
   return (

@@ -20,7 +20,8 @@
     "verify:web-product": "node scripts/verify-web-product.mjs",
     "verify:setup-password": "node scripts/verify-setup-password.mjs",
     "verify:invitations": "node scripts/verify-invitations.mjs",
-    "verify:wave2": "node scripts/verify-wave2.mjs"
+    "verify:wave2": "node scripts/verify-wave2.mjs",
+    "verify:parity": "node scripts/verify-parity.mjs"
   },
   "dependencies": {
     "@workfolio/shared": "workspace:*",
