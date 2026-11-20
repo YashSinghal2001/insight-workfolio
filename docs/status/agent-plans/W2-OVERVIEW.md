@@ -10,7 +10,7 @@ Scope: one aggregate endpoint `GET /api/v1/overview?date=&teamId=` + the admin O
 | `apps/api/src/overview/overview.{service,controller}.ts` (+ one line in `app.module.ts`) | aggregate |
 | `apps/api/test/overview.e2e.test.ts` | RBAC, team filter, empty / 0 / 1 / many, past date, DST zone, 100-employee timing |
 | `apps/dashboard/src/app/(admin)/page.tsx`, `app/(admin)/_components/overview-*.tsx` | page + widgets |
-| `apps/dashboard/src/lib/overview.ts` (+ test) | pure widget logic (KPI cards, workload chart data, app slices) |
+| `app/(admin)/_components/overview-data.ts` (+ test), `apps/dashboard/test/overview.test.tsx` (SSR) | pure widget logic (KPI cards, workload chart data, app slices) |
 | `apps/dashboard/scripts/verify-web-app.mjs` | overview card check compares with `/overview` (same labels kept) |
 
 ## API
