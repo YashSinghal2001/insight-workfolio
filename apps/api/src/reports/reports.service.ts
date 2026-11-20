@@ -1,16 +1,22 @@
 import { createHash, randomUUID } from "node:crypto";
-import { ConflictException, ForbiddenException, Inject, Injectable, Logger, NotFoundException, type OnModuleDestroy, type OnModuleInit } from "@nestjs/common";
+import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, Logger, NotFoundException, type OnModuleDestroy, type OnModuleInit } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { isUniqueViolation, type DatabaseClient, type Row } from "@workfolio/database";
 import {
-  periodEnd,
+  addDays,
+  duePeriod,
   renderReport,
+  reportDueAt,
   reportPeriod,
   reportWarnings,
   type AttendancePolicy,
+  type CreateReportScheduleInput,
+  type ProjectTimeSummary,
   type ReportData,
+  type UpdateReportScheduleInput,
   type ReportDeliveryStatus,
   type ReportFrequency,
+  type ReportKind,
   type ReportRun,
   type ReportSchedule,
   type EligibleRecipient,
@@ -21,9 +27,11 @@ import type { AuthContext } from "../auth/auth.service.js";
 import { iso, str } from "../attendance/sessions.js";
 import { TimesheetService } from "../attendance/timesheet.service.js";
 import { POLICY } from "../common/policy.js";
+import { teamFilterSql } from "../common/scope.js";
 import type { Env } from "../config/env.js";
 import { DATABASE } from "../database/database.module.js";
 import { ProjectsService } from "../projects/projects.service.js";
+import { ScheduleService } from "../schedule/schedule.service.js";
 import { MAIL_TRANSPORT, MailError, type MailTransport } from "./mail.js";
 
 /** Attempts per delivery, then FAILED. Transient errors back off 5, 10, 20 minutes. */
@@ -34,11 +42,13 @@ const LEASE_MS = 10 * 60_000;
 const FINAL: ReportDeliveryStatus[] = ["SENT", "MOCKED", "NOT_CONFIGURED", "SKIPPED", "FAILED"];
 
 const SCHEDULE = `
-  SELECT s.id, s.name, s.frequency, s.timezone, s.employee_id, s.include_projects, s.active, s.created_by, cu.email AS creator_email,
-         s.created_at, p.full_name, p.employee_code, p.timezone AS employee_timezone, p.user_id AS employee_user_id
-  FROM report_schedules s JOIN users cu ON cu.id = s.created_by LEFT JOIN employee_profiles p ON p.id = s.employee_id`;
+  SELECT s.id, s.name, s.kind, s.frequency, s.timezone, s.send_at_local_time, s.employee_id, s.team_id, s.include_projects, s.active, s.created_by,
+         cu.email AS creator_email, s.created_at, p.full_name, p.employee_code, p.timezone AS employee_timezone, p.user_id AS employee_user_id,
+         t.name AS team_name, CASE WHEN t.active = 1 THEN t.head_user_id END AS team_head_user_id
+  FROM report_schedules s JOIN users cu ON cu.id = s.created_by LEFT JOIN employee_profiles p ON p.id = s.employee_id LEFT JOIN teams t ON t.id = s.team_id`;
 
-type ScheduleRow = ReportSchedule & { employeeUserId: string | null };
+/** employeeUserId / teamHeadUserId: the extra account (besides admins) that may receive this report. */
+type ScheduleRow = ReportSchedule & { employeeUserId: string | null; teamHeadUserId: string | null };
 
 /**
  * Scheduled email reports (F12): generation (attendance and task-time aggregates) is separate from
@@ -58,6 +68,7 @@ export class ReportsService implements OnModuleInit, OnModuleDestroy {
     @Inject(POLICY) private readonly policy: AttendancePolicy,
     private readonly timesheets: TimesheetService,
     private readonly projects: ProjectsService,
+    private readonly schedules: ScheduleService,
     private readonly config: ConfigService<Env, true>,
   ) {}
 
@@ -73,7 +84,7 @@ export class ReportsService implements OnModuleInit, OnModuleDestroy {
   }
 
   provider(): ReportProviderInfo {
-    return { provider: this.transport.name, delivers: this.transport.delivers, schedulerSeconds: this.config.get("REPORT_SCHEDULER_SECONDS", { infer: true }) };
+    return { provider: this.config.get("REPORT_MAIL_PROVIDER", { infer: true }), delivers: this.transport.delivers, schedulerSeconds: this.config.get("REPORT_SCHEDULER_SECONDS", { infer: true }) };
   }
 
   // ---- Schedules and recipients ---------------------------------------------------------------
@@ -90,22 +101,35 @@ export class ReportsService implements OnModuleInit, OnModuleDestroy {
     return schedules!.rows.map((r) => this.toSchedule(r, recipients!.rows));
   }
 
-  async create(caller: AuthContext, input: { name: string; frequency: ReportFrequency; timeZone: string; employeeId?: string; includeProjects: boolean }) {
-    if (input.employeeId && !(await this.db.execute({ sql: "SELECT 1 FROM employee_profiles WHERE id = ?", args: [input.employeeId] })).rows[0]) {
-      throw new NotFoundException("Employee not found");
-    }
+  async create(caller: AuthContext, input: CreateReportScheduleInput) {
+    await this.assertScope(input.employeeId ?? null, input.teamId ?? null);
     const id = randomUUID();
     await this.db.execute({
-      sql: "INSERT INTO report_schedules (id, name, frequency, timezone, employee_id, include_projects, created_by) VALUES (?, ?, ?, ?, ?, ?, ?)",
-      args: [id, input.name, input.frequency, input.timeZone, input.employeeId ?? null, input.includeProjects ? 1 : 0, caller.id],
+      sql: `INSERT INTO report_schedules (id, name, kind, frequency, timezone, send_at_local_time, employee_id, team_id, include_projects, created_by)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      args: [id, input.name, input.kind, input.frequency, input.timeZone, input.sendAtLocalTime, input.employeeId ?? null, input.teamId ?? null, input.includeProjects ? 1 : 0, caller.id],
     });
     this.logger.log({ scheduleId: id, actorId: caller.id }, "Report schedule created");
     return this.schedule(id);
   }
 
-  async update(caller: AuthContext, id: string, input: { name?: string; frequency?: ReportFrequency; active?: boolean; includeProjects?: boolean }) {
-    await this.schedule(id);
-    const sets = Object.entries({ name: input.name, frequency: input.frequency, active: input.active, include_projects: input.includeProjects })
+  async update(caller: AuthContext, id: string, input: UpdateReportScheduleInput) {
+    const s = await this.schedule(id);
+    // The scope after this change: one team or one employee, never both (the database refuses it too).
+    if (input.employeeId !== undefined || input.teamId !== undefined) {
+      await this.assertScope(input.employeeId === undefined ? (s.employee?.id ?? null) : input.employeeId, input.teamId === undefined ? (s.team?.id ?? null) : input.teamId);
+    }
+    const sets = Object.entries({
+      name: input.name,
+      kind: input.kind,
+      frequency: input.frequency,
+      timezone: input.timeZone,
+      send_at_local_time: input.sendAtLocalTime,
+      employee_id: input.employeeId,
+      team_id: input.teamId,
+      active: input.active,
+      include_projects: input.includeProjects,
+    })
       .filter(([, v]) => v !== undefined)
       .map(([k, v]) => [k, typeof v === "boolean" ? (v ? 1 : 0) : v] as const);
     await this.db.execute({ sql: `UPDATE report_schedules SET ${sets.map(([k]) => `${k} = ?`).join(", ")}, updated_at = ? WHERE id = ?`, args: [...sets.map(([, v]) => v!), iso(Date.now()), id] });
@@ -113,12 +137,12 @@ export class ReportsService implements OnModuleInit, OnModuleDestroy {
     return this.schedule(id);
   }
 
-  /** Who may receive this report: active admins; for a one-employee report, also that employee. */
+  /** Who may receive this report: active admins; also that employee (one-employee report) or the head of that active team (team report). */
   async eligible(id: string): Promise<EligibleRecipient[]> {
     const s = await this.schedule(id);
     const { rows } = await this.db.execute({
-      sql: "SELECT id, email, role FROM users WHERE status = 'ACTIVE' AND (role = 'ADMIN' OR id = ?) ORDER BY role, email",
-      args: [s.employeeUserId],
+      sql: "SELECT id, email, role FROM users WHERE status = 'ACTIVE' AND (role = 'ADMIN' OR id = ? OR id = ?) ORDER BY role, email",
+      args: [s.employeeUserId, s.teamHeadUserId],
     });
     return rows.map((r) => ({ id: String(r.id), email: String(r.email), role: String(r.role) }));
   }
@@ -126,7 +150,7 @@ export class ReportsService implements OnModuleInit, OnModuleDestroy {
   async addRecipient(caller: AuthContext, id: string, userId: string) {
     if (!(await this.db.execute({ sql: "SELECT 1 FROM users WHERE id = ?", args: [userId] })).rows[0]) throw new NotFoundException("User not found");
     if (!(await this.eligible(id)).some((u) => u.id === userId)) {
-      throw new ForbiddenException("This user may not receive this report: only active administrators, or the employee for their own report");
+      throw new ForbiddenException("This user may not receive this report: only active administrators, the employee for their own report, or the head of the report's team");
     }
     try {
       await this.db.execute({ sql: "INSERT INTO report_recipients (id, schedule_id, user_id, added_by) VALUES (?, ?, ?, ?)", args: [randomUUID(), id, userId, caller.id] });
@@ -159,13 +183,24 @@ export class ReportsService implements OnModuleInit, OnModuleDestroy {
   }
 
   async generate(s: ReportSchedule, period: { from: string; to: string }): Promise<ReportData> {
+    const head = {
+      name: s.name,
+      kind: s.kind,
+      scope: s.employee ? `${s.employee.fullName} (${s.employee.employeeCode})` : s.team ? `Team ${s.team.name}` : "Organisation",
+      frequency: s.frequency,
+      timeZone: s.timeZone,
+      period,
+      generatedAt: iso(Date.now()),
+    };
+    if (s.kind !== "WORKED_HOURS") return { ...head, employees: [], projects: null, runningTimers: null, exceptions: await this.exceptions(s, period) };
+    const team = teamFilterSql(s.team?.id, "p.id");
     const { rows } = await this.db.execute({
       sql: `SELECT p.id, p.full_name, p.employee_code, p.timezone,
               (SELECT max(d.last_seen_at) FROM devices d WHERE d.employee_id = p.id AND d.revoked_at IS NULL) AS last_seen
-            FROM employee_profiles p WHERE (?1 IS NULL AND p.employment_status <> 'TERMINATED') OR p.id = ?1 ORDER BY p.full_name`,
-      args: [s.employee?.id ?? null],
+            FROM employee_profiles p WHERE ((?1 IS NULL AND p.employment_status <> 'TERMINATED') OR p.id = ?1)${team.sql} ORDER BY p.full_name`,
+      args: [s.employee?.id ?? null, ...team.args],
     });
-    const time = s.includeProjects ? await this.projects.summary(period.from, period.to, s.employee?.id) : null;
+    const time = !s.includeProjects ? null : s.team ? await this.teamProjectTime(period, rows.map((r) => String(r.id))) : await this.projects.summary(period.from, period.to, s.employee?.id);
     const employees: ReportData["employees"] = [];
     for (const r of rows) {
       const employee = { id: String(r.id), fullName: String(r.full_name), employeeCode: String(r.employee_code), timezone: String(r.timezone) };
@@ -184,15 +219,58 @@ export class ReportsService implements OnModuleInit, OnModuleDestroy {
       });
     }
     return {
-      name: s.name,
-      frequency: s.frequency,
-      timeZone: s.timeZone,
-      period,
-      generatedAt: iso(Date.now()),
+      ...head,
       employees,
       projects: time ? time.byProject.map((p) => ({ code: p.project.code, name: p.project.name, archived: p.project.status === "ARCHIVED", taskMs: p.taskMs, entries: p.entries })) : null,
       runningTimers: time ? time.running : null,
+      exceptions: null,
     };
+  }
+
+  /**
+   * LATE / ABSENT days in the period: ScheduleService.daily for each local date (its rules: policy and override in
+   * force, approved leave, holidays, each employee's own zone), kept to the report's scope.
+   */
+  private async exceptions(s: ReportSchedule, period: { from: string; to: string }): Promise<NonNullable<ReportData["exceptions"]>> {
+    const team = s.team ? new Set(await this.teamMembers(s.team.id)) : null;
+    const people = new Set<string>();
+    const noPolicyDays: string[] = [];
+    const items: NonNullable<ReportData["exceptions"]>["items"] = [];
+    for (let date = period.from; date <= period.to; date = addDays(date, 1)) {
+      // ponytail: one daily() per date (31 for a month), each over the whole organisation; fine for one organisation.
+      const day = await this.schedules.daily({ date, page: 1, pageSize: 1_000_000 });
+      for (const r of day.items) {
+        if (s.employee ? r.employee.id !== s.employee.id : team && !team.has(r.employee.id)) continue;
+        people.add(r.employee.id);
+        if (r.status === "NO_POLICY" && noPolicyDays.at(-1) !== date) noPolicyDays.push(date);
+        if (r.status === s.kind) items.push({ employee: r.employee, date, firstClockInLocal: r.firstClockInLocal, lateMinutes: r.lateMinutes });
+      }
+    }
+    return { people: people.size, noPolicyDays, items };
+  }
+
+  private async teamMembers(teamId: string): Promise<string[]> {
+    const team = teamFilterSql(teamId, "p.id");
+    return (await this.db.execute({ sql: `SELECT p.id FROM employee_profiles p WHERE 1${team.sql}`, args: team.args })).rows.map((r) => String(r.id));
+  }
+
+  /** Project time of these employees only (never another team's), merged from per-employee summaries. */
+  private async teamProjectTime(period: { from: string; to: string }, ids: string[]): Promise<ProjectTimeSummary> {
+    const merged: ProjectTimeSummary = { from: period.from, to: period.to, byProject: [], byEmployee: [], running: 0 };
+    for (const id of ids) {
+      const one = await this.projects.summary(period.from, period.to, id);
+      merged.byEmployee.push(...one.byEmployee);
+      merged.running += one.running;
+      for (const p of one.byProject) {
+        const m = merged.byProject.find((x) => x.project.id === p.project.id);
+        if (m) {
+          m.taskMs += p.taskMs;
+          m.entries += p.entries;
+        } else merged.byProject.push({ ...p });
+      }
+    }
+    merged.byProject.sort((a, b) => a.project.code.localeCompare(b.project.code));
+    return merged;
   }
 
   // ---- Runs and delivery ------------------------------------------------------------------------
@@ -205,14 +283,17 @@ export class ReportsService implements OnModuleInit, OnModuleDestroy {
     return { duplicate, run: (await this.runs(s.id)).find((r) => r.id === runId)! };
   }
 
-  /** Scheduler: a run for every active schedule's last complete period (ending after the schedule was created), then due deliveries. */
+  /**
+   * Scheduler: for every active schedule, a run for the most recent period whose send time has passed (and that
+   * became due after the schedule was created: no backfill), then due deliveries. One run per period (unique key).
+   */
   async tick(now = Date.now()): Promise<void> {
     if (this.ticking) return;
     this.ticking = true;
     try {
       for (const s of (await this.list()).filter((x) => x.active)) {
-        const period = reportPeriod(s.frequency, now, s.timeZone, this.policy.weekStartsOn);
-        if (periodEnd(period, s.timeZone) > s.createdAt) await this.createRun(s, period, null);
+        const period = duePeriod(s.frequency, now, s.timeZone, s.sendAtLocalTime, this.policy.weekStartsOn);
+        if (reportDueAt(period, s.timeZone, s.sendAtLocalTime) > s.createdAt) await this.createRun(s, period, null);
       }
       await this.deliverDue(now);
     } finally {
@@ -356,6 +437,13 @@ export class ReportsService implements OnModuleInit, OnModuleDestroy {
 
   // ---- internals ---------------------------------------------------------------------------------
 
+  /** A report covers one team or one employee, never both (400); either must exist (404, as for other references). */
+  private async assertScope(employeeId: string | null, teamId: string | null) {
+    if (employeeId && teamId) throw new BadRequestException("Choose a team or one employee, not both");
+    if (employeeId && !(await this.db.execute({ sql: "SELECT 1 FROM employee_profiles WHERE id = ?", args: [employeeId] })).rows[0]) throw new NotFoundException("Employee not found");
+    if (teamId && !(await this.db.execute({ sql: "SELECT 1 FROM teams WHERE id = ?", args: [teamId] })).rows[0]) throw new NotFoundException("Team not found");
+  }
+
   private async finish(id: string, attempt: number, status: ReportDeliveryStatus, outcome: string, error: string | null, sha: string | null, at: string, messageId: string | null = null) {
     await this.db.batch(
       [
@@ -374,8 +462,8 @@ export class ReportsService implements OnModuleInit, OnModuleDestroy {
   private async authorizedRecipient(s: ScheduleRow, userId: string) {
     const { rows } = await this.db.execute({
       sql: `SELECT u.email FROM report_recipients r JOIN users u ON u.id = r.user_id
-            WHERE r.schedule_id = ? AND r.user_id = ? AND r.removed_at IS NULL AND u.status = 'ACTIVE' AND (u.role = 'ADMIN' OR u.id = ?)`,
-      args: [s.id, userId, s.employeeUserId],
+            WHERE r.schedule_id = ? AND r.user_id = ? AND r.removed_at IS NULL AND u.status = 'ACTIVE' AND (u.role = 'ADMIN' OR u.id = ? OR u.id = ?)`,
+      args: [s.id, userId, s.employeeUserId, s.teamHeadUserId],
     });
     return rows[0] ? { email: String(rows[0].email) } : null;
   }
@@ -384,10 +472,14 @@ export class ReportsService implements OnModuleInit, OnModuleDestroy {
     return {
       id: String(r.id),
       name: String(r.name),
+      kind: r.kind as ReportKind,
       frequency: r.frequency as ReportFrequency,
       timeZone: String(r.timezone),
+      sendAtLocalTime: str(r.send_at_local_time),
       employee: r.employee_id ? { id: String(r.employee_id), fullName: String(r.full_name), employeeCode: String(r.employee_code), timezone: String(r.employee_timezone) } : null,
+      team: r.team_id ? { id: String(r.team_id), name: String(r.team_name) } : null,
       employeeUserId: str(r.employee_user_id),
+      teamHeadUserId: str(r.team_head_user_id),
       includeProjects: r.include_projects === 1 || r.include_projects === 1n,
       active: r.active === 1 || r.active === 1n,
       createdBy: { id: String(r.created_by), email: String(r.creator_email) },
