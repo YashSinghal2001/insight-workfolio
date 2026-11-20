@@ -198,3 +198,27 @@ Schema/API: <migrations, endpoints>
 Tests added: <files, counts>  Gates: typecheck <ok>, lint <ok>, tests <pass/total per package>
 Not done / risks / owner decisions: <list>
 ```
+
+## 11. Wave 2 (pages on top of wave 1) [contract]
+
+Wave 1 is integrated: theme/shell/`GlobalFilters`/`SubNav`/`PageHeader about`/sortable `DataTable`, charts
+(`components/charts`), `/attendance/{missing-clock-outs,monthly,monthly/export,late}`, `teamId` on attendance reads,
+overview `online`/`lastSeenAt`, notification rules API, scheduled reports. Dashboard unit tests: `pnpm --filter @workfolio/dashboard test:unit`.
+
+| ID | Feature | Owns |
+|---|---|---|
+| W2-OVERVIEW | Overview aggregate API + Overview page widgets | new `apps/api/src/overview/**`, new `packages/shared/src/overview.ts`, `app/(admin)/page.tsx`, new `app/(admin)/_components/overview-*.tsx` |
+| W2-LIVETEAM | Live team card page | new `app/(admin)/live-team/**` |
+| W2-ATTENDANCE-UI | Attendance tabs, missing clock-outs, admin-initiated correction UI, corrections page | `app/(admin)/attendance/**`, `app/(admin)/corrections/**`, `components/correction-card.tsx` |
+| W2-PROFILE | Employee profile analytics | `app/(admin)/employees/[id]/**`, new `apps/api/src/employees/analytics.{service,controller}.ts` (+ shared `employee-analytics.ts`) |
+| W2-REPORTS | Reports sub-pages + timesheet week grid + summary/custom XLSX | `app/(admin)/reports/**` except `scheduled/**`, `app/(admin)/timesheets/**`, new `apps/api/src/attendance/summary-report.*` |
+| W2-SETTINGS | Settings split, notification-rules UI, employee list filters, teams/roles/devices polish, leave + holidays polish | `app/(admin)/settings/**`, `app/(admin)/{employees/page.tsx,employees/new,teams,roles,devices,leave,holidays,notifications}/**`, `apps/api/src/employees/employees.{service,controller}.ts` (list filters only), `apps/api/src/leave/**` (only if needed) |
+
+GET `/overview?date=&teamId=` (W2-OVERVIEW): `attendance:read-all`, `@TeamScoped`; one round trip; each section obeys
+its own permission (screenshots need `screenshots:read` and stay access-logged; apps need `activity:read-all`; a
+section the caller may not see is `null`, never an error). Reuse services (attendance overview, schedule daily,
+anomalies, activity summary, screenshots, holidays, leave, corrections) — no reimplemented rules.
+Target < 1 s for 100 employees. Every page that filters by date/team renders `<GlobalFilters />`.
+The admin page owner adds its nav entry (`sidebar.tsx`, one line) and smoke route.
+Browser checks for new pages: add to a new `apps/dashboard/scripts/verify-parity.mjs` section **only** via the lead
+(agents describe the checks in their report); agents may run the existing suites only if the lead grants a port slot.
