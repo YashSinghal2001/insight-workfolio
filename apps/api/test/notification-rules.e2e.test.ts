@@ -90,6 +90,26 @@ const events = async (type: string, employee: Person) =>
 const deliveries = async (eventId: string) =>
   (await db.execute({ sql: "SELECT d.recipient_role, u.email, d.status, d.last_error FROM notification_deliveries d JOIN users u ON u.id = d.recipient_user_id WHERE d.event_id = ? ORDER BY u.email", args: [eventId] })).rows.map((r) => `${r.recipient_role}:${r.email}:${r.status}`);
 const digestEvents = async (ruleId: string) => (await db.execute({ sql: "SELECT id, local_date FROM notification_events WHERE dedupe_key LIKE ? ORDER BY local_date", args: [`digest:${ruleId}:%`] })).rows;
+const pause = (ms: number) => new Promise((r) => setTimeout(r, ms));
+/** Clock-in/out notifications are recorded after the request, outside the employee lock: wait for them. */
+async function until(check: () => Promise<boolean>) {
+  for (let i = 0; i < 100 && !(await check()); i++) await pause(10);
+  assert.ok(await check(), "timed out waiting for the notification");
+}
+/** Counts write batches and INSERT/UPDATE/DELETE statements sent to the database while `fn` runs. */
+async function writesDuring(fn: () => Promise<unknown>) {
+  const raw = db as unknown as { batch: (s: unknown[], mode?: string) => Promise<unknown>; execute: (q: unknown) => Promise<unknown> };
+  const [batch, execute] = [raw.batch, raw.execute];
+  let writes = 0;
+  raw.batch = (st, mode) => { if (mode === "write") writes++; return batch.call(raw, st, mode); };
+  raw.execute = (q) => { if (/^\s*(INSERT|UPDATE|DELETE)/i.test(typeof q === "string" ? q : (q as { sql: string }).sql)) writes++; return execute.call(raw, q); };
+  try {
+    await fn();
+  } finally {
+    Object.assign(raw, { batch, execute });
+  }
+  return writes;
+}
 const sentTo = (from: number) => mock.outbox.slice(from).map((m) => m.to).sort();
 
 let admin: Person;
@@ -207,6 +227,7 @@ describe("clock-in / clock-out", () => {
   test("OFF (default): a clock-in records nothing", async () => {
     const e = await person("EMPLOYEE");
     await attendance.act({ employeeId: e.profile, deviceId: e.device }, "CLOCK_IN", randomUUID());
+    await pause(100);
     assert.equal((await events("ATTENDANCE_CLOCK_IN", e)).length, 0);
     await attendance.act({ employeeId: e.profile, deviceId: e.device }, "CLOCK_OUT", randomUUID());
   });
@@ -221,6 +242,9 @@ describe("clock-in / clock-out", () => {
     const key = randomUUID();
     await attendance.act({ employeeId: e.profile, deviceId: e.device }, "CLOCK_IN", key);
     await assert.rejects(attendance.act({ employeeId: e.profile, deviceId: e.device }, "CLOCK_IN", randomUUID()), "a second clock-in is rejected: no event");
+    await until(async () => (await events("ATTENDANCE_CLOCK_IN", e)).length > 0);
+    await pause(50);
+    assert.equal((await events("ATTENDANCE_CLOCK_IN", e)).length, 1);
     const [ev] = await events("ATTENDANCE_CLOCK_IN", e);
     assert.ok(ev);
     const attendanceId = (await db.execute({ sql: "SELECT id FROM attendance_events WHERE idempotency_key = ?", args: [key] })).rows[0]!.id;
@@ -231,9 +255,12 @@ describe("clock-in / clock-out", () => {
     const upload = { sentAt, events: [{ id: randomUUID(), type: "CLOCK_OUT", occurredAt: sentAt }] };
     await attendance.sync({ employeeId: e.profile, deviceId: e.device }, upload);
     await attendance.sync({ employeeId: e.profile, deviceId: e.device }, upload);
+    await until(async () => (await events("ATTENDANCE_CLOCK_OUT", e)).length > 0);
+    await pause(50);
     assert.equal((await events("ATTENDANCE_CLOCK_OUT", e)).length, 1, "replayed upload: still one event");
     // Another team's employee: no rule covers them.
     await attendance.act({ employeeId: other.profile, deviceId: other.device }, "CLOCK_IN", randomUUID());
+    await pause(100);
     assert.equal((await events("ATTENDANCE_CLOCK_IN", other)).length, 0);
     const from = mock.outbox.length;
     await svc.deliver();
@@ -267,6 +294,7 @@ describe("late arrival, absence, productivity alert, missing clock-out", () => {
     assert.equal((await events("ABSENCE", absent)).length, 0, "not yet due (09:15)");
     await rules.tick(WED_10);
     await rules.tick(WED_10 + 60_000);
+    assert.equal(await writesDuring(() => rules.tick(WED_10 + 120_000)), 0, "a later tick finds everything recorded: no writes");
     const [l] = await events("LATE_ARRIVAL", late);
     assert.deepEqual([l?.dedupe_key, l?.local_date, l?.occurred_at], [`LATE_ARRIVAL:${late.profile}:2026-11-18`, "2026-11-18", "2026-11-18T09:40:00.000Z"]);
     assert.equal((await events("LATE_ARRIVAL", late)).length, 1, "repeated ticks: once");
@@ -310,13 +338,40 @@ describe("late arrival, absence, productivity alert, missing clock-out", () => {
   });
 });
 
+describe("missing clock-out from the anomaly detector", () => {
+  test("the timer records one event per employee and local date, team-scoped, only with a rule that is not OFF; later ticks write nothing", async () => {
+    const x = await person("EMPLOYEE");
+    const y = await person("EMPLOYEE");
+    const gone = await person("EMPLOYEE");
+    const t = await team(null, [x, gone]);
+    const now = Date.parse("2026-11-18T10:00:00.000Z");
+    for (const p of [x, y, gone]) await db.execute({ sql: "INSERT INTO attendance_sessions (id, employee_id, device_id, clock_in_at, status) VALUES (?, ?, ?, '2026-11-16T09:00:00.000Z', 'OPEN')", args: [randomUUID(), p.profile, p.device] });
+    await db.execute({ sql: "UPDATE users SET status = 'DISABLED' WHERE id = ?", args: [gone.id] });
+    const id = await rule({ type: "MISSING_CLOCK_OUT", teamId: t, mode: "OFF" }, [admin]);
+    await rules.tick(now);
+    assert.equal((await events("MISSING_CLOCK_OUT", x)).length, 0, "rule OFF: nothing");
+    await api(`/notifications/rules/${id}`, { method: "PATCH", cookie: adminCookie, body: { mode: "IMMEDIATE" } });
+    await rules.tick(now);
+    const [ev] = await events("MISSING_CLOCK_OUT", x);
+    assert.equal(ev?.dedupe_key, `MISSING_CLOCK_OUT:${x.profile}:2026-11-16`);
+    assert.deepEqual(await deliveries(String(ev!.id)), [`IT:${admin.email}:PENDING`]);
+    assert.equal((await events("MISSING_CLOCK_OUT", y)).length, 0, "not in the rule's team");
+    assert.equal((await events("MISSING_CLOCK_OUT", gone)).length, 0, "disabled account");
+    assert.equal(await writesDuring(() => rules.tick(now + 60_000)), 0);
+    assert.equal((await events("MISSING_CLOCK_OUT", x)).length, 1);
+    await api(`/notifications/rules/${id}`, { method: "PATCH", cookie: adminCookie, body: { mode: "OFF" } });
+    await svc.deliver();
+  });
+});
+
 describe("daily digest", () => {
   test("one email per recipient per rule per local date at digest time; empty day nothing; repeated ticks never resend", async () => {
     const e1 = await person("EMPLOYEE");
     const e2 = await person("EMPLOYEE");
     const outsider = await person("EMPLOYEE");
+    const e3 = await person("EMPLOYEE");
     const head = await person("EMPLOYEE");
-    const t = await team(head, [e1, e2]);
+    const t = await team(head, [e1, e2, e3]);
     const id = await rule({ type: "MISSING_CLOCK_OUT", teamId: t, mode: "DAILY_DIGEST", digestLocalTime: "18:00", timezone: "UTC" }, [admin, head]);
     await rule({ type: "MISSING_CLOCK_OUT", teamId: await team(null, [outsider]), mode: "IMMEDIATE" }, [superAdmin]);
     await rules.recordMissingClockOut({ employeeId: e1.profile, clockInAt: "2026-06-10T08:00:00.000Z" }, Date.parse("2026-06-10T12:00:00.000Z"));
@@ -326,7 +381,8 @@ describe("daily digest", () => {
     await rules.digests(Date.parse("2026-06-10T17:59:00.000Z"));
     assert.equal((await digestEvents(id)).length, 0, "before digest time");
     await rules.digests(Date.parse("2026-06-10T18:00:00.000Z"));
-    // An event recorded after the digest time is not in today's digest and triggers nothing more.
+    // Events recorded after the digest time are not in today's digest: they go into the next day's.
+    await rules.recordMissingClockOut({ employeeId: e3.profile, clockInAt: "2026-06-10T19:00:00.000Z" }, Date.parse("2026-06-10T20:00:00.000Z"));
     await rules.recordMissingClockOut({ employeeId: e1.profile, clockInAt: "2026-06-11T00:30:00.000Z" }, Date.parse("2026-06-11T01:00:00.000Z"));
     for (const at of ["2026-06-10T18:01:00.000Z", "2026-06-10T23:59:00.000Z"]) await rules.digests(Date.parse(at));
     const days = await digestEvents(id);
@@ -338,11 +394,35 @@ describe("daily digest", () => {
     assert.deepEqual(digest.map((m) => m.to).sort(), [admin.email, head.email].sort());
     for (const m of digest) {
       assert.match(m.subject, /^Missing clock-out: daily digest for 2026-06-10 \(2\)$/);
-      assert.ok(m.text.includes(e1.code) && m.text.includes(e2.code) && !m.text.includes(outsider.code), "only this team's events");
+      assert.ok(m.text.includes(e1.code) && m.text.includes(e2.code) && !m.text.includes(outsider.code) && !m.text.includes(e3.code), "only this team's events up to the digest time");
     }
+    // Next day: the late 10 June event and the 11 June one.
+    assert.equal(await writesDuring(() => rules.digests(Date.parse("2026-06-10T23:00:00.000Z"))), 0, "digest already recorded: no writes");
+    await rules.digests(Date.parse("2026-06-11T18:00:00.000Z"));
+    const next = mock.outbox.length;
+    await svc.deliver();
+    const day2 = mock.outbox.slice(next).find((m) => m.to === admin.email)!;
+    assert.match(day2.subject, /daily digest for 2026-06-11 \(2\)$/);
+    assert.ok(day2.text.includes(e3.code) && day2.text.includes("2026-06-10 19:00 UTC") && day2.text.includes(e1.code) && !day2.text.includes(e2.code));
     // Empty day: nothing.
     await rules.digests(Date.parse("2026-06-12T19:00:00.000Z"));
-    assert.deepEqual((await digestEvents(id)).map((d) => d.local_date), ["2026-06-10"]);
+    assert.deepEqual((await digestEvents(id)).map((d) => d.local_date), ["2026-06-10", "2026-06-11"]);
+  });
+
+  test("a team head's digest lists only that team's members, never another team's events", async () => {
+    const member = await person("EMPLOYEE");
+    const nonMember = await person("EMPLOYEE");
+    const head = await person("EMPLOYEE");
+    const t = await team(head, [member]);
+    await rule({ type: "MISSING_CLOCK_OUT", teamId: t, mode: "DAILY_DIGEST", digestLocalTime: "18:00", timezone: "UTC" }, [head]);
+    await rule({ type: "MISSING_CLOCK_OUT", teamId: await team(null, [nonMember]), mode: "DAILY_DIGEST", digestLocalTime: "18:00", timezone: "UTC" }, [admin]);
+    for (const p of [member, nonMember]) await rules.recordMissingClockOut({ employeeId: p.profile, clockInAt: "2026-08-03T08:00:00.000Z" }, Date.parse("2026-08-03T12:00:00.000Z"));
+    await rules.digests(Date.parse("2026-08-03T18:00:00.000Z"));
+    const from = mock.outbox.length;
+    await svc.deliver();
+    const mails = mock.outbox.slice(from).filter((m) => m.to === head.email);
+    assert.equal(mails.length, 1);
+    assert.ok(mails[0]!.text.includes(member.code) && !mails[0]!.text.includes(nonMember.code));
   });
 
   test("DST (America/New_York): spring-forward gap fires once after the gap; fall-back repeated hour fires once", async () => {
