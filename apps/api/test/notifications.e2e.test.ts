@@ -131,6 +131,13 @@ describe("routing matrix", () => {
       SECURITY_INCIDENT: "EMPLOYEE+IT+SUPER_ADMIN",
       ONBOARDING_SUMMARY: "IT+SUPER_ADMIN",
       PERIODIC_REPORT: "IT+SUPER_ADMIN",
+      // Routed by notification rules only (notification-rules.e2e.test.ts): no fixed group.
+      ATTENDANCE_CLOCK_IN: "",
+      ATTENDANCE_CLOCK_OUT: "",
+      LATE_ARRIVAL: "",
+      ABSENCE: "",
+      MISSING_CLOCK_OUT: "",
+      PRODUCTIVITY_ALERT: "",
     });
     for (const t of NOTIFICATION_TYPES) {
       const r = NOTIFICATION_ROUTES[t];

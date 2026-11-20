@@ -4,6 +4,7 @@ import { ConfigService } from "@nestjs/config";
 import type { DatabaseClient, InStatement, Row } from "@workfolio/database";
 import {
   NOTIFICATION_RECIPIENT_LABEL,
+  toZonedLocal,
   NOTIFICATION_ROUTES,
   platformRoleOf,
   type NotificationDelivery,
@@ -20,7 +21,7 @@ import { DATABASE } from "../database/database.module.js";
 import { MailError } from "../reports/mail.js";
 import { SCREENSHOT_STORAGE, StorageError, type ScreenshotStorage } from "../screenshots/storage.js";
 import { EmailService } from "./email.service.js";
-import { renderNotification } from "./templates.js";
+import { renderAttendance, renderNotification } from "./templates.js";
 
 export interface NotificationInput {
   type: NotificationType;
@@ -54,6 +55,18 @@ export const sanitize = (s: string) =>
     .replace(/\s+/g, " ")
     .trim()
     .slice(0, 500) || "No details";
+
+/**
+ * SQL condition: account `u` may receive mail from notification rule `r` right now. Active, a current recipient of
+ * a rule that is not OFF, and an admin or (team rules only) the head of that active team. Used when an event is
+ * recorded and again when each email is sent.
+ */
+export const RULE_RECIPIENT = `u.status = 'ACTIVE' AND r.mode <> 'OFF'
+  AND EXISTS (SELECT 1 FROM notification_rule_recipients rr WHERE rr.rule_id = r.id AND rr.user_id = u.id AND rr.removed_at IS NULL)
+  AND (u.role = 'ADMIN' OR EXISTS (SELECT 1 FROM teams t WHERE t.id = r.team_id AND t.head_user_id = u.id AND t.active = 1))`;
+/** SQL condition: employee `col` is covered by rule `r` (every employee, or a member of its active team). */
+export const RULE_COVERS = (col: string) =>
+  `(r.team_id IS NULL OR ${col} IN (SELECT tm.employee_id FROM team_members tm JOIN teams t ON t.id = tm.team_id WHERE t.id = r.team_id AND t.active = 1))`;
 
 /** Who is in each group right now. The server decides; no caller can name a recipient. */
 const RECIPIENTS: Record<NotificationRecipientRole, string> = {
@@ -183,8 +196,11 @@ export class NotificationsService implements OnModuleInit, OnModuleDestroy {
     await this.db.execute({ sql: "UPDATE notification_deliveries SET status = 'RETRYING', next_attempt_at = ?, updated_at = ? WHERE status = 'PROCESSING' AND updated_at < ?", args: [at, at, iso(now - STALE_MS)] });
     const { rows } = await this.db.execute({
       sql: `SELECT d.id, d.recipient_role, d.attempts, e.id AS event_id, e.type, e.severity, e.description, e.created_at, e.subject_user_id,
-              u.id AS user_id, u.email, u.status AS user_status, u.role, u.admin_title
+              u.id AS user_id, u.email, u.status AS user_status, u.role, u.admin_title,
+              d.rule_id, e.employee_id, e.local_date, e.occurred_at, p.full_name, p.employee_code, p.timezone,
+              (r.id IS NOT NULL AND ${RULE_RECIPIENT} AND (e.employee_id IS NULL OR ${RULE_COVERS("e.employee_id")})) AS rule_ok
             FROM notification_deliveries d JOIN notification_events e ON e.id = d.event_id LEFT JOIN users u ON u.id = d.recipient_user_id
+              LEFT JOIN notification_rules r ON r.id = d.rule_id LEFT JOIN employee_profiles p ON p.id = e.employee_id
             WHERE d.status IN ('PENDING', 'RETRYING') AND d.next_attempt_at <= ?
             ORDER BY (e.severity = 'CRITICAL') DESC, d.created_at, d.id LIMIT ${BATCH}`,
       args: [at],
@@ -195,7 +211,7 @@ export class NotificationsService implements OnModuleInit, OnModuleDestroy {
       if (!claimed.rowsAffected) continue;
       const attempts = Number(r.attempts) + 1;
       try {
-        const { messageId } = await this.email.send(this.message(r));
+        const { messageId } = await this.email.send(r.rule_id === null ? this.message(r) : await this.ruleMessage(r));
         const done = iso(Date.now());
         await this.db.execute({ sql: "UPDATE notification_deliveries SET status = 'SENT', sent_at = ?, provider_message_id = ?, last_error = NULL, updated_at = ? WHERE id = ?", args: [done, messageId.slice(0, 200), done, deliveryId] });
       } catch (err) {
@@ -228,6 +244,29 @@ export class NotificationsService implements OnModuleInit, OnModuleDestroy {
       dashboardUrl: this.config.get("DASHBOARD_URL", { infer: true }),
       sender,
     });
+  }
+
+  /**
+   * The email for a delivery routed by a notification rule: the recipient must still qualify (RULE_RECIPIENT, and
+   * the employee still covered by the rule). An event with an employee is one item; without one it is the rule's
+   * daily digest, listing that local date's events recorded up to the digest time, for employees covered now.
+   */
+  private async ruleMessage(r: Row) {
+    if (!Number(r.rule_ok)) throw new MailError("The recipient no longer receives this notification rule", true);
+    const sender = this.email.sender;
+    if (!sender) throw new MailError("No email provider is configured", true);
+    const item = (x: Row) => ({ fullName: String(x.full_name), employeeCode: String(x.employee_code), localTime: `${toZonedLocal(String(x.occurred_at), String(x.timezone)).replace("T", " ")} ${String(x.timezone)}` });
+    const base = { type: r.type as NotificationType, to: String(r.email), dashboardUrl: this.config.get("DASHBOARD_URL", { infer: true }), sender };
+    if (r.employee_id !== null) return renderAttendance({ ...base, digestDate: null, items: [item(r)] });
+    const { rows } = await this.db.execute({
+      sql: `SELECT p.full_name, p.employee_code, p.timezone, x.occurred_at FROM notification_events x JOIN employee_profiles p ON p.id = x.employee_id
+            JOIN notification_rules r ON r.id = ?
+            WHERE x.type = ? AND x.local_date = ? AND x.created_at <= ? AND ${RULE_COVERS("x.employee_id")}
+            ORDER BY x.occurred_at, p.full_name COLLATE NOCASE, x.id`,
+      args: [String(r.rule_id), String(r.type), String(r.local_date), String(r.occurred_at)],
+    });
+    if (!rows.length) throw new MailError("Nothing left to report for this digest", true);
+    return renderAttendance({ ...base, digestDate: String(r.local_date), items: rows.map(item) });
   }
 
   // ---- Producers that live here --------------------------------------------------------------

@@ -1401,6 +1401,47 @@ export const MIGRATIONS: Migration[] = [
       "CREATE INDEX notification_deliveries_event ON notification_deliveries(event_id)",
     ],
   },
+  {
+    id: "0034_notification_rules",
+    statements: [
+      // Attendance notification rules (docs/notifications.md §9): one per (type, team); team_id NULL = all employees.
+      // Every rule starts OFF. Never deleted: switch it OFF instead.
+      `CREATE TABLE notification_rules (
+        id                TEXT PRIMARY KEY,
+        type              TEXT NOT NULL CHECK (type IN ('ATTENDANCE_CLOCK_IN', 'ATTENDANCE_CLOCK_OUT', 'LATE_ARRIVAL', 'ABSENCE', 'MISSING_CLOCK_OUT', 'PRODUCTIVITY_ALERT')),
+        mode              TEXT NOT NULL DEFAULT 'OFF' CHECK (mode IN ('IMMEDIATE', 'DAILY_DIGEST', 'OFF')),
+        digest_local_time TEXT NOT NULL DEFAULT '18:00' CHECK (length(digest_local_time) = 5 AND digest_local_time GLOB '[0-2][0-9]:[0-5][0-9]' AND digest_local_time <= '23:59'),
+        timezone          TEXT NOT NULL CHECK (length(timezone) BETWEEN 1 AND 64),
+        team_id           TEXT REFERENCES teams(id) ON DELETE RESTRICT,
+        changed_by        TEXT NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+        created_at        TEXT NOT NULL DEFAULT ${NOW},
+        updated_at        TEXT NOT NULL DEFAULT ${NOW}
+      ) STRICT`,
+      "CREATE UNIQUE INDEX notification_rules_scope ON notification_rules(type, coalesce(team_id, ''))",
+      "CREATE TRIGGER notification_rules_no_delete BEFORE DELETE ON notification_rules BEGIN SELECT RAISE(ABORT, 'append_only'); END",
+      "CREATE TRIGGER notification_rules_immutable BEFORE UPDATE OF id, type, team_id, created_at ON notification_rules BEGIN SELECT RAISE(ABORT, 'append_only'); END",
+      // Recipients are accounts (never free-form addresses), like report_recipients: removal ends the row.
+      `CREATE TABLE notification_rule_recipients (
+        id         TEXT PRIMARY KEY,
+        rule_id    TEXT NOT NULL REFERENCES notification_rules(id) ON DELETE RESTRICT,
+        user_id    TEXT NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+        added_by   TEXT NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+        added_at   TEXT NOT NULL DEFAULT ${NOW},
+        removed_by TEXT REFERENCES users(id) ON DELETE RESTRICT,
+        removed_at TEXT,
+        CHECK ((removed_by IS NULL) = (removed_at IS NULL))
+      ) STRICT`,
+      "CREATE UNIQUE INDEX notification_rule_recipients_current ON notification_rule_recipients(rule_id, user_id) WHERE removed_at IS NULL",
+      "CREATE TRIGGER notification_rule_recipients_no_delete BEFORE DELETE ON notification_rule_recipients BEGIN SELECT RAISE(ABORT, 'append_only'); END",
+      // Attendance events: the employee, their local date and the moment it is about (NULL for system events).
+      "ALTER TABLE notification_events ADD COLUMN employee_id TEXT REFERENCES employee_profiles(id) ON DELETE RESTRICT",
+      "ALTER TABLE notification_events ADD COLUMN local_date TEXT CHECK (local_date IS NULL OR date(local_date) IS local_date)",
+      "ALTER TABLE notification_events ADD COLUMN occurred_at TEXT",
+      "CREATE INDEX notification_events_day ON notification_events(type, local_date) WHERE employee_id IS NOT NULL",
+      // The rule a delivery was routed by (NULL: the fixed routing matrix).
+      "ALTER TABLE notification_deliveries ADD COLUMN rule_id TEXT REFERENCES notification_rules(id) ON DELETE RESTRICT",
+    ],
+  },
 ];
 
 const checksum = (m: Migration) => createHash("sha256").update(JSON.stringify(m.statements)).digest("hex");
