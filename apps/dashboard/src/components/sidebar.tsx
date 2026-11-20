@@ -30,7 +30,7 @@ export const ADMIN_NAV: readonly NavSection[] = [
     ],
   },
   { title: "Work", items: [{ label: "Projects", href: "/projects" }] },
-  { title: "Reports", items: [{ label: "Reports", href: "/reports" }, { label: "Alerts", href: "/alerts" }] },
+  { title: "Reports", items: [{ label: "Reports", href: "/reports" }, { label: "Scheduled reports", href: "/reports/scheduled" }, { label: "Alerts", href: "/alerts" }] },
   { title: "People", items: [{ label: "Employees", href: "/employees" }, { label: "Teams", href: "/teams" }, { label: "Devices", href: "/devices" }, { label: "Roles", href: "/roles" }] },
   {
     title: "Admin",

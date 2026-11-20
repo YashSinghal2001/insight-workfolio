@@ -17,7 +17,7 @@ test("0032 is additive and enforces release, package and history rules", async (
   await db.execute("INSERT INTO devices (id, employee_id, device_name, platform, device_identifier) VALUES ('d1', 'p1', 'Mac', 'macos', 'h1')");
   const before = (await db.execute("SELECT * FROM devices")).rows;
 
-  assert.deepEqual(await migrate(db), ["0032_desktop_updates", "0033_notifications", "0034_notification_rules"]);
+  assert.deepEqual(await migrate(db), ["0032_desktop_updates", "0033_notifications", "0034_notification_rules", "0035_report_schedule_kinds"]);
   assert.deepEqual((await db.execute("SELECT * FROM devices")).rows, before, "devices untouched");
 
   await db.execute("INSERT INTO desktop_releases (id, version) VALUES ('r1', '0.3.0')");

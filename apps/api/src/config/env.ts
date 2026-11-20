@@ -200,9 +200,10 @@ export const envSchema = z
     TIMELAPSE_TTL_HOURS: z.coerce.number().int().min(1).max(168).default(24),
     /** Videos are refused (not queued, not encoded) while the TIMELAPSE_DIR filesystem has less free space than this. 0 disables. */
     TIMELAPSE_MIN_FREE_MB: z.coerce.number().int().min(0).max(1_000_000).default(1024),
-    // Email reports (docs/email-reports.md). No real provider is integrated yet: "none" generates and
-    // records reports without emailing them; "mock" keeps messages in memory (development and tests only).
-    REPORT_MAIL_PROVIDER: z.enum(["none", "mock"]).default("none"),
+    // Email reports (docs/email-reports.md). "none" generates and records reports without emailing them; "mock"
+    // keeps messages in memory (development and tests only); "graph-delegated" sends with the OneDrive connection's
+    // delegated Mail.Send token, as invitations do (same settings and rule as INVITATION_MAIL_PROVIDER=graph-delegated).
+    REPORT_MAIL_PROVIDER: z.enum(["none", "mock", "graph-delegated"]).default("none"),
     /** How often the report scheduler checks for due reports and retries; 0 turns it off. */
     REPORT_SCHEDULER_SECONDS: z.coerce.number().int().min(0).max(86_400).default(300),
     // Website tracking (docs/website-usage.md). In production, collection stays blocked until the
@@ -246,6 +247,10 @@ export const envSchema = z
   .refine((env) => env.INVITATION_MAIL_PROVIDER !== "graph-delegated" || (!!env.ONEDRIVE_CLIENT_ID && !!env.MAIL_SENDER && env.MAIL_SENDER.toLowerCase() === env.ONEDRIVE_ACCOUNT_EMAIL), {
     message: "INVITATION_MAIL_PROVIDER=graph-delegated needs the OneDrive settings (ONEDRIVE_*) and MAIL_SENDER equal to ONEDRIVE_ACCOUNT_EMAIL",
     path: ["INVITATION_MAIL_PROVIDER"],
+  })
+  .refine((env) => env.REPORT_MAIL_PROVIDER !== "graph-delegated" || (!!env.ONEDRIVE_CLIENT_ID && !!env.MAIL_SENDER && env.MAIL_SENDER.toLowerCase() === env.ONEDRIVE_ACCOUNT_EMAIL), {
+    message: "REPORT_MAIL_PROVIDER=graph-delegated needs the OneDrive settings (ONEDRIVE_*) and MAIL_SENDER equal to ONEDRIVE_ACCOUNT_EMAIL",
+    path: ["REPORT_MAIL_PROVIDER"],
   })
   // Production: a hosted database (libsql:// or https://; no wss://, Turso refuses the WebSocket transport) or a
   // persistent local file by ABSOLUTE path (the VPS: outside the repository, on a disk that survives deploys).

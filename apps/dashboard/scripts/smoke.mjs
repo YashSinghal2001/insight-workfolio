@@ -25,6 +25,7 @@ const ROUTES = {
   "/alerts": ["Checking your session"],
   "/projects": ["Checking your session"],
   "/reports": ["Checking your session"],
+  "/reports/scheduled": ["Checking your session"],
   "/websites": ["Checking your session"],
   "/roles": ["Checking your session"],
   "/audit": ["Checking your session"],

@@ -1,7 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { ConfigService } from "@nestjs/config";
-import type { ReportMailProvider } from "@workfolio/shared";
 import type { Env } from "../config/env.js";
+// Runtime use only inside the factory (invitations.ts imports this module too; the cycle is safe).
+import { DelegatedGraphMailTransport } from "../employees/invitations.js";
+import { ONEDRIVE_AUTH } from "../screenshots/storage.js";
+import type { OneDriveService } from "../storage/onedrive.js";
 
 export const MAIL_TRANSPORT = Symbol("MAIL_TRANSPORT");
 
@@ -24,10 +27,10 @@ export class MailError extends Error {
 }
 
 /**
- * Email delivery, separate from report generation. A real provider (e.g. Microsoft Graph sendMail
- * or SMTP) implements this once it is approved and configured; none is integrated yet.
+ * Email delivery, separate from report generation. Reports: none, mock, or Microsoft Graph delegated
+ * (REPORT_MAIL_PROVIDER=graph-delegated, the same transport invitations and notifications use).
  */
-export interface MailTransport<Name extends string = ReportMailProvider> {
+export interface MailTransport<Name extends string = "none" | "mock" | "graph"> {
   readonly name: Name;
   /** False for "none" and "mock": nothing reaches anyone's inbox. */
   readonly delivers: boolean;
@@ -68,7 +71,12 @@ export class MockMailTransport implements MailTransport {
 
 export const mailTransportProvider = {
   provide: MAIL_TRANSPORT,
-  inject: [ConfigService],
-  useFactory: (config: ConfigService<Env, true>): MailTransport =>
-    config.get("REPORT_MAIL_PROVIDER", { infer: true }) === "mock" ? new MockMailTransport() : new NoMailTransport(),
+  inject: [ConfigService, ONEDRIVE_AUTH],
+  useFactory: (config: ConfigService<Env, true>, onedrive: OneDriveService): MailTransport => {
+    const provider = config.get("REPORT_MAIL_PROVIDER", { infer: true });
+    if (provider === "mock") return new MockMailTransport();
+    // Sends as the connected OneDrive account (= MAIL_SENDER, checked at boot). Only when the owner configures it.
+    if (provider === "graph-delegated") return new DelegatedGraphMailTransport(onedrive);
+    return new NoMailTransport();
+  },
 };
