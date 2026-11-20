@@ -257,7 +257,7 @@ export default function ScheduledReportsPage() {
         />
       )}
 
-      <div aria-live="polite">{message && <p role="status" className="text-sm">{message}</p>}</div>
+      <div aria-live="polite">{message && <p role="status" data-report-message className="text-sm">{message}</p>}</div>
       {error && <ErrorState message={error} onRetry={() => void load()} />}
       {!schedules && !error && <SkeletonRows label="scheduled reports" />}
       {schedules?.length === 0 && <EmptyState title="No scheduled reports yet." hint="Create one: runs are recorded even when nothing is emailed." action={<Button onClick={() => setEditing("new")}>New report</Button>} />}

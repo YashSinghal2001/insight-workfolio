@@ -142,11 +142,13 @@ async function addRecipient(name, email) {
   await waitFor(`${row(name)}.innerText.includes(${JSON.stringify(email)})`, `recipient ${email}`);
 }
 async function runNow(name) {
-  await js(`document.querySelector('[role=status]')?.remove()`);
+  // Mark (never remove: React owns it) the previous message; the page unmounts it and renders a fresh one.
+  const msg = "[data-report-message]";
+  await js(`document.querySelector('${msg}')?.setAttribute('data-old', '')`);
   await js(`${button(row(name), `Run ${name} now`)}.click()`);
-  await waitFor(`!!document.querySelector('[role=status]')`, "run result");
+  await waitFor(`!!document.querySelector('${msg}:not([data-old])')`, "run result");
   await waitFor(`!!${row(name)}.querySelector('[data-run-status]')`, "run listed");
-  return js(`document.querySelector('[role=status]').textContent`);
+  return js(`document.querySelector('${msg}:not([data-old])').textContent`);
 }
 
 try {
@@ -184,7 +186,7 @@ try {
   const runText = await js(`${row("Daily attendance")}.innerText`);
   check("dashboard: run now → 'not emailed' (mock only), never 'sent'; one message in the mock outbox", /ran for .*not emailed/.test(first) && runText.includes("Not emailed") && runText.includes("mock only") && !/\bSent\b|Delivered/.test(runText) && mock.outbox.length === 1 && mock.outbox[0].to === "admin2@example.com", `${first} | ${runText.replace(/\s+/g, " ")}`);
   const again = await runNow("Daily attendance");
-  check("dashboard: running again for the same period sends nothing new", /Already run for/.test(again) && mock.outbox.length === 1 && (await js(`${row("Daily attendance")}.querySelectorAll('[data-run-status]').length`)) === 1, again);
+  check("dashboard: running again for the same period sends nothing new", /already run for/.test(again) && mock.outbox.length === 1 && (await js(`${row("Daily attendance")}.querySelectorAll('[data-run-status]').length`)) === 1, again);
 
   await createReport("Ana weekly", "WEEKLY", "Ana Employee");
   await addRecipient("Ana weekly", "report1@example.com");
