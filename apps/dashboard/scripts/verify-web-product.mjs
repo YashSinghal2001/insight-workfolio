@@ -1,5 +1,5 @@
 // Web product check: leave summary (admin tab + employee own summary), activity timeline labels,
-// per-day productivity bars, the admin "All employees" activity overview, and the read-only overview
+// per-day productivity bars, the admin /activity tabs (summary charts + overview, per employee, app history, review apps), /risk-users, and the read-only overview
 // on /reports. Throwaway API (temporary file DB) on :4000, dashboard production build on :3117,
 // headless Chrome over CDP (time zone pinned to UTC). Synthetic data only.
 // Run after `pnpm build`. Needs Google Chrome (macOS path) and free ports 4000, 3117 and 9357.
@@ -34,7 +34,7 @@ const { AppModule } = await dist("app.module.js");
 const { configureApp } = await dist("app.setup.js");
 const { DATABASE } = await dist("database/database.module.js");
 const { hashPassword } = await dist("auth/crypto.js");
-const { DEFAULT_NOTICE_VERSION, addDays, localDate } = await import(`${ROOT}/packages/shared/dist/index.js`);
+const { DEFAULT_NOTICE_VERSION, addDays, formatDurationShort, localDate } = await import(`${ROOT}/packages/shared/dist/index.js`);
 const PASSWORD = "web product check password 1";
 const M = 60_000;
 const H = 60 * M;
@@ -212,9 +212,9 @@ try {
   check("leave summary tab: search narrows to Ben", /Ben Product/.test(await rowText("Leave summary", "Ben")));
   await shot("leave-summary.png");
 
-  // ---- Activity: overview (default tab) ----
+  // ---- Activity: Summary (default tab): app charts + the overview table ----
   await go("/activity");
-  check("activity: 'All employees' is the default tab", await js(`document.querySelector('#activity-view-btn-all')?.getAttribute('aria-selected') === 'true'`));
+  check("activity: 'Summary' is the default tab", await js(`document.querySelector('#activity-view-btn-summary')?.getAttribute('aria-selected') === 'true'`));
   await setRange(`document.querySelector('main')`, ACT_FROM, await js(`document.querySelectorAll('main input[type=date]')[1].value`));
   const range = await js(`[...document.querySelectorAll('main input[type=date]')].map((i) => i.value)`);
   await waitFor(`/Ben Product/.test(document.querySelector('table[aria-label="Activity overview"]')?.innerText ?? '')`, "overview table");
@@ -222,8 +222,17 @@ try {
   const anaOv = ov.items.find((r) => r.employee.id === ana.id);
   const anaRow = await rowText("Activity overview", "Ana Product");
   const benRow = await rowText("Activity overview", "Ben Product");
+  // Ana's clock-in and her activity are two syncs, each corrected by its own request latency (clock-skew rule): when the
+  // activity request is faster, her first interval starts a few ms before the clock-in and that edge is trimmed, so 75 min
+  // can read 1h 14m (floor). The UI must show exactly the API's value, and the API must be 75 min minus at most that trim.
+  const TRIM_MS = 1_000;
+  const anaActiveOk = anaOv.activeMs <= 75 * M && anaOv.activeMs > 75 * M - TRIM_MS;
   check("activity overview: rows for every employee with clocked-in, active, idle, unobserved, productive share and last upload",
-    ov.categoriesConfigured && anaRow.includes(`${Math.round(anaOv.productiveShare * 100)}%`) && anaRow.includes("1h 15m") && anaRow.includes("20m 00s") && benRow.includes("1h 30m") && /20m 00s/.test(benRow), `${anaRow} || ${benRow}`);
+    ov.categoriesConfigured && anaActiveOk && anaRow.includes(`${Math.round(anaOv.productiveShare * 100)}%`) && anaRow.includes(formatDurationShort(anaOv.activeMs)) && anaRow.includes("20m 00s") && benRow.includes("1h 30m") && /20m 00s/.test(benRow), `${anaOv.activeMs} ms: ${anaRow} || ${benRow}`);
+  const apps = ok(await api(`/activity/apps?from=${range[0]}&to=${range[1]}`, { cookie: admin }), "apps");
+  const slices = await js(`document.querySelectorAll('svg[aria-label^="Top applications by active time"] [data-slice]').length`);
+  check("activity summary: top-apps donut (one slice per app: Code, Safari, Slack) and a 100% label-share bar",
+    apps.applications.map((a) => a.applicationName).join() === "Code,Safari,Slack" && apps.applications[0].category === "PRODUCTIVE" && slices === 3 && (await js(`/Label share of active time/.test(document.querySelector('main').innerHTML)`)), `${slices} slices`);
   await shot("activity-overview.png");
 
   // ---- Activity: one employee (from the overview link) ----
@@ -246,14 +255,37 @@ try {
     (await js(`document.querySelectorAll('table[aria-label="Productivity by day"] tbody tr').length`)) === s.days.length && (await js(`[...document.querySelectorAll('[data-testid=productivity-trend] ol')].every((o) => o.getAttribute('aria-hidden') === 'true')`)));
   await shot("activity-employee.png");
 
+  // ---- Activity: Per employee, App history, Review apps ----
+  await js(`document.querySelector('#activity-view-btn-employees').click()`);
+  await waitFor(`/Ben Product/.test(document.querySelector('table[aria-label="Usage per employee"]')?.innerText ?? '')`, "per employee");
+  const perAna = await rowText("Usage per employee", "Ana Product");
+  check("activity per employee: Ana's active time and top application match /activity/apps",
+    perAna.includes(formatDurationShort(apps.employees.find((e) => e.employee.id === ana.id).activeMs)) && perAna.includes("Code"), perAna);
+  await js(`document.querySelector('#activity-view-btn-history').click()`);
+  await waitFor(`/Ben Product/.test(document.querySelector('table[aria-label="App history per employee"]')?.innerText ?? '')`, "app history");
+  check("activity app history: Code chosen first, bar chart per day, Ana and Ben listed", await js(`document.querySelector('select[aria-label=Application]').value === 'com.example.Code' && document.querySelectorAll('[data-bar]').length >= 1`));
+  await js(`document.querySelector('#activity-view-btn-review').click()`);
+  await waitFor(`/Safari/.test(document.querySelector('table[aria-label="Unreviewed applications"]')?.innerText ?? '')`, "review apps");
+  check("activity review apps: Safari is the one unreviewed app; link to Settings › App labels",
+    (await js(`document.querySelectorAll('table[aria-label="Unreviewed applications"] tbody tr').length === 1 && !!document.querySelector('main a[href="/settings/labels"]')`)));
+
+  // ---- Risk users ----
+  await go("/risk-users");
+  check("risk users: page renders (list or empty state) with a link to /alerts", await js(`!!document.querySelector('main a[href="/alerts"]') && (!!document.querySelector('table[aria-label="Risky users"]') || /No risky users/.test(document.querySelector('main').innerText))`));
+
   // ---- Reports: read-only overview ----
   await go("/reports");
   await waitFor(`/Ana Product/.test(document.querySelector('table[aria-label="Activity overview"]')?.innerText ?? '')`, "reports overview");
-  check("reports: read-only activity overview with employee links to /activity, email report form intact",
-    (await js(`!!document.querySelector('main a[href="/activity"]') && !!document.querySelector('table[aria-label="Activity overview"] a[href="/activity?employeeId=${ana.id}"]') && [...document.querySelectorAll('form')].some((f) => f.innerText.includes('Create report'))`)));
+  check("reports: read-only activity overview with employee links to /activity",
+    (await js(`!!document.querySelector('main a[href="/activity"]') && !!document.querySelector('table[aria-label="Activity overview"] a[href="/activity?employeeId=${ana.id}"]')`)));
+  // The email report form moved to /reports/scheduled (wave 1).
+  await go("/reports/scheduled");
+  await js(`[...document.querySelectorAll('main button')].find((b) => b.textContent.trim() === 'New report').click()`);
+  const formOk = await waitFor(`[...document.querySelectorAll('section[aria-label="New scheduled report"] form')].some((f) => f.innerText.includes('Create report'))`, "schedule form").catch(() => false);
+  check("reports/scheduled: 'New report' opens the email report form", formOk);
 
-  const adminScroll = await noHorizontalScroll(["/leave", "/activity", "/reports"], { "/leave": () => js(`document.querySelector('#leave-view-btn-summary').click()`).then(() => waitFor(`!!document.querySelector('table[aria-label="Leave summary"]')`, "summary at 390")) });
-  check("responsive 390px: /leave (summary), /activity (overview), /reports have no horizontal page scroll", adminScroll.length === 0, adminScroll.join(", "));
+  const adminScroll = await noHorizontalScroll(["/leave", "/activity", "/activity?tab=employees", "/risk-users", "/reports"], { "/leave": () => js(`document.querySelector('#leave-view-btn-summary').click()`).then(() => waitFor(`!!document.querySelector('table[aria-label="Leave summary"]')`, "summary at 390")) });
+  check("responsive 390px: /leave (summary), /activity (summary, per employee), /risk-users, /reports have no horizontal page scroll", adminScroll.length === 0, adminScroll.join(", "));
 
   // ---- Employee ----
   await signIn(ana.email);

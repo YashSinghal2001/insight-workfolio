@@ -264,7 +264,7 @@ async function downloaded(ext) {
   return null;
 }
 
-const ADMIN_ROUTES = ["/", "/employees", "/employees/new", `/employees/${ana.id}`, "/attendance", "/attendance?view=daily", "/timesheets", `/timesheets/${ana.id}`, "/corrections", "/leave", "/activity", "/websites", "/screenshots", "/projects", "/reports", "/roles", "/audit", "/settings", "/settings/schedule", "/settings/monitoring", "/settings/screenshots", "/settings/labels", "/settings/websites", "/settings/storage", "/settings/notifications", "/settings/leave-types", "/account"];
+const ADMIN_ROUTES = ["/", "/employees", "/employees/new", `/employees/${ana.id}`, "/attendance", "/attendance?view=daily", "/timesheets", `/timesheets/${ana.id}`, "/corrections", "/leave", "/activity", "/risk-users", "/websites", "/screenshots", "/projects", "/reports", "/roles", "/audit", "/settings", "/settings/schedule", "/settings/monitoring", "/settings/screenshots", "/settings/labels", "/settings/websites", "/settings/storage", "/settings/notifications", "/settings/leave-types", "/account"];
 const MY_ROUTES = ["/my", "/my/attendance", "/my/activity", "/my/websites", "/my/screenshots", "/my/projects", "/my/tasks", "/my/leave", "/my/reports", "/my/profile"];
 const RESPONSIVE_ADMIN = ["/", "/attendance?view=daily", "/timesheets", "/reports/scheduled", "/screenshots", "/settings/schedule", "/settings/monitoring", "/settings/screenshots", "/settings/notifications", "/settings/labels", "/audit", `/employees/${ana.id}`];
 const RESPONSIVE_MY = ["/my", "/my/attendance", "/my/leave", "/my/reports", "/my/profile"];

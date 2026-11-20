@@ -49,6 +49,7 @@ const ROUTES = {
   "/my/reports": ["Checking your session"],
   "/my/profile": ["Checking your session"],
   "/activity": ["Checking your session"],
+  "/risk-users": ["Checking your session"],
   "/settings": ["Checking your session"],
   "/settings/schedule": ["Checking your session"],
   "/settings/labels": ["Checking your session"],

@@ -6,6 +6,8 @@ import { ConfigModule, ConfigService } from "@nestjs/config";
 import { APP_GUARD } from "@nestjs/core";
 import { LoggerModule } from "nestjs-pino";
 import { ActivityController } from "./activity/activity.controller.js";
+import { ActivityAppsService } from "./activity/activity-apps.service.js";
+import { RiskUsersService } from "./activity/risk-users.service.js";
 import { AlertsController } from "./alerts/alerts.controller.js";
 import { AlertsService } from "./alerts/alerts.service.js";
 import { ActivityService } from "./activity/activity.service.js";
@@ -117,6 +119,8 @@ import { NotificationRulesService } from "./notifications/notification-rules.ser
   controllers: [AlertsController, HealthController, AuthController, EmployeesController, DevicesController, AttendanceController, CorrectionsController, ActivityController, MonitoringSettingsController, ScreenshotsController, ScreenshotSettingsController, TimelapseController, LeaveController, HolidaysController, TeamsController, ProjectsController, TaskTimeController, ReportsController, WebsitesController, RolesController, AuditController, ScheduleSettingsController, DailyAttendanceController, EmployeeTrackingController, GoogleDriveOAuthController, OneDriveController, DesktopUpdatesController, NotificationsController, AnomaliesController, EmployeeAnalyticsController, SummaryReportController, OverviewController, TeamTimelineController],
   providers: [
     AlertsService,
+    ActivityAppsService,
+    RiskUsersService,
     AuthService,
     EmployeesService,
     DevicesService,

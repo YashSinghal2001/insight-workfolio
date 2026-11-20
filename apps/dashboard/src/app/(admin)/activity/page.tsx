@@ -2,9 +2,10 @@
 
 import { Suspense, useCallback, useEffect, useState } from "react";
 import Link from "next/link";
-import { useSearchParams } from "next/navigation";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import {
   formatDurationShort as formatDuration,
+  type ActivityAppsResponse,
   type ActivityPeriodTotals,
   type ApplicationCategory,
   type CategorizedActivitySummary,
@@ -13,14 +14,17 @@ import {
   type Paginated,
 } from "@workfolio/shared";
 import { BreaksOverlay } from "@/components/breaks-overlay";
+import { GlobalFilters, useGlobalFilters } from "@/components/global-filters";
 import { EmptyState, ErrorState, PageHeader, Pagination, SkeletonRows, StatCard, StatGrid, StatusBadge, Tabs, type Tone } from "@/components/kit";
 import { RangePicker, weekRange, type Range } from "@/components/range-picker";
 import { Badge, Card, formatInZone, Notice } from "@/components/ui";
+import { ACTIVITY_TABS, parseActivityTab, type ActivityTab } from "@/lib/activity-apps";
 import { api, errorMessage } from "@/lib/api";
 import { ActivityOverview } from "../_components/activity-overview";
 import { DayTimeline } from "../_components/day-timeline";
 import { EmployeePicker } from "../_components/employee-picker";
 import { ProductivityTrend } from "../_components/productivity-trend";
+import { EmployeesTab, HistoryTab, ReviewTab, SummaryCharts, type AppsLoad } from "./apps-tabs";
 
 const CATEGORY: Record<ApplicationCategory, { label: string; tone: Tone }> = {
   PRODUCTIVE: { label: "Productive", tone: "success" },
@@ -30,11 +34,6 @@ const CATEGORY: Record<ApplicationCategory, { label: string; tone: Tone }> = {
 };
 
 const PAGE_SIZE = 50;
-const VIEWS = [
-  { id: "all", label: "All employees" },
-  { id: "employee", label: "One employee" },
-] as const;
-type View = (typeof VIEWS)[number]["id"];
 const time = (iso: string, tz: string) => new Intl.DateTimeFormat("en-GB", { dateStyle: "short", timeStyle: "medium", timeZone: tz }).format(new Date(iso));
 const FRESHNESS = {
   CURRENT: ["Up to date", true],
@@ -78,21 +77,105 @@ export default function ActivityPage() {
 }
 
 function Activity() {
-  const preset = useSearchParams().get("employeeId");
-  const [employeeId, setEmployeeId] = useState(() => (preset && /^[0-9a-f-]{36}$/i.test(preset) ? preset : ""));
-  const [view, setView] = useState<View>(() => (employeeId ? "employee" : "all"));
+  const params = useSearchParams();
+  const router = useRouter();
+  const pathname = usePathname();
+  const { teamId } = useGlobalFilters();
+  const tab = parseActivityTab(new URLSearchParams(params.toString()));
+  const preset = params.get("employeeId");
+  const go = (t: ActivityTab, employeeId?: string) => {
+    const next = new URLSearchParams(params.toString());
+    if (t === "summary") next.delete("tab");
+    else next.set("tab", t);
+    if (employeeId) next.set("employeeId", employeeId);
+    else if (t !== "employee") next.delete("employeeId");
+    const qs = next.toString();
+    router.replace(qs ? `${pathname}?${qs}` : pathname, { scroll: false });
+  };
   const [range, setRange] = useState<Range>(() => weekRange());
+  // Organisation idle threshold in force (read-only here). null = not loaded; then nothing is claimed.
+  const [policy, setPolicy] = useState<MonitoringSettingsResponse["effective"] | null>(null);
+  useEffect(() => void api<MonitoringSettingsResponse>("/settings/monitoring").then((s) => setPolicy(s.effective), () => setPolicy(null)), []);
+
+  // GET /activity/apps for the Summary, Per employee, App history and Review tabs (one read per range/team).
+  const [appsRetry, setAppsRetry] = useState(0);
+  const appsKey = `${range.from}|${range.to}|${teamId ?? ""}|${appsRetry}`;
+  const [apps, setApps] = useState<{ key: string; load: AppsLoad } | null>(null);
+  const needApps = tab !== "employee";
+  useEffect(() => {
+    if (!needApps) return;
+    let live = true;
+    const q = new URLSearchParams({ from: range.from, to: range.to });
+    if (teamId) q.set("teamId", teamId);
+    api<ActivityAppsResponse>(`/activity/apps?${q}`).then(
+      (data) => live && setApps({ key: appsKey, load: { status: "ok", data } }),
+      (e) => live && setApps({ key: appsKey, load: { status: "error", message: errorMessage(e) } }),
+    );
+    return () => void (live = false);
+  }, [needApps, range, teamId, appsKey]);
+  const appsLoad: AppsLoad = apps?.key === appsKey ? apps.load : { status: "loading" };
+  const retryApps = () => setAppsRetry((n) => n + 1);
+
+  return (
+    <div className="mx-auto flex max-w-6xl flex-col gap-6">
+      <PageHeader
+        title="Activity"
+        about={
+          <>
+            Recorded by the desktop app only while the employee is clocked in and not on a break: the foreground application&apos;s
+            name and idle time (no input for the configured threshold, or screen locked). No window titles or keystrokes. Website
+            domains are recorded separately and only when website tracking is enabled and approved (see <Link href="/websites" className="underline">Websites</Link>);
+            screenshots are separate too (see Settings). Times are in the employee&apos;s time zone. Application labels are your own rules,
+            not a measure of performance. Summary, Per employee, App history and Review apps cover everyone you may see (or the team
+            chosen at the top); One employee shows a single person in detail.
+          </>
+        }
+        actions={policy && (
+          <span className="text-sm" data-testid="idle-threshold">
+            Idle threshold in force: <strong className="tabular-nums">{policy.idleThresholdSeconds} s</strong>
+            <span className="text-muted"> ({policy.enabled ? `sampled every ${policy.sampleSeconds} s` : "activity monitoring is off"}; <Link href="/settings/monitoring" className="underline">Monitoring settings</Link>)</span>
+          </span>
+        )}
+      />
+      <GlobalFilters date={false} team={tab !== "employee"} />
+
+      <RangePicker value={range} maxDays={31} onChange={setRange} />
+
+      <Tabs label="Activity views" tabs={ACTIVITY_TABS} value={tab} idPrefix="activity-view" onChange={(t) => go(t)}>
+        {tab === "summary" && (
+          <div className="flex flex-col gap-6">
+            <SummaryCharts load={appsLoad} onRetry={retryApps} />
+            <ActivityOverview key={teamId ?? "all"} range={range} teamId={teamId} onOpen={(id) => go("employee", id)} />
+          </div>
+        )}
+        {tab === "employees" && <EmployeesTab load={appsLoad} onRetry={retryApps} />}
+        {tab === "history" && <HistoryTab load={appsLoad} range={range} teamId={teamId} onRetry={retryApps} />}
+        {tab === "review" && <ReviewTab load={appsLoad} onRetry={retryApps} />}
+        {tab === "employee" && <OneEmployee key={preset ?? ""} preset={preset} range={range} />}
+      </Tabs>
+    </div>
+  );
+}
+
+/** The single-employee view (unchanged): summary, labels, applications, totals and the switching timeline. */
+function OneEmployee({ preset, range }: { preset: string | null; range: Range }) {
+  const [employeeId, setEmployeeId] = useState(() => (preset && /^[0-9a-f-]{36}$/i.test(preset) ? preset : ""));
   const [page, setPage] = useState(1);
   const [summary, setSummary] = useState<CategorizedActivitySummary | null>(null);
   const [timeline, setTimeline] = useState<Paginated<CategorizedTimelineItem> | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [retry, setRetry] = useState(0);
-  // Organisation idle threshold in force (read-only here). null = not loaded; then nothing is claimed.
-  const [policy, setPolicy] = useState<MonitoringSettingsResponse["effective"] | null>(null);
-  useEffect(() => void api<MonitoringSettingsResponse>("/settings/monitoring").then((s) => setPolicy(s.effective), () => setPolicy(null)), []);
+  const [shown, setShown] = useState(range);
+  // A new range resets the loaded data (state adjusted during render, not in an effect).
+  if (shown !== range) {
+    setShown(range);
+    setSummary(null);
+    setTimeline(null);
+    setPage(1);
+  }
 
   useEffect(() => {
-    if (!employeeId || view !== "employee") return;
+    if (!employeeId) return;
     let active = true;
     const q = `employeeId=${employeeId}&from=${range.from}&to=${range.to}`;
     Promise.all([
@@ -105,40 +188,13 @@ function Activity() {
     return () => {
       active = false;
     };
-  }, [employeeId, view, range, page, retry]);
+  }, [employeeId, range, page, retry]);
 
-  const reset = () => (setSummary(null), setTimeline(null), setPage(1));
   const pick = useCallback((id: string) => (setSummary(null), setTimeline(null), setPage(1), setEmployeeId(id)), []);
   const tz = summary?.employee.timezone ?? "UTC";
   const pages = timeline ? Math.max(1, Math.ceil(timeline.total / timeline.pageSize)) : 1;
 
   return (
-    <div className="mx-auto flex max-w-6xl flex-col gap-6">
-      <PageHeader
-        title="Activity"
-        about={
-          <>
-            Recorded by the desktop app only while the employee is clocked in and not on a break: the foreground application&apos;s
-            name and idle time (no input for the configured threshold, or screen locked). No window titles or keystrokes. Website
-            domains are recorded separately and only when website tracking is enabled and approved (see <Link href="/websites" className="underline">Websites</Link>);
-            screenshots are separate too (see Settings). Times are in the employee&apos;s time zone. Application labels are your own rules,
-            not a measure of performance.
-          </>
-        }
-        actions={policy && (
-          <span className="text-sm" data-testid="idle-threshold">
-            Idle threshold in force: <strong className="tabular-nums">{policy.idleThresholdSeconds} s</strong>
-            <span className="text-muted"> ({policy.enabled ? `sampled every ${policy.sampleSeconds} s` : "activity monitoring is off"}; <Link href="/settings/monitoring" className="underline">Monitoring settings</Link>)</span>
-          </span>
-        )}
-      />
-
-      <RangePicker value={range} maxDays={31} onChange={(r) => (reset(), setRange(r))} />
-
-      <Tabs label="Activity views" tabs={VIEWS} value={view} idPrefix="activity-view" onChange={setView}>
-      {view === "all" ? (
-        <ActivityOverview range={range} onOpen={(id) => (pick(id), setView("employee"))} />
-      ) : (
       <div className="flex flex-col gap-6">
       <EmployeePicker value={employeeId} onChange={pick} autoSelect />
       {employeeId && <DayTimeline key={employeeId} employeeId={employeeId} />}
@@ -296,8 +352,5 @@ function Activity() {
         </>
       )}
       </div>
-      )}
-      </Tabs>
-    </div>
   );
 }
