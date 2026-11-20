@@ -18,7 +18,7 @@ import { ActivityService } from "../activity/activity.service.js";
 import { SESSION_COLUMNS, str, withBreaks } from "../attendance/sessions.js";
 import type { AuthContext } from "../auth/auth.service.js";
 import { POLICY } from "../common/policy.js";
-import { canReadEmployee } from "../common/scope.js";
+import { canReadEmployee, readScope } from "../common/scope.js";
 import { DATABASE } from "../database/database.module.js";
 import { EmployeesService } from "./employees.service.js";
 
@@ -40,12 +40,16 @@ export class EmployeeAnalyticsService {
       canReadEmployee(this.db, caller, "activity:read-all", employee.id),
       canReadEmployee(this.db, caller, "leave:read-all", employee.id),
     ]);
+    const headOnly = readScope(caller, "attendance:read-all") === "team";
     const [batch, activity] = await Promise.all([
       this.db.batch(
         [
           { sql: `SELECT ${SESSION_COLUMNS} FROM attendance_sessions s WHERE s.employee_id = ? AND s.clock_in_at >= ? AND s.clock_in_at < ? ORDER BY s.clock_in_at`, args: [employee.id, start, end] },
           { sql: "SELECT status, count(*) AS n FROM correction_requests WHERE employee_id = ? AND created_at >= ? AND created_at < ? GROUP BY status", args: [employee.id, start, end] },
-          { sql: "SELECT t.name FROM team_members tm JOIN teams t ON t.id = tm.team_id WHERE tm.employee_id = ? AND t.active = 1 ORDER BY t.name", args: [employee.id] },
+          // Team heads see only the names of the teams they head (no other team's existence leaks).
+          headOnly
+            ? { sql: "SELECT t.name FROM team_members tm JOIN teams t ON t.id = tm.team_id WHERE tm.employee_id = ? AND t.active = 1 AND t.head_user_id = ? ORDER BY t.name", args: [employee.id, caller.id] }
+            : { sql: "SELECT t.name FROM team_members tm JOIN teams t ON t.id = tm.team_id WHERE tm.employee_id = ? AND t.active = 1 ORDER BY t.name", args: [employee.id] },
           { sql: "SELECT start_date, end_date, portion, start_time, end_time, status FROM leave_requests WHERE employee_id = ? AND start_date <= ? AND end_date >= ?", args: [employee.id, to, from] },
         ],
         "read",

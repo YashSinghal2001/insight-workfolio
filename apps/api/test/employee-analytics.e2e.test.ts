@@ -78,6 +78,9 @@ before(async () => {
   nyc = await employee("NYC-1", "America/New_York");
   const alpha = await api("/teams", { method: "POST", cookie: admin, body: { name: "Alpha", headUserId: head.userId } });
   assert.equal((await api(`/teams/${alpha.body.id}/members`, { method: "PUT", cookie: admin, body: { employeeIds: [member.id, head.id] } })).status, 200);
+  // member also belongs to a team `head` does not head: its name must not reach the head.
+  const beta = await api("/teams", { method: "POST", cookie: admin, body: { name: "Beta", headUserId: null } });
+  assert.equal((await api(`/teams/${beta.body.id}/members`, { method: "PUT", cookie: admin, body: { employeeIds: [member.id] } })).status, 200);
 
   // member: one closed 1 h shift 3 h ago, one correction request, one leave request today.
   const start = Date.now() - 3 * 3_600_000;
@@ -100,7 +103,7 @@ test("admin: default range (last 14 days), KPIs, log, corrections, leave, activi
   const r = await api(`/employees/${member.id}/analytics`, { cookie: admin });
   assert.equal(r.status, 200, r.text);
   assert.equal(r.body.employee.id, member.id);
-  assert.deepEqual(r.body.teams, ["Alpha"]);
+  assert.deepEqual(r.body.teams, ["Alpha", "Beta"]);
   assert.equal(r.body.days.length, 14);
   assert.equal(r.body.kpis.workedMinutes, 60);
   assert.equal(r.body.kpis.daysWorked, 1);
@@ -121,7 +124,9 @@ test("admin: default range (last 14 days), KPIs, log, corrections, leave, activi
 });
 
 test("team head: own member 200, out-of-team 404; own record served without an audit row", async () => {
-  assert.equal((await api(`/employees/${member.id}/analytics`, { bearer: head.bearer })).status, 200);
+  const mine = await api(`/employees/${member.id}/analytics`, { bearer: head.bearer });
+  assert.equal(mine.status, 200, mine.text);
+  assert.deepEqual(mine.body.teams, ["Alpha"], "a head sees only the teams they head");
   const before = (await audits(outsider)).length;
   assert.equal((await api(`/employees/${outsider.id}/analytics`, { bearer: head.bearer })).status, 404);
   assert.equal((await audits(outsider)).length, before, "refused reads are not audited");
