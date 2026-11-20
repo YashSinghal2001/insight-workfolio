@@ -9,8 +9,8 @@ export function safe(value: unknown): number {
 
 // ---- colour (CSS variables only; fallbacks render before the --chart-N tokens exist) --------------------
 
-/** Validated categorical order (dataviz reference palette, light steps); slot order is the CVD safety. */
-const CHART_FALLBACKS = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#6250d6", "#e34948"];
+/** Copy of the light --chart-1…8 values in globals.css (keep in sync); slot order is the CVD safety. */
+const CHART_FALLBACKS = ["#2a78d6", "#eb6834", "#128b7a", "#b57d00", "#d4508a", "#008300", "#6250d6", "#e34948"];
 export const MAX_CATEGORIES = CHART_FALLBACKS.length;
 /** Neutral for "Other" and for anything past the 8th slot: hues are never cycled. */
 export const OTHER_COLOR = "var(--muted)";

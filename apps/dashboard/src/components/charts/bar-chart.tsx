@@ -50,9 +50,11 @@ export function BarChart({ label, series, data, format = formatCompact, height =
   const y = linearScale([0, ticks.at(-1)!], [M.top + plotH, M.top]);
   const band = (W - M.left - M.right) / rows.length;
   const gap = 2;
-  const barW = Math.min(24, (band * 0.8 - gap * (series.length - 1)) / series.length);
+  const barW = Math.max(1, Math.min(24, (band * 0.8 - gap * (series.length - 1)) / series.length));
   const groupW = barW * series.length + gap * (series.length - 1);
-  const maxChars = Math.max(3, Math.floor(band / 7));
+  // Labels need ≥ ~28 units (3 chars + "…"); with narrower bands show every k-th one (full text stays in the table).
+  const labelEvery = Math.max(1, Math.ceil(28 / band));
+  const labelChars = Math.max(3, Math.floor((band * labelEvery) / 7));
 
   let top = { v: -1, s: "", c: "" };
   for (const r of rows) r.values.forEach((v, i) => v > top.v && (top = { v, s: series[i].label, c: r.label }));
@@ -69,7 +71,7 @@ export function BarChart({ label, series, data, format = formatCompact, height =
         ))}
         {rows.map((r, ci) => {
           const x0 = M.left + ci * band + (band - groupW) / 2;
-          const short = truncate(r.label, maxChars);
+          const short = truncate(r.label, labelChars);
           return (
             <g key={`${r.label}-${ci}`}>
               {r.values.map((v, si) =>
@@ -79,10 +81,10 @@ export function BarChart({ label, series, data, format = formatCompact, height =
                   </path>
                 ) : null,
               )}
-              <text x={M.left + ci * band + band / 2} y={height - 8} textAnchor="middle" fontSize={11} fill="var(--muted)">
+              {ci % labelEvery === 0 && <text x={M.left + ci * band + band / 2} y={height - 8} textAnchor="middle" fontSize={11} fill="var(--muted)">
                 {short !== r.label && <title>{r.label}</title>}
                 {short}
-              </text>
+              </text>}
             </g>
           );
         })}
