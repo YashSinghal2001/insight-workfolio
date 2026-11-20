@@ -161,9 +161,11 @@ try {
     document.querySelector('form').requestSubmit();
   })()`);
   await waitFor(`location.pathname !== "/login"`, "sign-in");
-  const nav = `[...document.querySelectorAll('nav a')].find((a) => a.textContent === 'Scheduled reports')`;
-  await waitFor(`!!${nav}`, "Scheduled reports link");
-  await js(`${nav}.click()`);
+  const link = (text) => `[...document.querySelectorAll('nav a')].find((a) => a.textContent === ${JSON.stringify(text)})`;
+  await waitFor(`!!${link("Reports")}`, "Reports link");
+  await js(`${link("Reports")}.click()`);
+  await waitFor(`location.pathname === '/reports' && !!document.querySelector('nav[aria-label=Reports]')`, "reports sub-menu");
+  await js(`document.querySelector('nav[aria-label=Reports]').querySelector('a[href="/reports/scheduled"]').click()`);
   await waitFor(`location.pathname === '/reports/scheduled' && document.body.innerText.includes('No scheduled reports yet.')`, "empty scheduled reports page");
   const page = await js(`document.body.innerText`);
   check("dashboard: mock provider clearly labelled (nothing is emailed); empty state", /Mock provider \(development only\).*Nothing is emailed/s.test(page) && /The scheduler is off/.test(page));
@@ -176,9 +178,9 @@ try {
   check("dashboard: an all-employee report offers administrators only (not the employee)", options.some((o) => o.startsWith("admin2@example.com")) && !options.some((o) => o.includes("report1@example.com")), JSON.stringify(options));
   await addRecipient("Daily attendance", "admin2@example.com");
 
-  // The page has no preview; the API's preview (same generator) is checked instead.
-  const scheduleId = (await api("/reports/schedules", { cookie: adminCookie })).body.find((s) => s.name === "Daily attendance").id;
-  const preview = (await api(`/reports/schedules/${scheduleId}/preview`, { cookie: adminCookie })).body.text;
+  await js(`${button(row("Daily attendance"), "Preview Daily attendance")}.click()`);
+  await waitFor(`!!${editor("Preview Daily attendance")}?.querySelector('pre')`, "preview");
+  const preview = await js(`${editor("Preview Daily attendance")}.querySelector('pre').textContent`);
   check("dashboard: preview shows yesterday's attendance (4h 00m) and freshness warnings, without sending", preview.includes(`for ${yesterday}`) && /Ana Employee \(RE-1\): 1 shift\(s\), worked 4h 00m/.test(preview) && preview.includes("WARNINGS") && mock.outbox.length === 0, preview.split("\n").slice(0, 6).join(" | "));
   check("dashboard: no leave reason, screenshots, activity or e-mail addresses in the report", !preview.includes("PRIVATE-LEAVE-REASON") && !preview.includes("@example.com") && /contains no screenshots, application activity, leave details or website data/.test(preview));
 
