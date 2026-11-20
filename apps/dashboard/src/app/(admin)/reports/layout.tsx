@@ -4,6 +4,12 @@ import { SubNav } from "@/components/sub-nav";
 
 const REPORTS_NAV = [
   { label: "Activity overview", href: "/reports" },
+  { label: "Daily attendance", href: "/reports/daily-attendance" },
+  { label: "Monthly attendance", href: "/reports/monthly-attendance" },
+  { label: "Monthly in/out", href: "/reports/monthly-in-out" },
+  { label: "Late clock-ins", href: "/reports/late" },
+  { label: "Overtime", href: "/reports/overtime" },
+  { label: "Summary", href: "/reports/summary" },
   { label: "Scheduled reports", href: "/reports/scheduled" },
 ];
 
