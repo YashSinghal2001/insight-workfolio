@@ -28,7 +28,7 @@ export default function HolidaysPage() {
     <div className="mx-auto flex max-w-4xl flex-col gap-6">
       <PageHeader
         title="Holidays"
-        description={
+        about={
           <>
             Office and public holidays for the whole organisation. A holiday date is read in each employee&apos;s own time zone. It is shown as Holiday
             (never Absent) in the <Link href="/attendance?view=daily" className="underline">daily attendance</Link> view, and leave on a holiday uses no

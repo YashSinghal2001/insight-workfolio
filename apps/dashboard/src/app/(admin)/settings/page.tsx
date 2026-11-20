@@ -59,7 +59,7 @@ export default function SettingsPage() {
     <div className="mx-auto flex max-w-5xl flex-col gap-6">
       <PageHeader
         title="Settings"
-        description="Activity monitoring settings apply to every desktop within about a minute. Every change is kept with who made it and why. These are configurable defaults pending HR/Legal review, not a statement of legal compliance."
+        about="Activity monitoring settings apply to every desktop within about a minute. Every change is kept with who made it and why. These are configurable defaults pending HR/Legal review, not a statement of legal compliance."
       />
       <nav aria-label="More settings" className="flex flex-wrap gap-x-4 gap-y-1 text-sm">
         <Link href="/settings/schedule" className="text-brand underline">Work schedule (late and absent)</Link>

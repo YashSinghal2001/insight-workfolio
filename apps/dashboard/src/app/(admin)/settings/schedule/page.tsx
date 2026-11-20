@@ -26,7 +26,7 @@ export default function WorkSchedulePage() {
       <PageHeader
         title="Work schedule"
         breadcrumbs={[{ label: "Settings", href: "/settings" }, { label: "Work schedule" }]}
-        description={
+        about={
           <>
             One schedule for the whole organisation, used only to mark employees late or absent in the{" "}
             <Link href="/attendance?view=daily" className="underline">daily attendance view</Link>. It never changes recorded attendance or timesheets.

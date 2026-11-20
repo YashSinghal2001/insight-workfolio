@@ -268,12 +268,13 @@ const ADMIN_ROUTES = ["/", "/employees", "/employees/new", `/employees/${ana.id}
 const MY_ROUTES = ["/my", "/my/attendance", "/my/activity", "/my/websites", "/my/screenshots", "/my/projects", "/my/tasks", "/my/leave", "/my/reports", "/my/profile"];
 const RESPONSIVE_ADMIN = ["/", "/attendance?view=daily", "/timesheets", "/screenshots", "/settings/schedule", "/settings/labels", "/audit", `/employees/${ana.id}`];
 const RESPONSIVE_MY = ["/my", "/my/attendance", "/my/leave", "/my/reports", "/my/profile"];
-const WIDTHS = [1440, 1280, 768, 390, 360];
+const WIDTHS = [1440, 1024, 768, 375, 360];
 const responsive = {};
 
 async function responsiveRoutes(routes, navId) {
   for (const w of WIDTHS) {
     await cdp("Emulation.setDeviceMetricsOverride", { width: w, height: 900, deviceScaleFactor: 1, mobile: w < 768 });
+    // Sidebar from 1024 px (lg); below it the Menu button opens a drawer.
     for (const path of routes) {
       const key = path.replace(ana.id, "[id]");
       let cell;
@@ -288,7 +289,7 @@ async function responsiveRoutes(routes, navId) {
           const culprits = await js(`[...document.querySelectorAll('body *')].filter((e) => { if (e.getBoundingClientRect().right <= ${w} + 1) return false; if (/absolute|fixed/.test(getComputedStyle(e).position)) return true; for (let a = e.parentElement; a && a !== document.body; a = a.parentElement) if (getComputedStyle(a).overflowX !== 'visible') return false; return true; }).filter((e, _, all) => !all.includes(e.parentElement)).slice(0, 3).map((e) => e.tagName.toLowerCase() + '.' + String(e.className).split(' ').slice(0, 4).join('.') + ' "' + e.textContent.trim().slice(0, 30) + '"').join(' ; ')`);
           issues.push(`scroll ${r.sw}>${r.iw} [${culprits}]`);
         }
-        if (w >= 768) {
+        if (w >= 1024) {
           if (!(await js(`(() => { const n = document.getElementById(${JSON.stringify(navId)}); const b = n?.getBoundingClientRect(); return !!n && getComputedStyle(n).display !== 'none' && b.width > 0 && b.left >= 0; })()`))) issues.push("sidebar hidden");
           if (await js(`(() => { const b = document.querySelector('button[aria-controls=${JSON.stringify(navId)}]'); return !!b && getComputedStyle(b).display !== 'none'; })()`)) issues.push("menu button shown");
         } else {
@@ -481,6 +482,22 @@ try {
   await signIn("ceo@example.com");
   await waitFor(`location.pathname === '/' && !!document.querySelector('nav[aria-label="Main"]')`, "super overview");
 
+  // Theme: light by default; the explicit Dark choice applies at once, survives a reload (pre-paint), and Light restores it.
+  const themeOf = () => js(`({ theme: document.documentElement.dataset.theme, bg: getComputedStyle(document.body).backgroundColor, pressed: document.querySelector('[data-testid="theme-toggle"]')?.getAttribute('aria-pressed') })`);
+  await js(`localStorage.removeItem('iw-theme')`);
+  await go("/");
+  const light = await themeOf();
+  await click(`document.querySelector('[data-testid="theme-toggle"]')`);
+  const dark = await themeOf();
+  await go("/attendance");
+  const reloaded = await themeOf();
+  await click(`document.querySelector('[data-testid="theme-toggle"]')`);
+  const back = await themeOf();
+  check("theme: light by default; Dark toggles, persists across reload, Light restores",
+    light.theme === "light" && light.pressed === "false" && dark.theme === "dark" && dark.pressed === "true" && dark.bg !== light.bg &&
+    reloaded.theme === "dark" && reloaded.pressed === "true" && back.theme === "light" && back.bg === light.bg && (await js(`localStorage.getItem('iw-theme')`)) === "light",
+    JSON.stringify({ light, dark, reloaded, back }));
+
   // Work schedule saved from the page: 11:00 + 15, every day. Applies from the next local day only.
   await go("/settings/schedule");
   const sf = `document.querySelector('main form')`;
@@ -614,7 +631,7 @@ try {
   await waitFor(`location.pathname === '/' && !!document.querySelector('nav[aria-label="Main"]')`, "super again");
   await responsiveRoutes(RESPONSIVE_ADMIN, "admin-nav");
   const bad = Object.entries(responsive).flatMap(([r, ws]) => Object.entries(ws).filter(([, v]) => v !== "ok").map(([w, v]) => `${r}@${w}: ${v}`));
-  check(`responsive: ${RESPONSIVE_ADMIN.length + RESPONSIVE_MY.length} routes × ${WIDTHS.join("/")} — no horizontal page scroll; sidebar visible ≥768; Menu opens a drawer with reachable links at 390/360`, bad.length === 0, bad.join(" || "));
+  check(`responsive: ${RESPONSIVE_ADMIN.length + RESPONSIVE_MY.length} routes × ${WIDTHS.join("/")} — no horizontal page scroll; sidebar visible ≥1024; Menu opens a drawer with reachable links at 768/375/360`, bad.length === 0, bad.join(" || "));
 } catch (err) {
   check("run aborted", false, String(err?.stack ?? err?.message ?? err).split("\n").slice(0, 3).join(" "));
   await shot("failure.png").catch(() => undefined);

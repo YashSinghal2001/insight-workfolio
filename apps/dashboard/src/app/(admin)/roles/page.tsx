@@ -66,7 +66,7 @@ export default function RolesPage() {
     <div className="mx-auto flex max-w-5xl flex-col gap-6">
       <PageHeader
         title="Roles"
-        description="Only a Super Admin can view or change roles. An Admin (IT) has the same monitoring access but cannot manage roles, delete screenshots or timelapses, run retention purges or connect storage. Nobody can change their own role, and the last active administrator or Super Admin cannot be removed. Every change needs a reason and is kept below."
+        about="Only a Super Admin can view or change roles. An Admin (IT) has the same monitoring access but cannot manage roles, delete screenshots or timelapses, run retention purges or connect storage. Nobody can change their own role, and the last active administrator or Super Admin cannot be removed. Every change needs a reason and is kept below."
       />
       {error && <ErrorState message={error} onRetry={() => (setError(null), void load())} />}
       <SuccessNotice message={message} onDismiss={() => setMessage(null)} />

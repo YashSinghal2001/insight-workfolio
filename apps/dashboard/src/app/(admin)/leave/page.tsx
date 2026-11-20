@@ -145,7 +145,7 @@ export default function LeavePage() {
     <div className="mx-auto flex max-w-4xl flex-col gap-6">
       <PageHeader
         title="Leave"
-        description="Employees request leave from the desktop app or the web panel (My leave). Approving or rejecting records your decision only: attendance and timesheets are not changed, and approved leave shows in the daily attendance view. You cannot decide your own requests."
+        about="Employees request leave from the desktop app or the web panel (My leave). Approving or rejecting records your decision only: attendance and timesheets are not changed, and approved leave shows in the daily attendance view. You cannot decide your own requests."
       />
       <Notice tone="info">Approval is refused when it would exceed the employee&apos;s balance for the leave type (yearly days, or monthly hours for short leave). Requests from the desktop app use the General type.</Notice>
 

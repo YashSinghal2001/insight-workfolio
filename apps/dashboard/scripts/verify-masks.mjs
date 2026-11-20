@@ -226,6 +226,8 @@ try {
   const cards = `[...document.querySelectorAll('section[aria-label="Screenshot gallery"] li')]`;
   await waitFor(`${cards}.length === 2 && ${cards}.every((li) => li.querySelector('img')?.complete && li.querySelector('img').naturalWidth > 0)`, "gallery thumbnails");
   check("gallery cards show '2 masked area(s)'", await js(`${cards}.every((li) => li.innerText.includes('2 masked area(s)'))`));
+  // The explanation sits in the page's "About this page" disclosure (closed by default): open it first.
+  await js("document.querySelectorAll('main details').forEach((d) => (d.open = true))");
   check("gallery explains that only configured masks are blacked out", (await js("document.body.innerText")).includes("Only the privacy masks set in Settings are blacked out"));
   await js(`${cards}[0].querySelector('button').click()`);
   await waitFor(`document.querySelector('dialog[open] img')?.complete && document.querySelector('dialog[open] img').naturalWidth === 1920`, "viewer image");
