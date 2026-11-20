@@ -1,5 +1,6 @@
 import "reflect-metadata";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { after, before, test } from "node:test";
 import type { INestApplication } from "@nestjs/common";
 import { NestFactory } from "@nestjs/core";
@@ -31,6 +32,31 @@ test("GET /api/v1/health reports the process is up", async () => {
   const body = await res.json();
   assert.equal(body.status, "ok");
   assert.equal(typeof body.uptimeSeconds, "number");
+});
+
+test("GET /api/v1/health reports the API version and the deployed commit, only when it is a plain hex id", async () => {
+  const { version } = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+  const health = async (commit: string | undefined) => {
+    if (commit === undefined) delete process.env.WORKFOLIO_BUILD_COMMIT;
+    else process.env.WORKFOLIO_BUILD_COMMIT = commit;
+    const res = await fetch(`${base}/api/v1/health`);
+    assert.equal(res.status, 200);
+    return res.json();
+  };
+  try {
+    const plain = await health(undefined);
+    assert.deepEqual(Object.keys(plain).sort(), ["commit", "status", "timestamp", "uptimeSeconds", "version"]);
+    assert.equal(plain.version, version);
+    assert.equal(plain.commit, null, "not set");
+    assert.equal((await health("3a315bb")).commit, "3a315bb", "short sha (7)");
+    const full = "0123456789abcdef0123456789abcdef01234567";
+    assert.equal((await health(full)).commit, full, "full sha (40)");
+    for (const bad of ["", "3a315b", "3A315BB", `${full}8`, "3a315bb\n", "3a315bb; rm -rf /", "<script>", "g123456"]) {
+      assert.equal((await health(bad)).commit, null, JSON.stringify(bad));
+    }
+  } finally {
+    delete process.env.WORKFOLIO_BUILD_COMMIT;
+  }
 });
 
 test("GET /api/v1/ready is ready when the database answers", async () => {

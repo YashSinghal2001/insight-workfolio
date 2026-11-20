@@ -24,6 +24,10 @@ export interface HealthResponse {
   status: "ok";
   uptimeSeconds: number;
   timestamp: string;
+  /** The API package version (apps/api/package.json). */
+  version: string;
+  /** The deployed git commit (WORKFOLIO_BUILD_COMMIT, written by deploy.sh), or null when unknown. */
+  commit: string | null;
 }
 
 export type DependencyStatus = "up" | "down";
