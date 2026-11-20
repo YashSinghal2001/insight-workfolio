@@ -222,3 +222,15 @@ Target < 1 s for 100 employees. Every page that filters by date/team renders `<G
 The admin page owner adds its nav entry (`sidebar.tsx`, one line) and smoke route.
 Browser checks for new pages: add to a new `apps/dashboard/scripts/verify-parity.mjs` section **only** via the lead
 (agents describe the checks in their report); agents may run the existing suites only if the lead grants a port slot.
+
+## 12. Wave 3 (productivity parity, employee panel) [contract]
+
+| ID | Feature | Owns |
+|---|---|---|
+| W3-TIMELINE | Timeline Gantt page, screenshot idle marker, bulk screenshot export (Super Admin, logged), timelapse check | new `app/(admin)/timeline/**`, `app/(admin)/screenshots/**`, `components/timelapse-panel.tsx`, `apps/api/src/screenshots/**` (additive), new shared `timeline.ts` if needed |
+| W3-APPS | App-usage analytics (summary donut, per-app history, usage per employee), risk users (computed) | `app/(admin)/activity/**`, new `app/(admin)/risk-users/**`, `apps/api/src/activity/**` (additive), `apps/api/src/alerts/**` (read-only reuse), new shared `risk-users.ts` |
+| W3-EMPLOYEE | Employee + team-head panel: missing clock-out banner, monthly calendar, team views on new team-scoped endpoints, "Online" label audit, test loader `next/link` support | `app/my/**`, `components/my-*.tsx`, `apps/dashboard/test/register-tsx.mjs` |
+
+Privacy (roadmap Phase 6): no window titles, keystrokes or screenshot contents beyond what existing admin views already show;
+risk users are derived from existing alerts + scheduled-hours shortfall (no new collection, no schema change). Bulk export:
+`screenshots:delete`-level identity (Super Admin only), every exported screenshot access-logged, size-capped.
