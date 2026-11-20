@@ -128,7 +128,7 @@ function Activity() {
         actions={policy && (
           <span className="text-sm" data-testid="idle-threshold">
             Idle threshold in force: <strong className="tabular-nums">{policy.idleThresholdSeconds} s</strong>
-            <span className="text-muted"> ({policy.enabled ? `sampled every ${policy.sampleSeconds} s` : "activity monitoring is off"}; <Link href="/settings" className="underline">Settings</Link>)</span>
+            <span className="text-muted"> ({policy.enabled ? `sampled every ${policy.sampleSeconds} s` : "activity monitoring is off"}; <Link href="/settings/monitoring" className="underline">Monitoring settings</Link>)</span>
           </span>
         )}
       />
