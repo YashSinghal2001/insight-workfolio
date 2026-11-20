@@ -23,18 +23,18 @@ export type Load<T> =
   | { state: "error"; message: string; status?: number }
   | { state: "ready"; data: T; at: number };
 
-/** GET a path (null = skip) with loading / error / ready states and a manual reload. */
-export function useApi<T>(path: string | null) {
+/** GET a path (null = skip) with loading / error / ready states and a manual reload. `get` (stable reference) replaces the plain GET. */
+export function useApi<T>(path: string | null, get: (path: string) => Promise<T> = api<T>) {
   const [load, setLoad] = useState<Load<T>>({ state: "loading" });
   const run = useCallback(async () => {
     if (!path) return;
     setLoad({ state: "loading" });
     try {
-      setLoad({ state: "ready", data: await api<T>(path), at: Date.now() });
+      setLoad({ state: "ready", data: await get(path), at: Date.now() });
     } catch (err) {
       setLoad({ state: "error", message: errorMessage(err), status: err instanceof ApiRequestError ? err.status : undefined });
     }
-  }, [path]);
+  }, [path, get]);
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect -- fetch on path change
     void run();

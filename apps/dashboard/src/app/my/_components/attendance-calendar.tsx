@@ -5,11 +5,14 @@ import { formatDuration, monthRange, todayIn, type ExpectedScheduleResponse, typ
 import { StatusBadge } from "@/components/kit";
 import { secondaryButtonClass } from "@/components/ui";
 import { useApi } from "@/components/my-ui";
-import { CALENDAR_CODE, calendarMonth, shiftMonth, type CalendarDay } from "../_lib/attendance";
+import { api } from "@/lib/api";
+import { allPages, CALENDAR_CODE, calendarMonth, overlapping, shiftMonth, type CalendarDay } from "../_lib/attendance";
 import { Loaded } from "./states";
 
 const WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 const LEGEND = (["PRESENT", "LATE", "ABSENT", "ON_LEAVE", "NOT_SCHEDULED", "OPEN"] as const).map((s) => CALENDAR_CODE[s]);
+// The leave list has no date filter: read every page of own approved leave once, filter per month.
+const allLeave = (path: string) => allPages((page) => api<Paginated<LeaveRequest>>(`${path}&page=${page}`));
 const monthLabel = (m: string) => new Intl.DateTimeFormat("en-GB", { month: "long", year: "numeric", timeZone: "UTC" }).format(new Date(`${m}-01T00:00:00Z`));
 
 /** One month of the employee's own attendance (own timesheet, expected window and approved leave only). */
@@ -19,8 +22,7 @@ export function AttendanceCalendar({ tz }: { tz: string }) {
   const { from, to } = monthRange(month);
   const sheet = useApi<TimesheetResponse>(`/attendance/timesheet?from=${from}&to=${to}`);
   const expected = useApi<ExpectedScheduleResponse>(`/attendance/expected?from=${from}&to=${to}`);
-  // ponytail: first 100 approved requests; page by date if someone has more.
-  const leave = useApi<Paginated<LeaveRequest>>("/leave?mine=true&status=APPROVED&pageSize=100");
+  const leave = useApi<LeaveRequest[]>("/leave?mine=true&status=APPROVED&pageSize=100", allLeave);
   const fetchedAt = sheet.load.state === "ready" ? sheet.load.at : 0;
 
   return (
@@ -35,7 +37,7 @@ export function AttendanceCalendar({ tz }: { tz: string }) {
           <Loaded load={expected.load} reload={expected.reload} label="your work schedule">
             {(e) => (
               <Loaded load={leave.load} reload={leave.reload} label="your approved leave">
-                {(l) => <CalendarGrid month={month} weeks={calendarMonth({ month, timeZone: tz, timesheet: t, expected: e, leave: l.items, now: fetchedAt })} />}
+                {(l) => <CalendarGrid month={month} weeks={calendarMonth({ month, timeZone: tz, timesheet: t, expected: e, leave: overlapping(l, from, to), now: fetchedAt })} />}
               </Loaded>
             )}
           </Loaded>

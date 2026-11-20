@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { AttendanceCurrent, AttendanceSession, TimesheetDay } from "@workfolio/shared";
-import { calendarMonth, lateRange, pickTeam, shiftMonth, stillClockedInSince } from "./attendance";
+import { allPages, calendarMonth, lateRange, overlapping, pickTeam, shiftMonth, stillClockedInSince } from "./attendance";
 
 const session = (clockInAt: string, clockOutAt: string | null = null, openBreak?: string) =>
   ({ id: "s1", clockInAt, clockOutAt, status: clockOutAt ? "CLOSED" : "OPEN", breaks: openBreak ? [{ id: "b1", startedAt: openBreak, endedAt: null }] : [] }) as unknown as AttendanceSession;
@@ -90,4 +90,20 @@ test("shiftMonth crosses years; team helpers", () => {
   assert.equal(pickTeam(teams, null), "a");
   assert.equal(pickTeam([], "a"), null);
   assert.deepEqual(lateRange("2026-03-02"), { from: "2026-02-24", to: "2026-03-02" });
+});
+
+test("leave: every page is read until total; overlap with the month is inclusive", async () => {
+  const all = Array.from({ length: 205 }, (_, i) => i);
+  const asked: number[] = [];
+  const got = await allPages(async (page) => (asked.push(page), { items: all.slice((page - 1) * 100, page * 100), total: all.length, page, pageSize: 100 }));
+  assert.deepEqual(asked, [1, 2, 3]);
+  assert.equal(got.length, 205);
+  assert.deepEqual(await allPages(async (page) => ({ items: [], total: 0, page, pageSize: 100 })), []);
+  // A shrinking list (total says more, page is empty) stops instead of looping.
+  assert.deepEqual(await allPages(async (page) => ({ items: page === 1 ? ["a"] : [], total: 5, page, pageSize: 1 })), ["a"]);
+  const l = (startDate: string, endDate: string) => ({ startDate, endDate });
+  assert.deepEqual(
+    overlapping([l("2026-10-25", "2026-11-01"), l("2026-11-30", "2026-12-02"), l("2026-10-01", "2026-10-31"), l("2026-12-01", "2026-12-01"), l("2026-10-01", "2026-12-31")], "2026-11-01", "2026-11-30"),
+    [l("2026-10-25", "2026-11-01"), l("2026-11-30", "2026-12-02"), l("2026-10-01", "2026-12-31")],
+  );
 });

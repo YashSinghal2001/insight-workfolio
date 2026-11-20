@@ -16,8 +16,8 @@ labels appear only when an administrator has labelled applications (labels apply
 
 | Page | Route | Endpoints (GET unless noted) |
 | --- | --- | --- |
-| Dashboard | `/my` | `activity/me` (live status, idle threshold, sampling interval), `attendance/current` (+ forgotten clock-out notice), `attendance/timesheet` (today), `activity/summary` (today), `websites/me/usage` (today), `screenshots/me` (+ `screenshots?pageSize=4` and thumbnails when self-view is on), `task-time/assignments`, `task-time/current`, `leave?status=PENDING` |
-| Attendance | `/my/attendance` | `attendance/current`, `attendance/timesheet`, `attendance/history`, `attendance/corrections?mine=true`, `POST attendance/corrections`. History and corrections are paged (100 per page). `missingClockOut` shows a forgotten clock-out notice linking to the correction form |
+| Dashboard | `/my` | `activity/me` (live status, idle threshold, sampling interval), `attendance/current` (+ missing clock-out banner), `attendance/timesheet` (today), `activity/summary` (today), `websites/me/usage` (today), `screenshots/me` (+ `screenshots?pageSize=4` and thumbnails when self-view is on), `task-time/assignments`, `task-time/current`, `leave?status=PENDING` |
+| Attendance | `/my/attendance` | `attendance/current`, `attendance/timesheet`, `attendance/history`, `attendance/corrections?mine=true`, `POST attendance/corrections`, monthly calendar: `attendance/timesheet` + `attendance/expected` for the month and every page of `leave?mine=true&status=APPROVED`. History and corrections are paged (100 per page) |
 | Activity | `/my/activity` | `activity/me` (live status), `attendance/timeline` (day timeline), `activity/summary`, `activity/timeline`, `websites/me/usage` (one day at a time) |
 | Websites | `/my/websites` | `websites/me`, `websites/me/usage` (≤ 31 days, profile time zone), `POST websites/consent`, `POST websites/links`, `DELETE websites/links/:id` |
 | Screenshots | `/my/screenshots` | `screenshots/me`, `screenshots`, `screenshots/:id`, `screenshots/:id/content` (blob URLs, revoked; every view logged by the API). The state badge from `screenshots/me` `state` is always shown; self-view off hides only the gallery |
@@ -26,6 +26,21 @@ labels appear only when an administrator has labelled applications (labels apply
 | Leave | `/my/leave` | `leave`, `POST leave`, `POST leave/:id/cancel` |
 | Reports | `/my/reports` | `attendance/timesheet`, `activity/summary` (≤ 31 days), `attendance/export?format=csv|xlsx` (own draft timesheet) |
 | Profile | `/my/profile` | `employees/:id` and `employees/:id/devices` (own id from the session), `activity/me`, `screenshots/me`, `websites/me` (each notice's title and points as served by the API, with its own acknowledged state) |
+
+## Missing clock-out banner and monthly calendar (W3)
+
+- **Banner** (`/my`, `/my/attendance`): "You are still clocked in since <local date/time>" when the open shift (an
+  open break included) was clocked in on an earlier local date in the employee's zone (shared `missingClockOut`)
+  or has been open longer than `ANOMALY_THRESHOLDS.maxShiftMinutes` (14 h of real time, so DST does not matter).
+  Same rule as the desktop banner (`staleClockInSince`); evaluated at the response's `serverTime`. Flag only: it
+  never closes the shift. "Request a correction" opens the correction form pre-filled as Missing clock-out for
+  that shift (from `/my` via `/my/attendance?correct=missing-clock-out`).
+- **Monthly calendar** (`/my/attendance`): one table per month (Monday first), each day with a status code, label
+  and the net worked time of completed shifts that started that day. Status uses the shared
+  `dailyAttendanceStatus` with the employee's expected window that day; an open shift shows OPEN. Only the
+  employee's own endpoints are read (no admin endpoints). Limitation: holidays are admin-only data, so a day without
+  an expected window while a schedule exists shows "Day off or holiday" (OFF); without any schedule days show
+  "No schedule". Leave of any portion marks the day On leave.
 
 ## Status, timeline and screenshot state
 

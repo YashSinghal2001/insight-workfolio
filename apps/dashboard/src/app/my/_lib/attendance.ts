@@ -13,6 +13,7 @@ import {
   type ExpectedScheduleResponse,
   type LeaveRequest,
   type MonthlyAttendanceDay,
+  type Paginated,
   type TimesheetResponse,
 } from "@workfolio/shared";
 import { DAY_CODE } from "@/lib/attendance-ui";
@@ -85,6 +86,20 @@ export function calendarMonth(input: {
   while (cells.length % 7) cells.push(null);
   return Array.from({ length: cells.length / 7 }, (_, i) => cells.slice(i * 7, i * 7 + 7));
 }
+
+/** Every item of a paged list: pages 1…n until `total` is reached (or a page comes back empty). */
+export async function allPages<T>(getPage: (page: number) => Promise<Paginated<T>>): Promise<T[]> {
+  const items: T[] = [];
+  for (let page = 1; ; page++) {
+    const p = await getPage(page);
+    items.push(...p.items);
+    if (!p.items.length || items.length >= p.total) return items;
+  }
+}
+
+/** Leave requests overlapping [from, to] (inclusive local dates). */
+export const overlapping = <L extends Pick<LeaveRequest, "startDate" | "endDate">>(leave: L[], from: string, to: string) =>
+  leave.filter((l) => l.startDate <= to && l.endDate >= from);
 
 /** The team a head's sections filter on: the chosen one if still theirs, else the first; null without teams. */
 export const pickTeam = (teams: { id: string }[], chosen: string | null): string | null =>
