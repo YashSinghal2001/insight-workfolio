@@ -66,6 +66,7 @@ import { OneDriveController, OneDriveService } from "./storage/onedrive.js";
 import { EmailService } from "./notifications/email.service.js";
 import { NotificationsController } from "./notifications/notifications.controller.js";
 import { NotificationsService } from "./notifications/notifications.service.js";
+import { NotificationRulesService } from "./notifications/notification-rules.service.js";
 
 @Module({
   imports: [
@@ -137,6 +138,7 @@ import { NotificationsService } from "./notifications/notifications.service.js";
     invitationTransportProvider,
     EmailService,
     NotificationsService,
+    NotificationRulesService,
     ReportsService,
     WebsitesService,
     RolesService,

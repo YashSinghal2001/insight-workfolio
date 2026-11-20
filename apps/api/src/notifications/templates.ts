@@ -47,6 +47,12 @@ const COPY: Record<NotificationType, { staff: string; employee?: { subject: stri
   },
   ONBOARDING_SUMMARY: { staff: "Employee onboarding over the past week." },
   PERIODIC_REPORT: { staff: "A periodic report is ready in the dashboard." },
+  ATTENDANCE_CLOCK_IN: { staff: "clocked in." },
+  ATTENDANCE_CLOCK_OUT: { staff: "clocked out." },
+  LATE_ARRIVAL: { staff: "clocked in after the expected start." },
+  ABSENCE: { staff: "has not clocked in on a scheduled workday (absent)." },
+  MISSING_CLOCK_OUT: { staff: "has not clocked out." },
+  PRODUCTIVITY_ALERT: { staff: "raised a productivity alert." },
 };
 
 const escapeHtml = (s: string) => s.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
@@ -113,3 +119,40 @@ export function renderNotification({ event, role, to, dashboardUrl, sender }: Re
   });
   return { to, subject, ...body };
 }
+
+/** One attendance event as an email shows it: nothing beyond name, employee code, local time and event type. */
+export interface AttendanceItem {
+  fullName: string;
+  employeeCode: string;
+  /** "YYYY-MM-DD HH:mm <zone>" in the employee's own zone. */
+  localTime: string;
+}
+
+/**
+ * Attendance rule emails (docs/notifications.md §9). `items` has one entry (IMMEDIATE) or the day's list (digest).
+ * Never screenshots, app or window names, leave reasons, alert details or another team's data.
+ */
+export function renderAttendance(p: { type: NotificationType; digestDate: string | null; items: AttendanceItem[]; to: string; dashboardUrl: string; sender: string }): MailMessage {
+  const label = NOTIFICATION_ROUTES[p.type].label;
+  const severity = NOTIFICATION_ROUTES[p.type].severity;
+  const link = { href: new URL("/attendance", p.dashboardUrl).href, label: "Open in the admin dashboard" };
+  if (p.digestDate === null) {
+    const e = p.items[0]!;
+    const subject = `${label}: ${e.fullName} (${e.employeeCode})`.replace(/[\r\n]+/g, " ").slice(0, 200);
+    const body = layout({ heading: label, severity, paragraphs: [`${e.fullName} ${COPY[p.type].staff}`], facts: [["Employee", e.fullName], ["Employee code", e.employeeCode], ["Local time", e.localTime], ["Event", label]], link, sender: p.sender });
+    return { to: p.to, subject, ...body };
+  }
+  const shown = p.items.slice(0, DIGEST_MAX_ITEMS);
+  const more = p.items.length - shown.length;
+  const body = layout({
+    heading: `${label}: daily digest for ${p.digestDate}`,
+    severity,
+    paragraphs: [`${p.items.length} event(s) of type "${label}" on ${p.digestDate}.`, ...(more > 0 ? [`The first ${shown.length} are listed; ${more} more are in the dashboard.`] : [])],
+    facts: shown.map((e) => [`${e.fullName} (${e.employeeCode})`, e.localTime] as [string, string]),
+    link,
+    sender: p.sender,
+  });
+  return { to: p.to, subject: `${label}: daily digest for ${p.digestDate} (${p.items.length})`, ...body };
+}
+/** ponytail: fixed digest length; a bigger organisation reads the rest in the dashboard. */
+export const DIGEST_MAX_ITEMS = 200;

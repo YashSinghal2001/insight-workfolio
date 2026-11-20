@@ -8,7 +8,7 @@ const PENDING_AFTER_0016 = [
   "0017_work_schedule_and_app_categories", "0019_screenshot_blur_policy", "0021_leave_types", "0022_holidays", "0023_session_device",
   "0024_teams", "0025_person_overrides", "0026_alert_rules", "0027_team_labels_self_view", "0028_auto_timelapse",
   "0029_device_live_state", "0030_account_invitations", "0031_multi_device_single_session", "0032_desktop_updates",
-  "0033_notifications",
+  "0033_notifications", "0034_notification_rules",
 ];
 
 /** A database migrated by a build that ended at 0016 (staging today). MIGRATIONS is restored afterwards. */
@@ -156,7 +156,7 @@ test("0016 with data -> migrate applies exactly the 15, re-run none; defaults, i
   await assert.rejects(q("UPDATE screenshots SET blurred = 1"), /screenshot_immutable/);
 
   await healthy(db);
-  assert.deepEqual(await counts(db), { table: 58, index: 71, trigger: 93 }); // 0032: +4 tables, +1 index, +2 triggers; 0033: +2 tables, +3 indexes
+  assert.deepEqual(await counts(db), { table: 60, index: 74, trigger: 96 }); // 0032: +4 tables, +1 index, +2 triggers; 0033: +2 tables, +3 indexes; 0034: +2 tables, +3 indexes, +3 triggers
   db.close();
 });
 

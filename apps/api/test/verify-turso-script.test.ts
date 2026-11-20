@@ -63,9 +63,9 @@ test("fully migrated: every check passes, nothing pending", async () => {
 });
 
 test("pending only after the latest applied: passes and reports them", async () => {
-  const { code, out } = await verify(await dbFile(["0033_notifications"]));
+  const { code, out } = await verify(await dbFile(["0034_notification_rules"]));
   assert.equal(code, 0, out);
-  assert.match(out, /pending 1 \(0033_notifications … 0033_notifications\), latest 0032_desktop_updates/);
+  assert.match(out, /pending 1 \(0034_notification_rules … 0034_notification_rules\), latest 0033_notifications/);
   assert.doesNotMatch(out, /FAIL|WARN/);
 });
 

@@ -40,6 +40,7 @@ import { employeeReadAudit } from "../audit/account-audit.js";
 import { ScreenshotSettingsService } from "../screenshots/screenshot-settings.service.js";
 import { ScreenshotsService } from "../screenshots/screenshots.service.js";
 import { MonitoringSettingsService } from "../settings/monitoring-settings.service.js";
+import { NotificationRulesService } from "../notifications/notification-rules.service.js";
 import { ACTIVE_EMPLOYEE, activityReport, DEVICE_LIVE_COLUMNS, iso, scopedEmployees, screenshotReport, SESSION_COLUMNS, stateOf, str, withBreaks } from "./sessions.js";
 
 /** Device timestamps may lead the send time by this much (sub-second clock jitter, rounding). */
@@ -78,6 +79,7 @@ export class AttendanceService {
     private readonly screenshotSettings: ScreenshotSettingsService,
     private readonly monitoring: MonitoringSettingsService,
     private readonly screenshots: ScreenshotsService,
+    private readonly notificationRules: NotificationRulesService,
   ) {}
 
   /** Online action from a direct endpoint: server time is authoritative. */
@@ -393,6 +395,7 @@ export class AttendanceService {
    * in either order: a break persisted first makes register/upload reject them; one persisted after them removes them.
    */
   private async endWorkTime(employeeId: string, applied: [AttendanceEventType, SyncResult][]): Promise<void> {
+    await this.notificationRules.attendanceApplied(employeeId, applied); // committed clock-ins/outs → notification rules (never throws)
     const ends = applied.flatMap(([type, r]) => (r.status === "ACCEPTED" && r.occurredAt && (type === "BREAK_START" || type === "CLOCK_OUT") ? [Date.parse(r.occurredAt)] : []));
     if (ends.length) await this.screenshots.discardOutsideWork(employeeId, Math.min(...ends));
   }

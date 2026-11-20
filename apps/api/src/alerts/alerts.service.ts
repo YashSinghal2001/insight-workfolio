@@ -20,6 +20,7 @@ import type { AuthContext } from "../auth/auth.service.js";
 import { iso, str } from "../attendance/sessions.js";
 import type { Env } from "../config/env.js";
 import { DATABASE } from "../database/database.module.js";
+import { NotificationRulesService } from "../notifications/notification-rules.service.js";
 import { ScheduleService } from "../schedule/schedule.service.js";
 
 /** Evaluator period. ponytail: fixed; move to env (like REPORT_SCHEDULER_SECONDS) if it ever needs tuning. */
@@ -65,6 +66,7 @@ export class AlertsService implements OnModuleInit, OnModuleDestroy {
     @Inject(DATABASE) private readonly db: DatabaseClient,
     private readonly schedule: ScheduleService,
     private readonly config: ConfigService<Env, true>,
+    private readonly notificationRules: NotificationRulesService,
   ) {}
 
   onModuleInit() {
@@ -208,17 +210,14 @@ export class AlertsService implements OnModuleInit, OnModuleDestroy {
     const created = found.filter((_, i) => results[i]!.rowsAffected);
     if (created.length) {
       this.logger.log({ created: created.length }, "Alerts created");
-      this.sendAlertEmails(created);
+      await this.sendAlertEmails(created, now);
     }
     return created.length;
   }
 
-  /**
-   * Email hook for new alerts. BLOCKED on API-09 (no email provider): nothing is sent. When a provider
-   * exists, inject MAIL_TRANSPORT (reports/mail.ts) and send to active admins here.
-   */
-  private sendAlertEmails(alerts: NewAlert[]): void {
-    void alerts;
+  /** Email hook for new alerts: one PRODUCTIVITY_ALERT notification event per alert, routed by notification rules (never throws). */
+  private sendAlertEmails(alerts: NewAlert[], now: number): Promise<void> {
+    return this.notificationRules.alertsCreated(alerts, now);
   }
 
   /** Previous local day: idle share of tracked time (activity intervals started that day). */
