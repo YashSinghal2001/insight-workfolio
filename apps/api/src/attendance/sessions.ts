@@ -1,6 +1,8 @@
 // Session reads shared by attendance, timesheet and correction services.
 import type { DatabaseClient, Row } from "@workfolio/database";
-import type { AttendanceBreak, AttendanceSession, AttendanceState, DeviceActivityReport, DeviceActivityState, DeviceScreenshotState, SessionSource } from "@workfolio/shared";
+import type { AttendanceBreak, AttendanceSession, AttendanceState, DeviceActivityReport, DeviceActivityState, DeviceScreenshotState, EmployeeRef, SessionSource } from "@workfolio/shared";
+import type { AuthContext } from "../auth/auth.service.js";
+import { scopeSql, teamFilterSql } from "../common/scope.js";
 
 /** Columns for `FROM attendance_sessions s`. Source = how the current clock-in time was recorded. */
 export const SESSION_COLUMNS = `s.id, s.employee_id, s.clock_in_at, s.clock_out_at, s.status,
@@ -95,3 +97,37 @@ export const activityReport = (r?: Row): DeviceActivityReport | null =>
 /** The device's last screenshot report, for screenshotFeatureState. */
 export const screenshotReport = (r?: Row): { state: DeviceScreenshotState; reportedAt: string } | null =>
   r?.screenshot_state && r.screenshot_state_at ? { state: r.screenshot_state as DeviceScreenshotState, reportedAt: String(r.screenshot_state_at) } : null;
+
+/**
+ * Employees in the caller's attendance:read-all scope, optionally one team's active members (teamFilterSql;
+ * call assertTeamReadable first), searched and ordered like EmployeesService.list. `activeOnly` = active
+ * account and employment (as /attendance/daily). Without `page` every match is returned.
+ */
+export async function scopedEmployees(
+  db: DatabaseClient,
+  caller: AuthContext | undefined,
+  f: { q?: string; teamId?: string; activeOnly?: boolean; createdBefore?: string; page?: number; pageSize?: number },
+): Promise<{ items: (EmployeeRef & { createdAt: string })[]; total: number }> {
+  const like = f.q ? `%${f.q.replace(/[\\%_]/g, (c) => `\\${c}`)}%` : null;
+  const scope = caller ? scopeSql(caller, "attendance:read-all", "p.id") : { sql: "", args: [] };
+  const team = teamFilterSql(f.teamId, "p.id");
+  const where = `FROM employee_profiles p JOIN users u ON u.id = p.user_id
+    WHERE (? IS NULL OR p.full_name LIKE ? ESCAPE '\\' OR u.email LIKE ? ESCAPE '\\' OR p.employee_code LIKE ? ESCAPE '\\')
+      ${f.activeOnly ? "AND p.employment_status = 'ACTIVE' AND u.status = 'ACTIVE'" : ""} AND (? IS NULL OR p.created_at < ?)${scope.sql}${team.sql}`;
+  const args = [like, like, like, like, f.createdBefore ?? null, f.createdBefore ?? null, ...scope.args, ...team.args];
+  const paged = f.page !== undefined && f.pageSize !== undefined;
+  const [rows, count] = await db.batch(
+    [
+      {
+        sql: `SELECT p.id, p.full_name, p.employee_code, p.timezone, p.created_at ${where} ORDER BY p.full_name COLLATE NOCASE, p.id${paged ? " LIMIT ? OFFSET ?" : ""}`,
+        args: paged ? [...args, f.pageSize!, (f.page! - 1) * f.pageSize!] : args,
+      },
+      { sql: `SELECT count(*) AS n ${where}`, args },
+    ],
+    "read",
+  );
+  return {
+    items: rows!.rows.map((r) => ({ id: String(r.id), fullName: String(r.full_name), employeeCode: String(r.employee_code), timezone: String(r.timezone), createdAt: String(r.created_at) })),
+    total: Number(count!.rows[0]!.n),
+  };
+}

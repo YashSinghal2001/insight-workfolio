@@ -22,11 +22,12 @@ Branch `agent/w1-att-data`. Contracts: `docs/IMPLEMENTATION-CONTRACTS.md` §4–
 | `packages/shared/src/attendance-reports.ts` (new) | contract types; query schemas (`teamFilterSchema`, monthly, monthly export, late); pure `attendanceDays()` (per-day status + minutes, built on `buildTimesheet` + `dailyAttendanceStatus`), `monthlyTotals`, export rows/codes, filename |
 | `packages/shared/src/attendance-reports.test.ts` (new) | unit tests of the pure aggregation |
 | `packages/shared/src/attendance.ts` | `teamId` on the summary query; `DEVICE_ONLINE_WINDOW_MS`, `deviceOnline()`, `OverviewFreshness` |
-| `packages/shared/src/schedule.ts` | `teamId` on the daily query; `scheduleInForce()` (moved from schedule.service so monthly reuses it) |
+| `packages/shared/src/schedule.ts` | `teamId` on the daily query |
+| `packages/shared/src/timesheet.ts` | Intl formatters cached per zone; `localTime()` (monthly timing went 18.7 s → 0.27 s) |
 | `packages/shared/src/index.ts` | one export line |
 | `apps/api/src/attendance/monthly.service.ts` (new) | monthly, export, late: bulk queries only |
 | `apps/api/src/attendance/{attendance.service,attendance.controller,timesheet.service,timesheet-xlsx,sessions}.ts` | team filter, routes, freshness, xlsx writer, `scopedEmployees()` page helper |
-| `apps/api/src/schedule/schedule.service.ts` | team filter on daily; uses shared `scheduleInForce` |
+| `apps/api/src/schedule/schedule.service.ts` | team filter on daily; `effectiveAt` exported for monthly |
 | `apps/api/src/app.module.ts` | one provider line (`MonthlyService`) |
 | `apps/api/test/attendance-{monthly,late,team-filter}.e2e.test.ts` (new) | API tests |
 

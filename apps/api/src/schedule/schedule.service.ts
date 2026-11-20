@@ -22,7 +22,7 @@ import {
 } from "@workfolio/shared";
 import type { AuthContext } from "../auth/auth.service.js";
 import { str } from "../attendance/sessions.js";
-import { scopeSql } from "../common/scope.js";
+import { assertTeamReadable, scopeSql, teamFilterSql } from "../common/scope.js";
 import { DATABASE } from "../database/database.module.js";
 
 const COLUMNS = "p.seq, p.enabled, p.expected_start, p.grace_minutes, p.workdays, p.reason, p.effective_at, u.id AS user_id, u.email";
@@ -37,7 +37,7 @@ const toPolicy = (r: Row): WorkSchedulePolicy => ({
   effectiveAt: String(r.effective_at),
 });
 /** The organisation policy row in force at `dayStart` with the employee's override in force then (W17); null = no policy yet. */
-function effectiveAt(policies: Row[], overrides: Row[], dayStart: string) {
+export function effectiveAt(policies: Row[], overrides: Row[], dayStart: string) {
   const p = policies.filter((x) => String(x.effective_at) <= dayStart).at(-1);
   const o = overrides.filter((x) => String(x.effective_at) <= dayStart).at(-1);
   const org = p ? { enabled: Number(p.enabled) === 1, expectedStart: String(p.expected_start), graceMinutes: Number(p.grace_minutes), workdays: String(p.workdays) } : null;
@@ -79,14 +79,16 @@ export class ScheduleService {
     const like = q.q ? `%${q.q.replace(/[\\%_]/g, (c) => `\\${c}`)}%` : null;
     // W41: a team head sees only their teams' members; no caller (the alert evaluator) = whole organisation.
     const scope = caller ? scopeSql(caller, "attendance:read-all", "p.id") : { sql: "", args: [] };
+    if (caller) await assertTeamReadable(this.db, caller, "attendance:read-all", q.teamId);
+    const team = teamFilterSql(q.teamId, "p.id"); // bound as ?3 (after the scope's ?2, or alone as ?2)
     const [people, policies, sessions, leave, holiday, anyHoliday, overrides] = await this.db.batch(
       [
         {
           sql: `SELECT p.id, p.full_name, p.employee_code, p.timezone, p.created_at FROM employee_profiles p JOIN users u ON u.id = p.user_id
                 WHERE p.employment_status = 'ACTIVE' AND u.status = 'ACTIVE'
-                  AND (?1 IS NULL OR p.full_name LIKE ?1 ESCAPE '\\' OR u.email LIKE ?1 ESCAPE '\\' OR p.employee_code LIKE ?1 ESCAPE '\\')${scope.sql.replace("?", "?2")}
+                  AND (?1 IS NULL OR p.full_name LIKE ?1 ESCAPE '\\' OR u.email LIKE ?1 ESCAPE '\\' OR p.employee_code LIKE ?1 ESCAPE '\\')${scope.sql.replace("?", "?2")}${team.sql.replace("?", scope.args.length ? "?3" : "?2")}
                 ORDER BY p.full_name COLLATE NOCASE, p.id`,
-          args: [like, ...scope.args],
+          args: [like, ...scope.args, ...team.args],
         },
         "SELECT enabled, expected_start, grace_minutes, workdays, effective_at FROM work_schedule_policies ORDER BY effective_at, seq",
         // Widened to cover every UTC offset (-12 … +14); each employee's local day is applied below.

@@ -21,10 +21,9 @@ import {
 } from "@workfolio/shared";
 import type { AuthContext } from "../auth/auth.service.js";
 import { POLICY } from "../common/policy.js";
-import { scopeSql } from "../common/scope.js";
+import { assertTeamReadable, scopeSql, teamFilterSql } from "../common/scope.js";
 import { DATABASE } from "../database/database.module.js";
-import { EmployeesService } from "../employees/employees.service.js";
-import { ACTIVE_EMPLOYEE, SESSION_COLUMNS, withBreaks } from "./sessions.js";
+import { ACTIVE_EMPLOYEE, scopedEmployees, SESSION_COLUMNS, withBreaks } from "./sessions.js";
 import { orgTimesheetXlsx, timesheetXlsx } from "./timesheet-xlsx.js";
 
 /** Read-only timesheets computed on request from sessions (corrections included once approved). */
@@ -33,7 +32,6 @@ export class TimesheetService {
   constructor(
     @Inject(DATABASE) private readonly db: DatabaseClient,
     @Inject(POLICY) private readonly policy: AttendancePolicy,
-    private readonly employees: EmployeesService,
   ) {}
 
   async forEmployee(employee: EmployeeRef, from: string, to: string): Promise<TimesheetResponse> {
@@ -95,10 +93,12 @@ export class TimesheetService {
     from: string,
     to: string,
     format: ExportFormat,
-    opts: { q?: string; includeInactive: boolean; caller?: AuthContext },
+    opts: { q?: string; includeInactive: boolean; caller?: AuthContext; teamId?: string },
   ): Promise<{ body: string | Buffer; rows: number }> {
     // Team heads: only their teams' members (W41). The scope's one `?` is bound as ?3.
+    if (opts.caller) await assertTeamReadable(this.db, opts.caller, "attendance:read-all", opts.teamId);
     const scope = opts.caller ? scopeSql(opts.caller, "attendance:read-all", "p.id") : { sql: "", args: [] };
+    const team = teamFilterSql(opts.teamId, "p.id"); // bound as ?4 (after the scope's ?3, or alone)
     const like = opts.q ? `%${opts.q.replace(/[\\%_]/g, (c) => `\\${c}`)}%` : null;
     // A day of slack on each side covers every UTC offset; rows are then kept by each employee's local date.
     const window = [`${addDays(from, -1)}T00:00:00.000Z`, `${addDays(to, 2)}T00:00:00.000Z`];
@@ -107,9 +107,9 @@ export class TimesheetService {
         {
           sql: `SELECT p.id, p.full_name, p.employee_code, p.timezone FROM employee_profiles p JOIN users u ON u.id = p.user_id
                 WHERE (?1 = 1 OR (${ACTIVE_EMPLOYEE}))
-                  AND (?2 IS NULL OR p.full_name LIKE ?2 ESCAPE '\\' OR u.email LIKE ?2 ESCAPE '\\' OR p.employee_code LIKE ?2 ESCAPE '\\')${scope.sql.replace("?", "?3")}
+                  AND (?2 IS NULL OR p.full_name LIKE ?2 ESCAPE '\\' OR u.email LIKE ?2 ESCAPE '\\' OR p.employee_code LIKE ?2 ESCAPE '\\')${scope.sql.replace("?", "?3")}${team.sql.replace("?", scope.args.length ? "?4" : "?3")}
                 ORDER BY p.employee_code, p.id`,
-          args: [opts.includeInactive ? 1 : 0, like, ...scope.args],
+          args: [opts.includeInactive ? 1 : 0, like, ...scope.args, ...team.args],
         },
         { sql: `SELECT ${SESSION_COLUMNS} FROM attendance_sessions s WHERE s.clock_in_at >= ? AND s.clock_in_at < ?`, args: window },
         {
@@ -145,8 +145,9 @@ export class TimesheetService {
   }
 
   /** Admin listing: totals per employee for the range (each in the employee's own time zone). Team heads: their teams. */
-  async summary(query: ListEmployeesQuery & { from: string; to: string }, caller?: AuthContext): Promise<Paginated<TimesheetSummaryRow>> {
-    const page = await this.employees.list(query, caller, "attendance:read-all");
+  async summary(query: ListEmployeesQuery & { from: string; to: string; teamId?: string }, caller?: AuthContext): Promise<Paginated<TimesheetSummaryRow>> {
+    if (caller) await assertTeamReadable(this.db, caller, "attendance:read-all", query.teamId);
+    const page = { ...(await scopedEmployees(this.db, caller, query)), page: query.page, pageSize: query.pageSize };
     const ids = page.items.map((e) => e.id);
     if (!ids.length) return { ...page, items: [] };
     const marks = ids.map(() => "?").join(", ");

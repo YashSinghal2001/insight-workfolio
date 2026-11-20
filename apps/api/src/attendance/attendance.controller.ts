@@ -1,6 +1,11 @@
 import { Body, Controller, Get, Headers, HttpCode, Post, Query, Res, StreamableFile } from "@nestjs/common";
 import {
   attendanceSummaryQuerySchema,
+  lateArrivalsQuerySchema,
+  monthlyAttendanceFilename,
+  monthlyAttendanceQuerySchema,
+  monthlyExportQuerySchema,
+  teamFilterSchema,
   attendanceTimelineQuerySchema,
   DEVICE_HEADER,
   IDEMPOTENCY_HEADER,
@@ -15,6 +20,9 @@ import {
   timesheetFilename,
   type AttendanceEventType,
   type AttendanceTimelineQuery,
+  type LateArrivalsQuery,
+  type MonthlyAttendanceQuery,
+  type MonthlyExportQuery,
   type ListEmployeesQuery,
   type SyncRequest,
 } from "@workfolio/shared";
@@ -26,17 +34,20 @@ import { ZodPipe } from "../common/zod.pipe.js";
 import { DevicesService } from "../devices/devices.service.js";
 import { EmployeesService } from "../employees/employees.service.js";
 import { AttendanceService } from "./attendance.service.js";
+import { MonthlyService } from "./monthly.service.js";
 import { TimesheetService } from "./timesheet.service.js";
 
 const timesheetQuerySchema = dateRangeSchema.and(employeeFilterSchema);
 /** `format` defaults to csv, so existing CSV callers are unchanged. */
 const exportQuerySchema = timesheetQuerySchema.and(z.object({ format: z.enum(EXPORT_FORMATS).default("csv") }));
-const timesheetsQuerySchema = dateRangeSchema.and(listEmployeesQuerySchema);
+const timesheetsQuerySchema = dateRangeSchema.and(listEmployeesQuerySchema).and(teamFilterSchema);
+const overviewQuerySchema = listEmployeesQuerySchema.and(teamFilterSchema);
 const orgExportQuerySchema = dateRangeSchema.and(
   z.object({
     format: z.enum(EXPORT_FORMATS).default("csv"),
     q: z.string().trim().max(100).optional(),
     includeInactive: z.enum(["true", "false"]).default("false").transform((v) => v === "true"),
+    teamId: z.uuid().optional(),
   }),
 );
 
@@ -53,6 +64,7 @@ export class AttendanceController {
     private readonly devices: DevicesService,
     private readonly employees: EmployeesService,
     private readonly timesheets: TimesheetService,
+    private readonly monthlyReports: MonthlyService,
   ) {}
 
   @Post("clock-in")
@@ -167,7 +179,7 @@ export class AttendanceController {
     @Res({ passthrough: true }) res: Response,
     @CurrentUser() user: AuthContext,
   ) {
-    const { body, rows } = await this.timesheets.exportAll(q.from, q.to, q.format, { q: q.q || undefined, includeInactive: q.includeInactive, caller: user });
+    const { body, rows } = await this.timesheets.exportAll(q.from, q.to, q.format, { q: q.q || undefined, includeInactive: q.includeInactive, caller: user, teamId: q.teamId });
     res.setHeader("content-type", EXPORT_CONTENT_TYPES[q.format]);
     res.setHeader("x-export-rows", String(rows));
     res.setHeader("content-disposition", `attachment; filename="${orgTimesheetFilename(q.from, q.to, q.format)}"`);
@@ -180,14 +192,47 @@ export class AttendanceController {
   @RequirePermission("attendance:read-all")
   @TeamScoped()
   summary(@Query(new ZodPipe(attendanceSummaryQuerySchema)) q: z.infer<typeof attendanceSummaryQuerySchema>, @CurrentUser() user: AuthContext) {
-    return this.attendance.summary(q.date, Date.now(), user);
+    return this.attendance.summary(q.date, Date.now(), user, q.teamId);
   }
 
   @Get("overview")
   @RequirePermission("attendance:read-all")
   @TeamScoped()
-  overview(@Query(new ZodPipe(listEmployeesQuerySchema)) q: ListEmployeesQuery, @CurrentUser() user: AuthContext) {
+  overview(@Query(new ZodPipe(overviewQuerySchema)) q: ListEmployeesQuery & { teamId?: string }, @CurrentUser() user: AuthContext) {
     return this.attendance.overview(q, user);
+  }
+
+  /** Every local day of a month per employee (status as /daily, minutes as /timesheet), paginated by employee. */
+  @Get("monthly")
+  @RequirePermission("attendance:read-all")
+  @TeamScoped()
+  monthly(@Query(new ZodPipe(monthlyAttendanceQuerySchema)) q: MonthlyAttendanceQuery, @CurrentUser() user: AuthContext) {
+    return this.monthlyReports.monthly(q, user);
+  }
+
+  /** The month as a file: one row per employee, one column per day, totals. Built in memory, not stored. */
+  @Get("monthly/export")
+  @RequirePermission("attendance:read-all")
+  @TeamScoped()
+  async monthlyExport(
+    @Query(new ZodPipe(monthlyExportQuerySchema)) q: MonthlyExportQuery,
+    @Res({ passthrough: true }) res: Response,
+    @CurrentUser() user: AuthContext,
+  ) {
+    const { body, rows } = await this.monthlyReports.export(q, user);
+    res.setHeader("content-type", EXPORT_CONTENT_TYPES[q.format]);
+    res.setHeader("x-export-rows", String(rows));
+    res.setHeader("content-disposition", `attachment; filename="${monthlyAttendanceFilename(q.month, q.format)}"`);
+    res.setHeader("cache-control", "no-store, private, max-age=0");
+    return q.format === "xlsx" ? new StreamableFile(body as Buffer) : body;
+  }
+
+  /** Late clock-ins in [from, to] (≤ 92 days), newest first. */
+  @Get("late")
+  @RequirePermission("attendance:read-all")
+  @TeamScoped()
+  late(@Query(new ZodPipe(lateArrivalsQuerySchema)) q: LateArrivalsQuery, @CurrentUser() user: AuthContext) {
+    return this.monthlyReports.late(q, user);
   }
 
   private async act(user: AuthContext, installationId: string | undefined, key: string | undefined, type: AttendanceEventType) {

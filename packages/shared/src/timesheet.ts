@@ -20,16 +20,32 @@ export const DEFAULT_POLICY: AttendancePolicy = { weekStartsOn: 1, scheduledDail
 
 const DAY_MS = 86_400_000;
 
+// Building an Intl.DateTimeFormat costs far more than formatting with one; monthly reports format thousands of
+// instants, so formatters are kept per (kind, zone). ponytail: unbounded, but keyed by the few IANA zones in use.
+const formatters = new Map<string, Intl.DateTimeFormat>();
+function formatter(kind: "date" | "parts" | "time", timeZone: string): Intl.DateTimeFormat {
+  const key = `${kind}|${timeZone}`;
+  let f = formatters.get(key);
+  if (!f) {
+    f =
+      kind === "date"
+        ? new Intl.DateTimeFormat("en-CA", { timeZone, year: "numeric", month: "2-digit", day: "2-digit" })
+        : kind === "time"
+          ? new Intl.DateTimeFormat("en-GB", { timeZone, hourCycle: "h23", hour: "2-digit", minute: "2-digit" })
+          : new Intl.DateTimeFormat("en-US", { timeZone, hourCycle: "h23", year: "numeric", month: "numeric", day: "numeric", hour: "numeric", minute: "numeric", second: "numeric" });
+    formatters.set(key, f);
+  }
+  return f;
+}
+
 /** Local calendar date (YYYY-MM-DD) of a UTC instant in `timeZone`. */
 export function localDate(instant: string | number, timeZone: string): string {
-  return new Intl.DateTimeFormat("en-CA", { timeZone, year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date(instant));
+  return formatter("date", timeZone).format(new Date(instant));
 }
 
 function offsetMs(utcMs: number, timeZone: string): number {
   const parts = Object.fromEntries(
-    new Intl.DateTimeFormat("en-US", {
-      timeZone, hourCycle: "h23", year: "numeric", month: "numeric", day: "numeric", hour: "numeric", minute: "numeric", second: "numeric",
-    })
+    formatter("parts", timeZone)
       .formatToParts(utcMs)
       .map((p) => [p.type, Number(p.value)]),
   );
@@ -49,10 +65,12 @@ export function zonedToUtc(local: string, timeZone: string): string {
   return new Date(t).toISOString();
 }
 
+/** Wall-clock "HH:MM" (24 h) of a UTC instant in `timeZone`. */
+export const localTime = (instant: string | number, timeZone: string): string => formatter("time", timeZone).format(new Date(instant));
+
 /** UTC instant to wall-clock "YYYY-MM-DDTHH:mm" in `timeZone` (the inverse of zonedToUtc). */
 export function toZonedLocal(instant: string | number, timeZone: string): string {
-  const time = new Intl.DateTimeFormat("en-GB", { timeZone, hourCycle: "h23", hour: "2-digit", minute: "2-digit" }).format(new Date(instant));
-  return `${localDate(instant, timeZone)}T${time}`;
+  return `${localDate(instant, timeZone)}T${localTime(instant, timeZone)}`;
 }
 
 /** UTC instant to ISO 8601 local time with its offset in `timeZone`, e.g. "2026-10-28T09:00:00+05:30". */
