@@ -144,7 +144,6 @@ const fay = await employee("PA-6", "Fay Noapp", { device: false });
 const gus = await employee("PA-7", "Gus Done");
 const hana = await employee("PA-8", "Hana Head");
 const ivy = await employee("PA-9", "Ivy Notify");
-const ALL = [ana, ben, cara, dev, eli, fay, gus, hana, ivy];
 const alpha = ok(await api("/teams", { method: "POST", cookie: superCookie, body: { name: "Alpha", headUserId: hana.userId } }), "team alpha");
 const beta = ok(await api("/teams", { method: "POST", cookie: superCookie, body: { name: "Beta", headUserId: hana.userId } }), "team beta");
 ok(await api(`/teams/${alpha.id}/members`, { method: "PUT", cookie: superCookie, body: { employeeIds: [ana.id, ben.id, dev.id, eli.id] } }), "alpha members");
@@ -255,8 +254,8 @@ check("desktop: clock-in without a registered device header is refused (4xx)", n
 
 // Activity and screenshots for Ana today: one screenshot inside an IDLE interval (idle marker).
 ok(await activity(ana, [["Code Editor", 0.45, 0.35], [null, 0.35, 0.25], ["Mail", 0.25, 0.15]]), "ana activity");
+// The second capture (ago 0.3) falls inside the IDLE interval above.
 const anaShots = [await upload(ana, ago(0.4), 1), await upload(ana, ago(0.3), 2), await upload(ana, ago(0.2), 3)];
-const idleShot = anaShots[1];
 
 const dash = spawn("pnpm", ["exec", "next", "start", "--port", String(APP_PORT)], { cwd: `${ROOT}/apps/dashboard`, stdio: "ignore" });
 for (let i = 0; i < 150 && !(await fetch(`${APP}/login`).then((r) => r.ok, () => false)); i++) await sleep(200);
@@ -324,7 +323,7 @@ const tablesScrollInside = () => js(`[...document.querySelectorAll('main table')
   if (t.getBoundingClientRect().width <= innerWidth) return true;
   for (let a = t.parentElement; a && a !== document.body; a = a.parentElement) if (/auto|scroll/.test(getComputedStyle(a).overflowX) && a.clientWidth < t.scrollWidth) return true;
   return false; })`);
-const noFailures = (what) => {
+const noFailures = () => {
   const f = [...apiFailures, ...consoleErrors.map((c) => `console: ${c.slice(0, 120)}`)];
   apiFailures.length = 0;
   consoleErrors.length = 0;
@@ -658,7 +657,6 @@ try {
   }
   const exportsAfter = Number((await one("SELECT count(*) AS n FROM screenshot_access_log WHERE screenshot_id IN (?, ?, ?)", anaShots)).n);
   check("screenshots: Super Admin selects all and exports a valid ZIP (unzip -t, 3 entries), each export access-logged", unzipOk && entries === 3 && exportsAfter - exportsBefore === 3, `${zip?.name} entries=${entries} log +${exportsAfter - exportsBefore}`);
-  void idleShot;
 
   // =========================== Activity + risk users ============================================
   const actIssues = [];
