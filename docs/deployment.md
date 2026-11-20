@@ -209,7 +209,10 @@ previous release (schema stays; restore a backup for a data rollback). Three rel
 - Deploy record on the VPS: `deploy.sh` appends one line per activation to `/opt/workfolio/deploys.log`:
   `2026-11-20T10:00:00Z deploy <sha> ref=origin/main migrate=1 by=workfolio` (rollback:
   `… rollback <sha> ref=<release dir> migrate=0 …`). Copy that line into `docs/releases/` with the migrations applied
-  (`deploy.sh` prints them) and tag `prod-YYYY-MM-DD[-n]` at `<sha>`.
+  (`deploy.sh` prints them) and tag `prod-YYYY-MM-DD[-n]` at `<sha>`. Format: one table row per deploy in
+  [`docs/releases/DEPLOY-RECORD-TEMPLATE.md`](releases/DEPLOY-RECORD-TEMPLATE.md) (date, commit, tag, migrations,
+  operator, smoke result). Checklist, migration dry run on a copy, smoke tests and rollback for the product-parity
+  release: [`docs/status/PRODUCTION-READINESS.md`](status/PRODUCTION-READINESS.md).
 
 ### What is monitored and how alerts reach people
 
