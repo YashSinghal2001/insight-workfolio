@@ -1,5 +1,5 @@
 import { Controller, Get, Query, Res, StreamableFile } from "@nestjs/common";
-import { EXPORT_CONTENT_TYPES, summaryReportFilename, summaryReportQuerySchema, type SummaryReportQuery } from "@workfolio/shared";
+import { dailyExportFilename, dailyExportQuerySchema, EXPORT_CONTENT_TYPES, summaryReportFilename, summaryReportQuerySchema, type DailyExportQuery, type SummaryReportQuery } from "@workfolio/shared";
 import type { Response } from "express";
 import { CurrentUser, RequirePermission, TeamScoped } from "../auth/auth.guard.js";
 import type { AuthContext } from "../auth/auth.service.js";
@@ -22,5 +22,18 @@ export class SummaryReportController {
     res.setHeader("content-disposition", `attachment; filename="${summaryReportFilename(q.from, q.to)}"`);
     res.setHeader("cache-control", "no-store, private, max-age=0");
     return new StreamableFile(body);
+  }
+
+  /** One tab (worked / late / leave / absent) of the daily attendance report for a local date, as CSV or XLSX. Not stored. */
+  @Get("daily/export")
+  @RequirePermission("attendance:read-all")
+  @TeamScoped()
+  async dailyExport(@Query(new ZodPipe(dailyExportQuerySchema)) q: DailyExportQuery, @Res({ passthrough: true }) res: Response, @CurrentUser() user: AuthContext) {
+    const { body, rows } = await this.reports.daily(q, user);
+    res.setHeader("content-type", EXPORT_CONTENT_TYPES[q.format]);
+    res.setHeader("x-export-rows", String(rows));
+    res.setHeader("content-disposition", `attachment; filename="${dailyExportFilename(q.date, q.tab, q.format)}"`);
+    res.setHeader("cache-control", "no-store, private, max-age=0");
+    return q.format === "xlsx" ? new StreamableFile(body as Buffer) : body;
   }
 }

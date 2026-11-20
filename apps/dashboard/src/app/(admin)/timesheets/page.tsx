@@ -112,7 +112,7 @@ export default function TimesheetsPage() {
                     <td className="tabular-nums">{formatDuration(totals.netMs)}</td>
                     <td className="tabular-nums">{formatDuration(totals.breakMs)}</td>
                     <td className="tabular-nums">
-                      {totals.overtimeMs ? <span className="text-amber-800 dark:text-amber-300">{formatDuration(totals.overtimeMs)}</span> : "—"}
+                      {totals.overtimeMs ? <span className="text-warning">{formatDuration(totals.overtimeMs)}</span> : "—"}
                     </td>
                     <td className="text-xs">
                       {missingClockOut && <><StatusBadge tone="danger">Missing clock-out</StatusBadge>{" "}</>}

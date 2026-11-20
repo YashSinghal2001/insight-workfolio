@@ -3,7 +3,8 @@
 // of the same completed shifts. Derived on request; nothing is stored.
 import { z } from "zod";
 import type { EmployeeRef, Paginated } from "./api.js";
-import type { Cell, ShiftActivity } from "./export.js";
+import { EXPORT_FORMATS, type Cell, type ExportFormat, type ShiftActivity } from "./export.js";
+import type { DailyAttendanceStatus } from "./schedule.js";
 import { buildTimesheet, dateRangeSchema, localDate, type AttendancePolicy, type TimesheetSessionInput } from "./timesheet.js";
 
 export const summaryReportQuerySchema = dateRangeSchema.and(
@@ -91,3 +92,47 @@ export function summaryReportCells(rows: SummaryReportRow[]): Cell[][] {
 }
 
 export const summaryReportFilename = (from: string, to: string) => `summary-report_${from}_${to}.xlsx`;
+
+// ---- Daily attendance report (tabs and export) -----------------------------------------------
+
+export const DAILY_REPORT_TABS = [
+  { id: "worked", label: "Worked" },
+  { id: "late", label: "Late" },
+  { id: "leave", label: "On leave" },
+  { id: "absent", label: "Absent" },
+] as const;
+export type DailyReportTab = (typeof DAILY_REPORT_TABS)[number]["id"];
+
+export interface DailyReportRow {
+  employee: EmployeeRef;
+  date: string;
+  status: DailyAttendanceStatus;
+  /** Local HH:MM; clock-out is the latest completed clock-out of shifts started that day. */
+  clockIn: string | null;
+  clockOut: string | null;
+  /** Completed shifts only, floored (the timesheet's value); null without a clock-in or while a shift is open. */
+  workedMinutes: number | null;
+  lateMinutes: number | null;
+}
+
+const IN_TAB: Record<DailyReportTab, (r: DailyReportRow) => boolean> = {
+  worked: (r) => r.clockIn !== null,
+  late: (r) => r.status === "LATE",
+  leave: (r) => r.status === "ON_LEAVE",
+  absent: (r) => r.status === "ABSENT",
+};
+export const dailyTabRows = (rows: DailyReportRow[], tab: DailyReportTab) => rows.filter(IN_TAB[tab]);
+
+export const dailyExportQuerySchema = z.object({
+  date: z.iso.date(),
+  teamId: z.uuid().optional(),
+  tab: z.enum(DAILY_REPORT_TABS.map((t) => t.id) as [DailyReportTab, ...DailyReportTab[]]),
+  format: z.enum(EXPORT_FORMATS).default("csv"),
+});
+export type DailyExportQuery = z.infer<typeof dailyExportQuerySchema>;
+
+export const DAILY_EXPORT_HEADER = ["Employee code", "Employee name", "Time zone", "Date", "Status", "Clock in", "Clock out", "Worked minutes", "Late minutes"];
+/** One row per employee; no internal ids, emails, leave reasons or monitoring data. */
+export const dailyExportCells = (rows: DailyReportRow[]): Cell[][] =>
+  rows.map((r) => [r.employee.employeeCode, r.employee.fullName, r.employee.timezone, r.date, r.status, r.clockIn, r.clockOut, r.workedMinutes, r.lateMinutes]);
+export const dailyExportFilename = (date: string, tab: DailyReportTab, format: ExportFormat) => `daily-attendance_${tab}_${date}.${format}`;

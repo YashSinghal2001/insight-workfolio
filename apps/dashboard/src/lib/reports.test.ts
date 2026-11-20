@@ -1,12 +1,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { DailyAttendanceRow, MonthlyAttendanceDay, MonthlyAttendanceRow } from "@workfolio/shared";
+import { dailyExportCells, dailyTabRows, type DailyAttendanceRow, type MonthlyAttendanceDay, type MonthlyAttendanceRow } from "@workfolio/shared";
 import {
-  dailyExportCells,
   dailyReportRows,
   dailyTabCounts,
-  dailyTabRows,
   fetchAllPages,
+  loadWeekGrid,
   hm,
   inOutCell,
   inOutCounts,
@@ -14,9 +13,7 @@ import {
   overtimeSummary,
   weekGrid,
   weekMonths,
-  xlsxBytes,
 } from "./reports.ts";
-import { parseSheet, readZip } from "./xlsx-holidays.ts";
 
 const emp = (id: string) => ({ id, fullName: `Person ${id}`, employeeCode: id.toUpperCase(), timezone: "Asia/Kolkata" });
 const day = (date: string, over: Partial<MonthlyAttendanceDay> = {}): MonthlyAttendanceDay => ({
@@ -82,12 +79,21 @@ test("week grid: a week across two months merges by employee; totals; red only f
   assert.deepEqual(weekGrid([[]], "2026-03-02"), []);
 });
 
-test("xlsx: valid zip, header + rows round-trip, formula text stays text, XML escaped, blanks", async () => {
-  const bytes = xlsxBytes("Daily attendance", [["Name", "Minutes"], ['=HYPERLINK("x")', 5], ["a<b & c", null], ["Z", 1.5]]);
-  const files = readZip(bytes);
-  assert.deepEqual([...files.keys()].sort(), ["[Content_Types].xml", "_rels/.rels", "xl/_rels/workbook.xml.rels", "xl/workbook.xml", "xl/worksheets/sheet1.xml"]);
-  const xml = new TextDecoder().decode(await files.get("xl/worksheets/sheet1.xml")!());
-  assert.doesNotMatch(xml, /<f>/);
-  const rows = parseSheet(xml, []);
-  assert.deepEqual(rows.map((r) => r.cells.map((c) => c?.value)), [["Name", "Minutes"], ['=HYPERLINK("x")', 5], ["a<b & c"], ["Z", 1.5]]);
+test("loadWeekGrid: all pages of both months, so an employee on different pages per month is one full row", async () => {
+  const at = (id: string, dates: string[]): MonthlyAttendanceRow => ({ employee: emp(id), totals, days: dates.map((d) => day(d, { status: "PRESENT", firstInLocal: "09:00", lastOutLocal: "17:00", workedMinutes: 480 })) });
+  // March: [a, x] on page 1; April: [a, b] on page 1, [x] on page 2 (a new employee b shifted the boundary).
+  const pages: Record<string, MonthlyAttendanceRow[][]> = {
+    "2026-03": [[at("a", ["2026-03-30", "2026-03-31"]), at("x", ["2026-03-30", "2026-03-31"])]],
+    "2026-04": [[at("a", ["2026-04-01"]), at("b", ["2026-04-01"])], [at("x", ["2026-04-01", "2026-04-02"])]],
+  };
+  const calls: string[] = [];
+  const grid = await loadWeekGrid((month, page) => {
+    calls.push(`${month}#${page}`);
+    return Promise.resolve({ month, items: pages[month]![page - 1] ?? [], total: pages[month]!.flat().length, page, pageSize: 2 });
+  }, "2026-03-30");
+  assert.deepEqual(calls.sort(), ["2026-03#1", "2026-04#1", "2026-04#2"]);
+  const x = grid.find((r) => r.employee.id === "x")!;
+  assert.deepEqual(x.cells.map((c) => c?.date ?? null), ["2026-03-30", "2026-03-31", "2026-04-01", "2026-04-02", null, null, null]);
+  assert.equal(x.totals.workMinutes, 4 * 480);
+  assert.equal(grid.length, 3);
 });

@@ -1,12 +1,12 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import type { DailyAttendanceResponse, MonthlyAttendanceResponse, MonthlyAttendanceRow } from "@workfolio/shared";
+import { DAILY_REPORT_TABS, dailyExportFilename, dailyTabRows, type DailyAttendanceResponse, type DailyReportTab, type MonthlyAttendanceResponse, type MonthlyAttendanceRow } from "@workfolio/shared";
 import { DataTable, EmptyState, ErrorState, PageHeader, SkeletonRows, StatusBadge, Tabs, type Tone } from "@/components/kit";
 import { GlobalFilters, useGlobalFilters } from "@/components/global-filters";
 import { api, errorMessage } from "@/lib/api";
-import { DAILY_EXPORT_HEADER, DAILY_TABS, dailyExportCells, dailyReportRows, dailyTabCounts, dailyTabRows, fetchAllPages, hm, type DailyTab } from "@/lib/reports";
-import { EmployeeCell, LocalExport, qs } from "../_parts";
+import { dailyReportRows, dailyTabCounts, fetchAllPages, hm } from "@/lib/reports";
+import { EmployeeCell, qs, ServerExport } from "../_parts";
 
 const TONE: Record<string, Tone> = { PRESENT: "success", LATE: "danger", ABSENT: "danger", ON_LEAVE: "info", HOLIDAY: "info" };
 const LABEL: Record<string, string> = { PRESENT: "Present", LATE: "Late", ABSENT: "Absent", ON_LEAVE: "On leave", HOLIDAY: "Holiday", NOT_SCHEDULED: "Not scheduled", NO_POLICY: "No schedule", NOT_YET_DUE: "Not yet due" };
@@ -15,7 +15,7 @@ type Load<T> = { key: string; data: T | null; error: string | null };
 
 export default function DailyAttendanceReport() {
   const { date, teamId } = useGlobalFilters();
-  const [tab, setTab] = useState<DailyTab>("worked");
+  const [tab, setTab] = useState<DailyReportTab>("worked");
   const [retry, setRetry] = useState(0);
   const key = `${date}|${teamId}|${retry}`;
   const [daily, setDaily] = useState<Load<DailyAttendanceResponse["items"]>>({ key: "", data: null, error: null });
@@ -47,10 +47,18 @@ export default function DailyAttendanceReport() {
       <PageHeader
         title="Daily attendance"
         description={`Who worked, came in late, was on leave or absent on ${date}.`}
-        actions={<LocalExport name={`daily-attendance_${tab}_${date}`} header={DAILY_EXPORT_HEADER} rows={dailyExportCells(shown)} />}
+        actions={
+          <ServerExport
+            files={(["csv", "xlsx"] as const).map((format) => ({
+              label: `Export ${format.toUpperCase()}`,
+              path: `/attendance/daily/export?${qs({ date, tab, format }, teamId)}`,
+              filename: dailyExportFilename(date, tab, format),
+            }))}
+          />
+        }
         about="Each employee's own local date and time zone, by the work schedule in force that day (as on the Attendance page). Clock-out and worked time count completed shifts only; an open shift shows no worked time."
       />
-      <Tabs label="Daily attendance" idPrefix="daily" value={tab} onChange={setTab} tabs={DAILY_TABS.map((t) => ({ id: t.id, label: counts ? `${t.label} (${counts[t.id]})` : t.label }))}>
+      <Tabs label="Daily attendance" idPrefix="daily" value={tab} onChange={setTab} tabs={DAILY_REPORT_TABS.map((t) => ({ id: t.id, label: counts ? `${t.label} (${counts[t.id]})` : t.label }))}>
         {d?.error ? (
           <ErrorState message={d.error} onRetry={() => setRetry((n) => n + 1)} />
         ) : !rows ? (
