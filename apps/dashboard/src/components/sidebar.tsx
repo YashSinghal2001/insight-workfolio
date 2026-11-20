@@ -27,6 +27,7 @@ export const ADMIN_NAV: readonly NavSection[] = [
       { label: "Activity", href: "/activity" },
       { label: "Screenshots", href: "/screenshots" },
       { label: "Websites", href: "/websites" },
+      { label: "Risk users", href: "/risk-users" },
     ],
   },
   { title: "Work", items: [{ label: "Projects", href: "/projects" }] },
