@@ -90,6 +90,7 @@ export class AttendanceService {
       await this.endWorkTime(device.employeeId, [[type, r]]);
       return r;
     });
+    void this.notificationRules.attendanceApplied(device.employeeId, [[type, result]]); // after the lock; never rejects
     if (result.status === "REJECTED") throw new ConflictException(result.reason);
     return this.current(device.employeeId);
   }
@@ -127,6 +128,7 @@ export class AttendanceService {
       await this.endWorkTime(device.employeeId, req.events.map((ev, i) => [ev.type, out[i]!]));
       return out;
     });
+    void this.notificationRules.attendanceApplied(device.employeeId, req.events.map((ev, i) => [ev.type, results[i]!])); // after the lock; never rejects
     return { results, current: await this.current(device.employeeId) };
   }
 
@@ -395,7 +397,6 @@ export class AttendanceService {
    * in either order: a break persisted first makes register/upload reject them; one persisted after them removes them.
    */
   private async endWorkTime(employeeId: string, applied: [AttendanceEventType, SyncResult][]): Promise<void> {
-    await this.notificationRules.attendanceApplied(employeeId, applied); // committed clock-ins/outs → notification rules (never throws)
     const ends = applied.flatMap(([type, r]) => (r.status === "ACCEPTED" && r.occurredAt && (type === "BREAK_START" || type === "CLOCK_OUT") ? [Date.parse(r.occurredAt)] : []));
     if (ends.length) await this.screenshots.discardOutsideWork(employeeId, Math.min(...ends));
   }

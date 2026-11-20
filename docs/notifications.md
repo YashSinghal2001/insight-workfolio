@@ -148,10 +148,10 @@ is told, and how, is set per rule by an admin.
 
 | Type | Producer | One event per |
 |---|---|---|
-| `ATTENDANCE_CLOCK_IN` / `ATTENDANCE_CLOCK_OUT` | `AttendanceService`, after a committed clock-in/out, online or offline-synced (`endWorkTime`) | attendance event row (`TYPE:<attendance_events.id>`): replays and duplicate uploads add nothing |
+| `ATTENDANCE_CLOCK_IN` / `ATTENDANCE_CLOCK_OUT` | `AttendanceService`, after a committed clock-in/out, online or offline-synced; called after the employee lock is released, without waiting (never fails the request) | attendance event row (`TYPE:<attendance_events.id>`): replays and duplicate uploads add nothing |
 | `LATE_ARRIVAL` | clock-in hook (at once) and the 60 s timer, from `ScheduleService.daily` status `LATE` | employee and local date |
 | `ABSENCE` | 60 s timer, status `ABSENT` (each employee's today in their zone). Never on leave, a holiday, a non-workday or without an enabled schedule | employee and local date |
-| `MISSING_CLOCK_OUT` | `NotificationRulesService.recordMissingClockOut()` (called by the anomaly detector, wave 2; no detection here) | employee and local date of the clock-in |
+| `MISSING_CLOCK_OUT` | 60 s timer: `AnomaliesService.missingClockOuts()` (organisation-wide; active accounts only), only while a MISSING_CLOCK_OUT rule is not OFF; also `recordMissingClockOut()` | employee and local date of the clock-in |
 | `PRODUCTIVITY_ALERT` | `AlertsService.sendAlertEmails`, each created alert | alert rule, employee and local date (= one per alert) |
 
 **Rules** (`notification_rules`, migration 0034): one per (type, team); `team_id` NULL = every employee, otherwise
@@ -170,11 +170,15 @@ if several rules name it). The event row keeps `employee_id`, `local_date` and `
 **Digest**: every 60 s, for each DAILY_DIGEST rule, once the wall clock in the rule's zone reaches
 `digestLocalTime`, one digest event per rule and local date (dedupe key `digest:<rule>:<date>`) with one delivery
 per current recipient: at most one email per recipient, rule and local date, whatever the number of ticks,
-restarts or instances. It lists that date's events (employee local date) recorded up to the digest time, for
-employees the rule covers at send time. An empty day sends nothing; events recorded after the digest time are
-not emailed (they are on the Notifications page). DST: a digest time inside the spring-forward gap fires at the
+restarts or instances. It lists the events of that date (employee local date) or earlier recorded up to the digest
+time and not already in the previous day's digest, for employees the rule covers at send time: an event recorded
+after a day's digest (late offline sync, a clock-out at 19:00 with an 18:00 digest) goes into the next day's
+digest (8-day look-back). An empty day sends nothing. DST: a digest time inside the spring-forward gap fires at the
 first minute after it; the repeated fall-back hour cannot fire twice. A digest missed because the API was down
-from digest time until local midnight is not sent later.
+from digest time until local midnight is not sent later, and its events are not carried over.
+
+**Timer cost**: each tick reads the dedupe keys already recorded for the day's late/absence/missing-clock-out
+events and each digest key first, so a tick that finds nothing new performs no writes.
 
 **Send-time re-check** (rule deliveries): the account is still active, still a current recipient, still eligible,
 the rule is not OFF, and the employee is still covered (team member). Otherwise the delivery ends `FAILED`

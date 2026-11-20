@@ -3,8 +3,10 @@ import { ConflictException, Inject, Injectable, Logger, NotFoundException, type 
 import { ConfigService } from "@nestjs/config";
 import type { DatabaseClient, InStatement, Row } from "@workfolio/database";
 import {
+  addDays,
   NOTIFICATION_RECIPIENT_LABEL,
   toZonedLocal,
+  zonedToUtc,
   NOTIFICATION_ROUTES,
   platformRoleOf,
   type NotificationDelivery,
@@ -67,6 +69,17 @@ export const RULE_RECIPIENT = `u.status = 'ACTIVE' AND r.mode <> 'OFF'
 /** SQL condition: employee `col` is covered by rule `r` (every employee, or a member of its active team). */
 export const RULE_COVERS = (col: string) =>
   `(r.team_id IS NULL OR ${col} IN (SELECT tm.employee_id FROM team_members tm JOIN teams t ON t.id = tm.team_id WHERE t.id = r.team_id AND t.active = 1))`;
+
+/**
+ * SQL condition (alias `x`, rule `r`): the events of digest `date` of a rule (type, digest time, zone, cutoff = that
+ * day's digest instant). Each event belongs to the first digest date D with local_date <= D and recorded by D's
+ * cutoff: events recorded after a day's digest go into the next day's. Looks back 8 days (offline sync: 7).
+ */
+export const DIGEST_EVENTS = `x.type = ? AND x.employee_id IS NOT NULL AND x.local_date BETWEEN ? AND ? AND x.created_at <= ?
+  AND NOT (x.local_date < ? AND x.created_at <= ?) AND ${RULE_COVERS("x.employee_id")}`;
+export const digestArgs = (type: string, date: string, time: string, timeZone: string, cutoff: string) => [
+  type, addDays(date, -8), date, cutoff, date, zonedToUtc(`${addDays(date, -1)}T${time}`, timeZone),
+];
 
 /** Who is in each group right now. The server decides; no caller can name a recipient. */
 const RECIPIENTS: Record<NotificationRecipientRole, string> = {
@@ -197,7 +210,7 @@ export class NotificationsService implements OnModuleInit, OnModuleDestroy {
     const { rows } = await this.db.execute({
       sql: `SELECT d.id, d.recipient_role, d.attempts, e.id AS event_id, e.type, e.severity, e.description, e.created_at, e.subject_user_id,
               u.id AS user_id, u.email, u.status AS user_status, u.role, u.admin_title,
-              d.rule_id, e.employee_id, e.local_date, e.occurred_at, p.full_name, p.employee_code, p.timezone,
+              d.rule_id, e.employee_id, e.local_date, e.occurred_at, p.full_name, p.employee_code, p.timezone, r.digest_local_time, r.timezone AS rule_timezone,
               (r.id IS NOT NULL AND ${RULE_RECIPIENT} AND (e.employee_id IS NULL OR ${RULE_COVERS("e.employee_id")})) AS rule_ok
             FROM notification_deliveries d JOIN notification_events e ON e.id = d.event_id LEFT JOIN users u ON u.id = d.recipient_user_id
               LEFT JOIN notification_rules r ON r.id = d.rule_id LEFT JOIN employee_profiles p ON p.id = e.employee_id
@@ -261,9 +274,9 @@ export class NotificationsService implements OnModuleInit, OnModuleDestroy {
     const { rows } = await this.db.execute({
       sql: `SELECT p.full_name, p.employee_code, p.timezone, x.occurred_at FROM notification_events x JOIN employee_profiles p ON p.id = x.employee_id
             JOIN notification_rules r ON r.id = ?
-            WHERE x.type = ? AND x.local_date = ? AND x.created_at <= ? AND ${RULE_COVERS("x.employee_id")}
+            WHERE ${DIGEST_EVENTS}
             ORDER BY x.occurred_at, p.full_name COLLATE NOCASE, x.id`,
-      args: [String(r.rule_id), String(r.type), String(r.local_date), String(r.occurred_at)],
+      args: [String(r.rule_id), ...digestArgs(String(r.type), String(r.local_date), String(r.digest_local_time), String(r.rule_timezone), String(r.occurred_at))],
     });
     if (!rows.length) throw new MailError("Nothing left to report for this digest", true);
     return renderAttendance({ ...base, digestDate: String(r.local_date), items: rows.map(item) });

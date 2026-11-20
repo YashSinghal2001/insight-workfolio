@@ -25,8 +25,9 @@ import { accountAudit } from "../audit/account-audit.js";
 import type { AuthContext } from "../auth/auth.service.js";
 import type { Env } from "../config/env.js";
 import { DATABASE } from "../database/database.module.js";
+import { AnomaliesService } from "../attendance/anomalies.service.js";
 import { ScheduleService } from "../schedule/schedule.service.js";
-import { NotificationsService, RULE_COVERS, RULE_RECIPIENT, sanitize } from "./notifications.service.js";
+import { digestArgs, DIGEST_EVENTS, NotificationsService, RULE_COVERS, RULE_RECIPIENT, sanitize } from "./notifications.service.js";
 
 const TICK_MS = 60_000;
 const iso = (ms: number) => new Date(ms).toISOString();
@@ -70,6 +71,7 @@ export class NotificationRulesService implements OnModuleInit, OnModuleDestroy {
     @Inject(DATABASE) private readonly db: DatabaseClient,
     private readonly notifications: NotificationsService,
     private readonly schedule: ScheduleService,
+    private readonly anomalies: AnomaliesService,
     config: ConfigService<Env, true>,
   ) {
     this.test = config.get("NODE_ENV", { infer: true }) === "test";
@@ -309,6 +311,7 @@ export class NotificationRulesService implements OnModuleInit, OnModuleDestroy {
     this.ticking = true;
     try {
       await this.scanDay(now);
+      await this.missingClockOuts(now);
       await this.digests(now);
     } catch (err) {
       this.logger.error({ err: (err as Error).message }, "Notification rule evaluation failed");
@@ -330,9 +333,11 @@ export class NotificationRulesService implements OnModuleInit, OnModuleDestroy {
     const dates = only
       ? [only.date]
       : [...new Set((await this.db.execute("SELECT DISTINCT timezone FROM employee_profiles WHERE employment_status = 'ACTIVE'")).rows.map((r) => localDate(now, String(r.timezone))))];
+    const done = await this.recorded(["LATE_ARRIVAL", "ABSENCE"], dates);
     for (const date of dates) {
       for (const r of (await this.schedule.daily({ date, q: only?.code, page: 1, pageSize: Number.MAX_SAFE_INTEGER }, now)).items) {
         if (only ? r.employee.id !== only.employeeId : r.date !== localDate(now, r.employee.timezone)) continue;
+        if (done.has(`${r.status === "LATE" ? "LATE_ARRIVAL" : "ABSENCE"}:${r.employee.id}:${r.date}`)) continue;
         if (r.status === "LATE" && types.has("LATE_ARRIVAL")) {
           await this.record({ type: "LATE_ARRIVAL", employeeId: r.employee.id, localDate: r.date, occurredAt: r.firstClockInAt!, dedupeKey: `LATE_ARRIVAL:${r.employee.id}:${r.date}`, now });
         } else if (r.status === "ABSENT" && types.has("ABSENCE")) {
@@ -342,10 +347,37 @@ export class NotificationRulesService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
+  /** Dedupe keys already recorded for these types and local dates (one read per tick instead of a write per row). */
+  private async recorded(types: string[], dates: string[]): Promise<Set<string>> {
+    if (!dates.length) return new Set();
+    const { rows } = await this.db.execute({
+      sql: `SELECT dedupe_key FROM notification_events WHERE type IN (${types.map(() => "?").join(", ")}) AND local_date IN (${dates.map(() => "?").join(", ")}) AND employee_id IS NOT NULL`,
+      args: [...types, ...dates],
+    });
+    return new Set(rows.map((r) => String(r.dedupe_key)));
+  }
+
+  /**
+   * MISSING_CLOCK_OUT from the anomaly detector (whole organisation, flag only): one event per employee and local
+   * date of the open shift's clock-in, only while a rule that is not OFF exists; record() applies team scoping.
+   * Disabled or terminated people are skipped.
+   */
+  async missingClockOuts(now: number): Promise<void> {
+    if (!(await this.db.execute("SELECT 1 FROM notification_rules WHERE type = 'MISSING_CLOCK_OUT' AND mode <> 'OFF' LIMIT 1")).rows[0]) return;
+    const items = (await this.anomalies.missingClockOuts(undefined, undefined, now)).items.filter((a) => a.accountStatus === "ACTIVE" && a.employmentStatus === "ACTIVE");
+    const keyed = items.map((a) => ({ a, date: a.clockInLocal.slice(0, 10) }));
+    const done = await this.recorded(["MISSING_CLOCK_OUT"], [...new Set(keyed.map((k) => k.date))]);
+    for (const { a, date } of keyed) {
+      if (done.has(`MISSING_CLOCK_OUT:${a.employee.id}:${date}`)) continue;
+      await this.recordMissingClockOut({ employeeId: a.employee.id, clockInAt: a.clockInAt }, now);
+    }
+  }
+
   /**
    * DAILY_DIGEST rules: once the rule zone's wall clock reaches digest_local_time, one digest event per rule and
-   * local date (dedupe key), one delivery per current recipient. It covers that date's events recorded up to the
-   * digest time. Wall-clock comparison is DST-safe: a time skipped by spring-forward fires at the first minute
+   * local date (dedupe key, checked before anything else), one delivery per current recipient. It covers events of
+   * that date (or earlier) recorded up to the digest time and not covered by the previous day's digest, so an event
+   * recorded after a day's digest goes into the next one. Wall-clock comparison is DST-safe: a time skipped by spring-forward fires at the first minute
    * after the gap; a repeated hour cannot fire twice (same date, same key). An empty day sends nothing.
    * A digest missed because the API was down from digest time to local midnight is not sent later.
    */
@@ -356,13 +388,14 @@ export class NotificationRulesService implements OnModuleInit, OnModuleDestroy {
       const local = toZonedLocal(now, tz);
       const [date, time] = [local.slice(0, 10), local.slice(11)];
       if (time < String(rule.digest_local_time)) continue;
+      const key = `digest:${String(rule.id)}:${date}`;
+      if ((await this.db.execute({ sql: "SELECT 1 FROM notification_events WHERE dedupe_key = ?", args: [key] })).rows[0]) continue;
       const cutoff = iso(Math.min(now, Date.parse(zonedToUtc(`${date}T${String(rule.digest_local_time)}`, tz))));
       const count = Number(
         (
           await this.db.execute({
-            sql: `SELECT count(*) AS n FROM notification_events x JOIN notification_rules r ON r.id = ?
-                  WHERE x.type = ? AND x.local_date = ? AND x.employee_id IS NOT NULL AND x.created_at <= ? AND ${RULE_COVERS("x.employee_id")}`,
-            args: [String(rule.id), String(rule.type), date, cutoff],
+            sql: `SELECT count(*) AS n FROM notification_events x JOIN notification_rules r ON r.id = ? WHERE ${DIGEST_EVENTS}`,
+            args: [String(rule.id), ...digestArgs(String(rule.type), date, String(rule.digest_local_time), tz, cutoff)],
           })
         ).rows[0]!.n,
       );
@@ -373,7 +406,7 @@ export class NotificationRulesService implements OnModuleInit, OnModuleDestroy {
         {
           sql: `INSERT INTO notification_events (id, type, severity, description, dedupe_key, local_date, occurred_at, created_at) VALUES (?, ?, 'INFO', ?, ?, ?, ?, ?)
                 ON CONFLICT (dedupe_key) DO NOTHING`,
-          args: [id, String(rule.type), `Daily digest: ${count} ${label} event(s) on ${date}`, `digest:${String(rule.id)}:${date}`, date, cutoff, iso(now)],
+          args: [id, String(rule.type), `Daily digest: ${count} ${label} event(s) on ${date}`, key, date, cutoff, iso(now)],
         },
         ...(await this.deliveries(id, [String(rule.id)])),
       ];
