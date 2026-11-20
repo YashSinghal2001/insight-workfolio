@@ -6,7 +6,6 @@ import {
   detectAnomalies,
   localDate,
   toZonedLocal,
-  withScheduleOverride,
   zonedToUtc,
   type AccountStatus,
   type AttendanceAnomaly,
@@ -16,24 +15,15 @@ import {
 import type { AuthContext } from "../auth/auth.service.js";
 import { assertTeamReadable, scopeSql, teamFilterSql } from "../common/scope.js";
 import { DATABASE } from "../database/database.module.js";
+import { effectiveAt } from "../schedule/schedule.service.js";
 import { str } from "./sessions.js";
 
 const PERMISSION = "attendance:read-all";
 
-/**
- * Expected start ("HH:MM") when the schedule in force at the start of the local day (organisation policy +
- * the employee's override, as ScheduleService.daily) makes `date` a workday; null otherwise.
- * ponytail: mirrors schedule.service.ts's private effectiveAt (W1-ATT-DATA owns it); import it once exported.
- */
+/** Expected start ("HH:MM") when the schedule in force at the start of the local day makes `date` a workday; null otherwise. */
 function expectedStart(policies: Row[], overrides: Row[], date: string, timeZone: string, holiday: boolean): string | null {
-  const dayStart = zonedToUtc(`${date}T00:00`, timeZone);
-  const p = policies.filter((x) => String(x.effective_at) <= dayStart).at(-1);
-  if (!p) return null;
-  const o = overrides.filter((x) => String(x.effective_at) <= dayStart).at(-1);
-  const policy = withScheduleOverride(
-    { enabled: Number(p.enabled) === 1, expectedStart: String(p.expected_start), graceMinutes: Number(p.grace_minutes), workdays: String(p.workdays) },
-    o && { expectedStart: o.expected_start as string | null, workdays: o.workdays as string | null },
-  );
+  const policy = effectiveAt(policies, overrides, zonedToUtc(`${date}T00:00`, timeZone));
+  if (!policy) return null;
   const { scheduled } = dailyAttendanceStatus({ date, timeZone, policy, firstClockInAt: null, onLeave: false, holiday, now: 0 });
   return scheduled ? policy.expectedStart : null;
 }
