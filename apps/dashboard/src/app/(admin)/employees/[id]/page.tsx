@@ -2,7 +2,7 @@
 
 import { Suspense, useCallback, useEffect, useState, type FormEvent } from "react";
 import Link from "next/link";
-import { useParams, useSearchParams } from "next/navigation";
+import { useParams, usePathname, useRouter, useSearchParams } from "next/navigation";
 import { analyticsRange, type Device, type Employee, type EmployeeAnalyticsResponse, type InvitationResponse, type ScreenshotBlurOverridesResponse, type SetupToken } from "@workfolio/shared";
 import { EmployeeForm, InvitationSummary, SetupLinkNotice } from "@/components/employee-form";
 import { TrackingOverrides } from "@/components/tracking-overrides";
@@ -11,6 +11,7 @@ import { ConfirmDialog, ErrorState, PageHeader, SkeletonRows, StatusBadge, Succe
 import type { Range } from "@/components/range-picker";
 import { Card, Field, formatInZone, inputClass, Notice, secondaryButtonClass } from "@/components/ui";
 import { api, ApiRequestError, errorMessage } from "@/lib/api";
+import { latestOnly } from "@/lib/latest";
 import { ProfileOverview, type Loadable } from "./_components/profile-overview";
 
 export default function EmployeePage() {
@@ -34,8 +35,12 @@ function EmployeeDetail() {
   const [notice, setNotice] = useState<string | null>(null);
   const [setup, setSetup] = useState<SetupToken | null>(null);
   const [confirm, setConfirm] = useState<Confirm | null>(null);
-  // ?tab=edit deep-links the edit form (browser suites and "Manage devices" use it).
-  const [tab, setTab] = useState<Tab>(useSearchParams().get("tab") === "edit" ? "edit" : "overview");
+  // The tab lives in the URL (?tab=edit), so reload and Back keep it; browser suites deep-link the edit form.
+  const router = useRouter();
+  const pathname = usePathname();
+  const tab: Tab = useSearchParams().get("tab") === "edit" ? "edit" : "overview";
+  const setTab = (t: Tab) => router.replace(t === "edit" ? `${pathname}?tab=edit` : pathname, { scroll: false });
+  const [requests] = useState(latestOnly);
   const [range, setRange] = useState<Range | null>(null);
   const [analytics, setAnalytics] = useState<Loadable<EmployeeAnalyticsResponse>>({ data: null, error: null });
 
@@ -59,11 +64,13 @@ function EmployeeDetail() {
   const shown = range ?? (timezone ? analyticsRange({}, timezone) : null);
   const loadAnalytics = useCallback(async () => {
     if (!shown) return;
+    const isCurrent = requests.begin(); // a slower response for an earlier range must not overwrite this one
     setAnalytics({ data: null, error: null });
     try {
-      setAnalytics({ data: await api<EmployeeAnalyticsResponse>(`/employees/${id}/analytics?from=${shown.from}&to=${shown.to}`), error: null });
+      const data = await api<EmployeeAnalyticsResponse>(`/employees/${id}/analytics?from=${shown.from}&to=${shown.to}`);
+      if (isCurrent()) setAnalytics({ data, error: null });
     } catch (err) {
-      setAnalytics({ data: null, error: errorMessage(err) });
+      if (isCurrent()) setAnalytics({ data: null, error: errorMessage(err) });
     }
   }, [id, shown?.from, shown?.to]); // eslint-disable-line react-hooks/exhaustive-deps -- keyed by the range dates
 

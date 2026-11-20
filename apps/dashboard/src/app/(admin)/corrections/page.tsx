@@ -1,6 +1,8 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { Suspense, useCallback, useEffect, useState } from "react";
+import Link from "next/link";
+import { useSearchParams } from "next/navigation";
 import type { CorrectionRequest, CorrectionStatus, Paginated } from "@workfolio/shared";
 import { useAuth } from "@/components/auth-provider";
 import { CorrectionCard } from "@/components/correction-card";
@@ -17,7 +19,18 @@ type Filter = (typeof FILTERS)[number]["id"];
 const PAGE_SIZE = 20;
 
 export default function CorrectionsPage() {
+  // useSearchParams suspends under cacheComponents.
+  return (
+    <Suspense fallback={<SkeletonRows label="correction requests" />}>
+      <Corrections />
+    </Suspense>
+  );
+}
+
+function Corrections() {
   const { auth } = useAuth();
+  // ?employeeId= (from the employee profile) narrows the list to one person; the API applies the caller's scope.
+  const employeeId = useSearchParams().get("employeeId");
   const [filter, setFilter] = useState<Filter>("PENDING");
   const [page, setPage] = useState(1);
   const [data, setData] = useState<Paginated<CorrectionRequest> | null>(null);
@@ -26,13 +39,14 @@ export default function CorrectionsPage() {
   const load = useCallback(async () => {
     const params = new URLSearchParams({ page: String(page), pageSize: String(PAGE_SIZE) });
     if (filter !== "ALL") params.set("status", filter);
+    if (employeeId) params.set("employeeId", employeeId);
     try {
       setData(await api<Paginated<CorrectionRequest>>(`/attendance/corrections?${params}`));
       setError(null);
     } catch (err) {
       setError(errorMessage(err));
     }
-  }, [filter, page]);
+  }, [filter, page, employeeId]);
 
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect -- fetch on mount / filter change
@@ -47,6 +61,11 @@ export default function CorrectionsPage() {
         title="Corrections"
         about="Employees request changes to their attendance, and administrators can file a request for an employee (for example a missing clock-out). Approving applies the change and records the before and after values; the original device events are never altered. Whoever filed a request cannot review it: a different administrator must."
       />
+      {employeeId && (
+        <p className="text-sm text-muted">
+          Showing one employee&apos;s requests. <Link href="/corrections" className="text-brand underline">Show everyone</Link>
+        </p>
+      )}
       <Tabs label="Status" tabs={FILTERS} value={filter} idPrefix="corr" onChange={(f) => (setData(null), setPage(1), setFilter(f))}>
         <div className="flex flex-col gap-4">
           {error && <ErrorState message={error} onRetry={() => void load()} />}
