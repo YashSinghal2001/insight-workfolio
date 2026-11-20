@@ -200,7 +200,14 @@ function Screenshots() {
   const [gallery, setGallery] = useState<Paginated<ScreenshotGalleryItem> | null>(null);
   const [overview, setOverview] = useState<ScreenshotOverview | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [open, setOpen] = useState<ScreenshotGalleryItem | null>(null);
+  // `seq` remounts the viewer on every open: reopening the same screenshot right after closing it (the dialog's close
+  // event is handled after the click) must show the dialog again and fetch (and log) the image again.
+  const [open, setOpenItem] = useState<ScreenshotGalleryItem | null>(null);
+  const [seq, setSeq] = useState(0);
+  const setOpen = (item: ScreenshotGalleryItem | null) => {
+    if (item) setSeq((n) => n + 1);
+    setOpenItem(item);
+  };
   const [idleOnly, setIdleOnly] = useState(false);
   // Bulk export (Super Admin): kept across pages and filters until exported or cleared.
   const [selected, setSelected] = useState<ReadonlySet<string>>(new Set());
@@ -363,6 +370,7 @@ function Screenshots() {
 
       {open && (
         <Viewer
+          key={seq}
           item={open}
           canDelete={canDelete}
           onClose={() => setOpen(null)}
