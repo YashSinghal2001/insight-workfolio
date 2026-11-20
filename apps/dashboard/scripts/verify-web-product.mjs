@@ -260,7 +260,7 @@ try {
   await waitFor(`/Ben Product/.test(document.querySelector('table[aria-label="Usage per employee"]')?.innerText ?? '')`, "per employee");
   const perAna = await rowText("Usage per employee", "Ana Product");
   check("activity per employee: Ana's active time and top application match /activity/apps",
-    perAna.includes(formatDurationShort(apps.employees.find((e) => e.employee.id === ana.id).activeMs)) && perAna.includes("Code"), perAna);
+    perAna.includes(formatDurationShort(apps.employees.items.find((e) => e.employee.id === ana.id).activeMs)) && perAna.includes("Code"), perAna);
   await js(`document.querySelector('#activity-view-btn-history').click()`);
   await waitFor(`/Ben Product/.test(document.querySelector('table[aria-label="App history per employee"]')?.innerText ?? '')`, "app history");
   check("activity app history: Code chosen first, bar chart per day, Ana and Ben listed", await js(`document.querySelector('select[aria-label=Application]').value === 'com.example.Code' && document.querySelectorAll('[data-bar]').length >= 1`));
