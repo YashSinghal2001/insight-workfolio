@@ -3,8 +3,8 @@
 import { useState } from "react";
 import Link from "next/link";
 import type { CorrectionRequest, CorrectionValues } from "@workfolio/shared";
-import { StatusBadge, type Tone } from "@/components/kit";
-import { buttonClass, formatInZone, inputClass, secondaryButtonClass } from "@/components/ui";
+import { Button, StatusBadge, type Tone } from "@/components/kit";
+import { formatInZone, inputClass } from "@/components/ui";
 import { api, errorMessage } from "@/lib/api";
 
 const TYPE = {
@@ -37,7 +37,8 @@ function ValuesList({ values, tz }: { values: CorrectionValues | null; tz: strin
 
 /**
  * One correction request with its full audit trail. Pending requests from someone else can be
- * approved or rejected here; both need a reason.
+ * approved or rejected here; both need a reason. The requester (an employee, or an admin filing for one)
+ * sees the controls disabled: the API refuses self-review.
  */
 export function CorrectionCard({ request, currentUserId, onChanged }: { request: CorrectionRequest; currentUserId: string; onChanged: (r: CorrectionRequest) => void }) {
   const [reason, setReason] = useState("");
@@ -72,10 +73,13 @@ export function CorrectionCard({ request, currentUserId, onChanged }: { request:
       <dl className="mt-3 grid gap-x-4 gap-y-1 sm:grid-cols-[10rem_1fr]">
         <dt className="text-muted">Requested change</dt>
         <dd>{Object.entries(request.proposed).map(([k, v]) => <div key={k}>{label(k)}: {formatInZone(v, tz)}</div>)}</dd>
-        <dt className="text-muted">Employee&apos;s reason</dt>
+        <dt className="text-muted">Reason given</dt>
         <dd>{request.reason}</dd>
         <dt className="text-muted">Requested</dt>
-        <dd>{formatInZone(request.requestedAt, tz)} by {request.requestedBy.email}</dd>
+        <dd>
+          {formatInZone(request.requestedAt, tz)}
+          <div className="text-xs text-muted">Filed by {own ? "you" : request.requestedBy.email} for {request.employee.fullName}</div>
+        </dd>
         {request.reviewedBy && (
           <>
             <dt className="text-muted">Reviewed</dt>
@@ -91,23 +95,29 @@ export function CorrectionCard({ request, currentUserId, onChanged }: { request:
         </div>
       )}
 
-      {request.status === "PENDING" &&
-        (own ? (
-          <p className="mt-3 text-xs text-muted">This is your own request; another administrator must review it.</p>
-        ) : (
-          <div className="mt-3 flex flex-col gap-2">
+      {request.status === "PENDING" && (
+        <div className="mt-3 flex flex-col gap-2">
+          {!own && (
             <label className="flex flex-col gap-1">
               <span className="text-xs text-muted">Reason for your decision (kept in the audit trail)</span>
               <input value={reason} onChange={(e) => setReason(e.target.value)} maxLength={1000} className={inputClass} />
               {reason.trim().length < 3 && <span className="text-xs text-muted">Enter at least 3 characters to approve or reject.</span>}
             </label>
-            {error && <p role="alert" className="text-xs text-red-700 dark:text-red-300">{error}</p>}
-            <div className="flex gap-2">
-              <button type="button" disabled={busy || reason.trim().length < 3} className={buttonClass} onClick={() => review("approve")}>Approve and apply</button>
-              <button type="button" disabled={busy || reason.trim().length < 3} className={secondaryButtonClass} onClick={() => review("reject")}>Reject</button>
-            </div>
+          )}
+          {error && <p role="alert" className="text-xs text-danger">{error}</p>}
+          <div className="flex flex-wrap items-start gap-2">
+            <Button
+              disabledReason={own ? "You filed this request, so a different administrator must review it." : null}
+              disabled={reason.trim().length < 3}
+              pending={busy}
+              onClick={() => review("approve")}
+            >
+              Approve and apply
+            </Button>
+            <Button variant="secondary" disabled={own || busy || reason.trim().length < 3} onClick={() => review("reject")}>Reject</Button>
           </div>
-        ))}
+        </div>
+      )}
     </article>
   );
 }
