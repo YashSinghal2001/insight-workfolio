@@ -20,10 +20,13 @@ const APPS: ActivityAppsResponse = {
     { key: "com.code", applicationIdentifier: "com.code", applicationName: "Code", activeMs: 2 * H, category: "PRODUCTIVE", employees: 2 },
     { key: "com.slack", applicationIdentifier: "com.slack", applicationName: "Slack <b>", activeMs: H / 2, category: "UNCLASSIFIED", employees: 1 },
   ],
-  employees: [
-    { employee: ref("a", "Ana"), activeMs: 2 * H, idleMs: H / 6, categories: { ...zero, PRODUCTIVE: 2 * H }, topApplication: "Code" },
-    { employee: ref("b", "Ben"), activeMs: H / 2, idleMs: 0, categories: { ...zero, UNCLASSIFIED: H / 2 }, topApplication: "Slack <b>" },
-  ],
+  employees: {
+    items: [
+      { employee: ref("a", "Ana"), activeMs: 2 * H, idleMs: H / 6, categories: { ...zero, PRODUCTIVE: 2 * H }, topApplication: "Code" },
+      { employee: ref("b", "Ben"), activeMs: H / 2, idleMs: 0, categories: { ...zero, UNCLASSIFIED: H / 2 }, topApplication: "Slack <b>" },
+    ],
+    total: 2, page: 1, pageSize: 50,
+  },
 };
 const ok = { status: "ok", data: APPS } as const;
 const html = (el: React.ReactElement) => renderToStaticMarkup(el);
@@ -42,7 +45,7 @@ test("summary: donut slices coloured by label, 100% label bar, names escaped", (
   assert.match(out, /Slack &lt;b&gt; \(Unclassified\)/);
   assert.match(out, /Label share of active time/);
   assert.ok(!out.includes("Slack <b>"));
-  const empty = html(<SummaryCharts load={{ status: "ok", data: { ...APPS, applications: [], categories: zero, employees: [], categoriesConfigured: false } }} />);
+  const empty = html(<SummaryCharts load={{ status: "ok", data: { ...APPS, applications: [], categories: zero, employees: { items: [], total: 0, page: 1, pageSize: 50 }, categoriesConfigured: false } }} />);
   assert.match(empty, /No application activity in this range/);
   assert.match(empty, /Set up application labels/);
 });
@@ -53,6 +56,9 @@ test("per employee: sortable table, most active first, links to the one-employee
   assert.ok(out.indexOf(">Ana<") < out.indexOf(">Ben<"));
   assert.match(out, /href="\/activity\?tab=employee&amp;employeeId=a"/);
   assert.match(out, /aria-sort="descending"/);
+  assert.ok(!out.includes("Employee pages"), "one page: no pager");
+  const paged = html(<EmployeesTab load={{ status: "ok", data: { ...APPS, employees: { ...APPS.employees, total: 120, page: 2 } } }} onPage={() => {}} />);
+  assert.match(paged, /aria-label="Employee pages"/);
 });
 
 test("review: unreviewed count and list, link to Settings › App labels (no editor here)", () => {

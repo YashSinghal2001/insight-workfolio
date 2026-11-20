@@ -4,14 +4,14 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import type { ActivityAppHistoryResponse, ActivityAppsResponse } from "@workfolio/shared";
 import { BarChart, DonutChart, formatDurationMs, StackedBar } from "@/components/charts";
-import { DataTable, EmptyState, ErrorState, SkeletonRows, StatCard, StatGrid, type DataColumn } from "@/components/kit";
+import { DataTable, EmptyState, ErrorState, Pagination, SkeletonRows, StatCard, StatGrid, type DataColumn } from "@/components/kit";
 import type { Range } from "@/components/range-picker";
 import { Card, inputClass } from "@/components/ui";
 import { appDonut, categoryShare, historyBars, unreviewed } from "@/lib/activity-apps";
 import { api, errorMessage } from "@/lib/api";
 
 export type AppsLoad = { status: "loading" } | { status: "error"; message: string } | { status: "ok"; data: ActivityAppsResponse };
-type Row = ActivityAppsResponse["employees"][number];
+type Row = ActivityAppsResponse["employees"]["items"][number];
 
 const employeeHref = (id: string) => `/activity?tab=employee&employeeId=${id}`;
 
@@ -38,7 +38,7 @@ export function SummaryCharts({ load, onRetry }: { load: AppsLoad; onRetry?: () 
             <DonutChart label="Top applications by active time" data={appDonut(d.applications)} format={formatDurationMs} centerLabel="Active" empty="No application activity in this range." />
           </Card>
           <Card title="Productive, neutral and unproductive share">
-            <StackedBar label="Label share of active time" mode="percent" format={formatDurationMs} {...categoryShare(d, 5)} empty="No application activity in this range." />
+            <StackedBar label="Label share of active time" mode="percent" format={formatDurationMs} {...categoryShare({ categories: d.categories, employees: [] })} empty="No application activity in this range." />
             {!d.categoriesConfigured && <LabelsHint />}
           </Card>
         </div>
@@ -67,17 +67,20 @@ const COLUMNS: readonly DataColumn<Row>[] = [
   { header: "Top application", cell: (r) => r.topApplication ?? <span className="text-muted">—</span>, sortValue: (r) => r.topApplication },
 ];
 
-/** Usage per employee, sortable by any column (most active first). */
-export function EmployeesTab({ load, onRetry }: { load: AppsLoad; onRetry?: () => void }) {
+/** Usage per employee, one page (by name) at a time; columns sort within the page (most active first). */
+export function EmployeesTab({ load, onRetry, onPage }: { load: AppsLoad; onRetry?: () => void; onPage?: (page: number) => void }) {
   return (
     <Gate load={load} onRetry={onRetry}>
       {(d) =>
-        d.employees.length === 0 ? (
+        d.employees.total === 0 ? (
           <EmptyState title="No employees in this scope." />
         ) : (
           <div className="flex flex-col gap-2">
             {!d.categoriesConfigured && <LabelsHint />}
-            <DataTable label="Usage per employee" columns={COLUMNS} rows={d.employees} rowKey={(r) => r.employee.id} defaultSort={{ column: 1, direction: "desc" }} minWidth={880} />
+            <DataTable label="Usage per employee" columns={COLUMNS} rows={d.employees.items} rowKey={(r) => r.employee.id} defaultSort={{ column: 1, direction: "desc" }} minWidth={880} />
+            {onPage && d.employees.total > d.employees.pageSize && (
+              <Pagination label="Employee pages" page={d.employees.page} pageCount={Math.ceil(d.employees.total / d.employees.pageSize)} onPage={onPage} />
+            )}
           </div>
         )
       }

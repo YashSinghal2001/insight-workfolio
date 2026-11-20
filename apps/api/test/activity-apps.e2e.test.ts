@@ -127,7 +127,7 @@ const APPS = "/activity/apps?from=2026-05-04&to=2026-05-05";
 type AppsBody = {
   categoriesConfigured: boolean; categories: Record<string, number>;
   applications: { key: string; applicationName: string; activeMs: number; category: string; employees: number }[];
-  employees: { employee: { id: string }; activeMs: number; idleMs: number; categories: Record<string, number>; topApplication: string | null }[];
+  employees: { items: { employee: { id: string }; activeMs: number; idleMs: number; categories: Record<string, number>; topApplication: string | null }[]; total: number; page: number; pageSize: number };
 };
 
 test("apps: per app (dominant label, employees), label totals and per-employee usage; no window titles", async () => {
@@ -140,15 +140,25 @@ test("apps: per app (dominant label, employees), label totals and per-employee u
     ["com.slack", "Slack", 30, "UNCLASSIFIED", 1],
   ]);
   assert.deepEqual(b.categories, { PRODUCTIVE: 125 * M, NEUTRAL: 0, UNPRODUCTIVE: 0, UNCLASSIFIED: 30 * M });
-  const a = b.employees.find((e) => e.employee.id === A.id)!;
+  const a = b.employees.items.find((e) => e.employee.id === A.id)!;
   assert.deepEqual([a.activeMs / M, a.idleMs / M, a.categories.PRODUCTIVE / M, a.topApplication], [120, 10, 90, "Code"]);
-  const c = b.employees.find((e) => e.employee.id === C.id)!;
+  const c = b.employees.items.find((e) => e.employee.id === C.id)!;
   assert.deepEqual([c.activeMs, c.topApplication], [0, null], "employees without usage are listed with zeros");
   assert.ok(!/title|window/i.test(r.text));
 });
 
+test("apps: the employee section is paginated (≤ 100); app and label totals still cover everyone", async () => {
+  const all = (await api(APPS)).body as AppsBody;
+  const p2 = (await api(`${APPS}&page=2&pageSize=2`)).body as AppsBody;
+  assert.deepEqual([p2.employees.total, p2.employees.page, p2.employees.pageSize, p2.employees.items.length], [all.employees.total, 2, 2, all.employees.total - 2]);
+  assert.deepEqual(p2.employees.items.map((e) => e.employee.id), all.employees.items.slice(2, 4).map((e) => e.employee.id));
+  assert.deepEqual(p2.applications, all.applications);
+  assert.deepEqual(p2.categories, all.categories);
+  for (const q of ["&pageSize=101", "&page=0", "&pageSize=x"]) assert.equal((await api(`${APPS}${q}`)).status, 400, q);
+});
+
 test("apps: team filter, team head scope (own team; other team 404), employee 403, validation 400", async () => {
-  const ids = (b: AppsBody) => b.employees.map((e) => e.employee.id).sort();
+  const ids = (b: AppsBody) => b.employees.items.map((e) => e.employee.id).sort();
   assert.deepEqual(ids((await api(`${APPS}&teamId=${beta}`)).body), [B.id]);
   assert.deepEqual(ids((await api(APPS, headCookie)).body), [A.id, H.id].sort(), "head: their team only");
   assert.deepEqual(ids((await api(`${APPS}&teamId=${alpha}`, headCookie)).body), [A.id, H.id].sort());
@@ -159,6 +169,8 @@ test("apps: team filter, team head scope (own team; other team 404), employee 40
   assert.deepEqual(ov.body.items.map((i: { employee: { id: string } }) => i.employee.id), [B.id], "existing overview honours teamId");
   assert.equal((await api(`/activity/overview?from=2026-05-04&to=2026-05-05&teamId=${beta}`, headCookie)).status, 404);
   assert.equal((await api("/activity/apps/history?from=2026-05-04&to=2026-05-05&app=com.code", empCookie)).status, 403);
+  assert.equal((await api(`/activity/apps/history?from=2026-05-04&to=2026-05-05&app=com.code&teamId=${beta}`, headCookie)).status, 404, "head: another team's history");
+  assert.equal((await api(`/activity/apps/history?from=2026-05-04&to=2026-05-05&app=com.code&teamId=${alpha}`, headCookie)).status, 200);
   for (const q of ["", "?from=2026-05-05&to=2026-05-04", "?from=2026-05-01&to=2026-06-01", "?from=2026-05-01&to=2026-05-02&teamId=nope"]) assert.equal((await api(`/activity/apps${q}`)).status, 400, q);
   assert.equal((await api("/activity/apps/history?from=2026-05-04&to=2026-05-05")).status, 400, "app is required");
 });
@@ -199,6 +211,24 @@ test("risk users: alert rows by kind in the range, less working hours (holiday a
   assert.deepEqual(rule("LATE_CLOCK_IN"), { trigger: "LATE_CLOCK_IN", employees: 1, count: 2 });
   assert.deepEqual(rule("NOT_CLOCKED_IN_BY"), { trigger: "NOT_CLOCKED_IN_BY", employees: 0, count: 0 });
   assert.ok(!r.text.includes("Synthetic detail"), "no alert detail text");
+});
+
+test("risk users: today (an unfinished day) never counts toward less working hours", async () => {
+  // Schedule back on (Mon–Fri) for recent days; D works 8 h on each past workday of the last week and 1 h so far today.
+  await db.execute({ sql: "INSERT INTO work_schedule_policies (enabled, expected_start, grace_minutes, workdays, reason, changed_by, effective_at) VALUES (1, '00:00', 10, '12345', 'test', ?, '2026-10-01T00:00:00.000Z')", args: [adminId] });
+  const D = await person("APP-D");
+  const now = Date.now();
+  const today = new Date(now).toISOString().slice(0, 10);
+  const day = (n: number) => new Date(Date.parse(`${today}T00:00:00.000Z`) - n * 86_400_000).toISOString().slice(0, 10);
+  for (let n = 1; n <= 6; n++) {
+    const d = day(n);
+    if ([0, 6].includes(new Date(`${d}T00:00:00Z`).getUTCDay())) continue;
+    await shift(D, `${d}T00:00:00.000Z`, `${d}T08:00:00.000Z`);
+  }
+  await shift(D, `${today}T00:00:00.000Z`, new Date(Math.min(now - 1000, Date.parse(`${today}T01:00:00.000Z`))).toISOString());
+  const r = await api(`/activity/risk-users?from=${day(6)}&to=${today}`);
+  assert.equal(r.status, 200, r.text);
+  assert.equal((r.body.items as Risk[]).find((i) => i.employee.id === D.id), undefined, "8 h on every past workday; today's 1 h is ignored");
 });
 
 test("risk users: empty (no schedule, no alerts), team filter, head own/other 404, employee 403, validation 400", async () => {
