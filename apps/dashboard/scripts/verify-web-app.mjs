@@ -608,17 +608,20 @@ try {
   const corrText = await text();
   check("workflow: admin sees Ana's correction request (Missing shift) in /corrections", /Ana Kolkata/.test(corrText) && /Missing shift/.test(corrText) && /Web app check: evening shift not recorded/.test(corrText));
 
-  // Overview stat cards vs. seeded data and the API.
+  // Overview stat cards vs. seeded data and the API (W2-OVERVIEW: the page reads /overview for the viewer's date).
   await go("/");
-  const summary = ok(await api("/attendance/summary", { cookie: superCookie }), "summary");
-  const todayDaily = ok(await api(`/attendance/daily?date=${todayUtc}&pageSize=1`, { cookie: superCookie }), "daily today");
+  const viewerDate = await js(`(() => { const d = new Date(); return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0"); })()`);
+  const ov = ok(await api(`/overview?date=${viewerDate}`, { cookie: superCookie }), "overview");
+  const summary = ov.kpis;
+  const todayDaily = ok(await api(`/attendance/daily?date=${viewerDate}&pageSize=1`, { cookie: superCookie }), "daily today");
+  await tryWait(`[...document.querySelectorAll('main p')].some((p) => p.textContent.trim() === "Pending corrections")`, "overview cards");
   const cards = {};
   for (const l of ["Active employees", "Working now", "On a break", "Clocked out today", "Not clocked in today", "Screenshots stored today", "Pending leave requests", "Pending corrections", "Late today", "Absent today"]) cards[l] = await statCard(l);
   check("workflow: overview — Working now 1 (Ana), On a break 1 (Ben), 4 active employees, as seeded",
-    cards["Working now"]?.value === "1" && cards["On a break"]?.value === "1" && cards["Active employees"]?.value === "4" && summary.currentlyWorking === 1 && summary.onBreak === 1 && summary.totalActiveEmployees === 4, JSON.stringify(Object.fromEntries(Object.entries(cards).map(([k, v]) => [k, v?.value]))));
+    cards["Working now"]?.value === "1" && cards["On a break"]?.value === "1" && cards["Active employees"]?.value === "4" && summary.workingNow === 1 && summary.onBreak === 1 && summary.totalMembers === 4, JSON.stringify(Object.fromEntries(Object.entries(cards).map(([k, v]) => [k, v?.value]))));
   check("workflow: overview cards equal the API (clocked out, not clocked in, screenshots, pending leave, pending corrections)",
-    cards["Clocked out today"]?.value === String(summary.clockedOutToday) && cards["Not clocked in today"]?.value === String(summary.notClockedInToday) && cards["Screenshots stored today"]?.value === String(summary.screenshotsStoredToday) && cards["Pending leave requests"]?.value === String(summary.pendingLeaveCount) && cards["Pending corrections"]?.value === String(summary.pendingCorrectionCount) && summary.pendingCorrectionCount === 2,
-    JSON.stringify(summary));
+    cards["Clocked out today"]?.value === String(summary.clockedOut) && cards["Not clocked in today"]?.value === String(summary.notStarted) && cards["Screenshots stored today"]?.value === String(summary.screenshotsStored) && cards["Pending leave requests"]?.value === String(ov.pendingApprovals.leave) && cards["Pending corrections"]?.value === String(ov.pendingApprovals.corrections) && ov.pendingApprovals.corrections === 2,
+    JSON.stringify(ov.kpis));
   check("workflow: 'Not clocked in today' is not labelled absent; Late/Absent come only from the enabled schedule (and match the daily view)",
     !/^absent/i.test(cards["Not clocked in today"]?.all ?? "absent") && /Not the same as absent/.test(cards["Not clocked in today"]?.all ?? "") && cards["Late today"]?.value === String(todayDaily.summary.LATE) && cards["Absent today"]?.value === String(todayDaily.summary.ABSENT),
     `${cards["Not clocked in today"]?.all?.replace(/\n/g, " | ")} · late ${cards["Late today"]?.value} absent ${cards["Absent today"]?.value}`);
