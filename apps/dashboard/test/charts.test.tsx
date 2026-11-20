@@ -42,6 +42,18 @@ test("BarChart: single series has no legend; long labels truncated with full <ti
   assertNoBareHex(html);
 });
 
+test("BarChart: many categories × series keep positive bar widths and thin the x labels", () => {
+  const data = Array.from({ length: 200 }, (_, i) => ({ label: `Day ${i}`, values: [1, 2, 3] }));
+  const html = renderToStaticMarkup(<BarChart label="Long range" series={WORKLOAD} data={data} />);
+  assert.equal(count(html, "data-bar"), 600);
+  assert.ok(!html.includes("NaN"));
+  // Every bar's H segment runs left → right (no negative width).
+  for (const [, x0, x1] of html.matchAll(/Q (-?[\d.]+) [\d.]+ (-?[\d.]+) [\d.]+ H/g)) assert.ok(Number(x1) >= Number(x0));
+  const labels = count(html, 'text-anchor="middle"');
+  assert.ok(labels > 0 && labels < 200, `x labels thinned, got ${labels}`);
+  assert.equal(count(html, '<th scope="row">Day '), 200); // full labels still in the table
+});
+
 test("BarChart: empty and all-zero show a message, not a blank box", () => {
   const empty = renderToStaticMarkup(<BarChart label="Workload" series={WORKLOAD} data={[]} empty="No workload yet." />);
   assert.match(empty, /data-chart-empty/);

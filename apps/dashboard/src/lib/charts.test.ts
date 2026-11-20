@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import {
   arcPath, categorical, donutSlices, formatCompact, formatDurationMs, formatMinutes, formatPercent, hourTicks,
@@ -15,6 +16,12 @@ test("safe clamps NaN, infinities, negatives and non-numbers to 0", () => {
 test("categorical colours are CSS variables with fallbacks, never cycled past 8", () => {
   assert.equal(categorical(0), "var(--chart-1, #2a78d6)");
   assert.match(categorical(7), /^var\(--chart-8, #[0-9a-f]{6}\)$/);
+  // Fallbacks mirror the light --chart-N tokens in globals.css.
+  const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
+  for (let i = 0; i < 8; i++) {
+    const token = css.match(new RegExp(`--chart-${i + 1}:\\s*(#[0-9a-fA-F]{6})`))?.[1];
+    assert.equal(categorical(i), `var(--chart-${i + 1}, ${token})`);
+  }
   assert.equal(categorical(8), OTHER_COLOR);
   assert.equal(categorical(-1), OTHER_COLOR);
 });
