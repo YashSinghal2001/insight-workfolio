@@ -133,13 +133,16 @@ test("each filter alone", async () => {
   assert.deepEqual((await list("&role=EMPLOYEE")).codes, ["BOTH", "HEAD", "MAC", "WIN"]);
   assert.deepEqual((await list("&platform=macos")).codes, ["BOTH", "MAC"]);
   assert.deepEqual((await list("&platform=windows")).codes, ["BOTH", "WIN"], "HEAD's revoked Windows device does not count");
-  assert.deepEqual((await list("&appVersion=0.2.1")).codes, ["BOTH", "WIN"]);
+  // BOTH has 0.2.1 (checked an hour ago) and 0.3.0 (5 min ago): it matches only the shown, latest version.
+  assert.deepEqual((await list("&appVersion=0.2.1")).codes, ["WIN"]);
+  assert.deepEqual((await list("&appVersion=0.3.0")).codes, ["BOTH", "MAC"]);
   assert.deepEqual((await list("&appVersion=0.1.0")).codes, [], "revoked device's version does not count");
 });
 
 test("combinations AND together, with search and pagination totals", async () => {
   assert.deepEqual((await list(`&teamId=${alpha}&platform=windows`)).codes, ["BOTH"]);
   assert.deepEqual((await list(`&teamId=${beta}&appVersion=0.3.0`)).codes, ["BOTH"]);
+  assert.deepEqual((await list(`&teamId=${beta}&appVersion=0.2.1`)).codes, ["WIN"]);
   assert.deepEqual((await list("&platform=macos&appVersion=0.3.0&role=EMPLOYEE")).codes, ["BOTH", "MAC"]);
   assert.deepEqual((await list(`&q=win&teamId=${beta}`)).codes, ["WIN"]);
   assert.deepEqual((await list("&role=ADMIN&platform=macos")).codes, []);
@@ -153,6 +156,12 @@ test("team head: scope unchanged; own team filter ok; other or unknown team → 
   assert.deepEqual((await list("", self)).codes, ["BOTH", "HEAD", "MAC"]);
   assert.deepEqual((await list(`&teamId=${alpha}&platform=windows`, self)).codes, ["BOTH"]);
   assert.deepEqual((await list("&platform=windows", self)).codes, ["BOTH"], "never beyond the head's scope");
+  // BOTH is in Alpha (headed) and Beta: the head sees only Alpha, in the list and the single read; an admin sees both.
+  const mine = (await list("", self)).body.items.find((e: { employeeCode: string }) => e.employeeCode === "BOTH");
+  assert.deepEqual(mine.teams, [{ id: alpha, name: "Alpha" }]);
+  assert.deepEqual((await api(`/employees/${both.id}`, self)).body.teams, [{ id: alpha, name: "Alpha" }]);
+  assert.equal((await api(`/employees/${both.id}`, { cookie: admin })).body.teams.length, 2);
+  assert.doesNotMatch((await api("/employees?pageSize=100", self)).text, new RegExp(beta), "no other team id leaks");
   assert.equal((await list(`&teamId=${beta}`, self)).status, 404);
   assert.equal((await list(`&teamId=${randomUUID()}`, self)).status, 404);
   assert.equal((await list(`&teamId=${randomUUID()}`)).status, 404, "admin + unknown team");

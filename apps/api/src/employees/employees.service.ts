@@ -21,12 +21,16 @@ import { accountAudit, employeeReadAudit } from "../audit/account-audit.js";
 import type { AuthContext } from "../auth/auth.service.js";
 import { RateLimiter } from "../auth/crypto.js";
 import { setupLink, setupTokenStatements } from "../auth/setup-token.js";
-import { assertTeamReadable, canReadEmployee, scopeSql, teamFilterSql } from "../common/scope.js";
+import { assertTeamReadable, canReadEmployee, readScope, scopeSql, teamFilterSql } from "../common/scope.js";
 import { DATABASE } from "../database/database.module.js";
 import { DEVICE_COLUMNS, toDevice } from "../devices/devices.service.js";
 import type { Env } from "../config/env.js";
 import { assertCanDisable } from "../roles/roles.service.js";
 import { deliverInvitation, INVITATION_TRANSPORT, type InvitationTransport, invitationEmail, RESEND_COOLDOWN_MS } from "./invitations.js";
+
+/** Desktop version of the employee's most recently checked non-revoked device: the column and the appVersion filter. */
+const APP_VERSION = `(SELECT s.installed_version FROM devices d JOIN desktop_update_status s ON s.device_id = d.id
+            WHERE d.employee_id = p.id AND d.revoked_at IS NULL ORDER BY s.last_check_at DESC, d.id LIMIT 1)`;
 
 // password_hash is reduced to a boolean in SQL so the hash never leaves the database.
 const SELECT = `
@@ -38,8 +42,7 @@ const SELECT = `
          (SELECT json_group_array(json_object('id', tt.id, 'name', tt.name)) FROM team_members tm JOIN teams tt ON tt.id = tm.team_id
             WHERE tm.employee_id = p.id AND tt.active = 1) AS teams_json,
          (SELECT group_concat(DISTINCT d.platform) FROM devices d WHERE d.employee_id = p.id AND d.revoked_at IS NULL) AS platforms,
-         (SELECT s.installed_version FROM devices d JOIN desktop_update_status s ON s.device_id = d.id
-            WHERE d.employee_id = p.id AND d.revoked_at IS NULL ORDER BY s.last_check_at DESC LIMIT 1) AS app_version
+         ${APP_VERSION} AS app_version
   FROM employee_profiles p JOIN users u ON u.id = p.user_id
   LEFT JOIN account_invitations i ON i.id = (SELECT id FROM account_invitations WHERE user_id = u.id ORDER BY created_at DESC, rowid DESC LIMIT 1)
   LEFT JOIN account_setup_tokens t ON t.id = i.setup_token_id`;
@@ -168,7 +171,7 @@ export class EmployeesService {
       args.push(platform);
     }
     if (appVersion) {
-      conditions.push("EXISTS (SELECT 1 FROM devices d JOIN desktop_update_status s ON s.device_id = d.id WHERE d.employee_id = p.id AND d.revoked_at IS NULL AND s.installed_version = ?)");
+      conditions.push(`${APP_VERSION} = ?`);
       args.push(appVersion);
     }
     const team = teamFilterSql(teamId, "p.id");
@@ -182,7 +185,16 @@ export class EmployeesService {
       ],
       "read",
     );
-    return { items: rows!.rows.map(toEmployee), total: Number(count!.rows[0]!.n), page, pageSize };
+    const items = rows!.rows.map(toEmployee);
+    return { items: caller ? await this.ownTeamsOnly(caller, permission, items) : items, total: Number(count!.rows[0]!.n), page, pageSize };
+  }
+
+  /** A team head ("team" scope) sees only the teams they head in `teams`, never the names of a member's other teams. */
+  private async ownTeamsOnly(caller: AuthContext, permission: Permission, employees: Employee[]): Promise<Employee[]> {
+    if (readScope(caller, permission) !== "team") return employees;
+    const { rows } = await this.db.execute({ sql: "SELECT id FROM teams WHERE head_user_id = ? AND active = 1", args: [caller.id] });
+    const headed = new Set(rows.map((t) => String(t.id)));
+    return employees.map((e) => ({ ...e, teams: e.teams.filter((t) => headed.has(t.id)) }));
   }
 
   /**
@@ -268,7 +280,7 @@ export class EmployeesService {
     if (!employee || (employee.userId !== caller.id && !(await canReadEmployee(this.db, caller, "employees:read", id)))) {
       throw new NotFoundException("Employee not found");
     }
-    return employee;
+    return employee.userId === caller.id ? employee : (await this.ownTeamsOnly(caller, "employees:read", [employee]))[0]!;
   }
 
   async devicesForCaller(id: string, caller: AuthContext): Promise<Device[]> {
