@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import type { AttendanceSession } from "@workfolio/shared";
+import { setText } from "../src/platform.ts";
 import { staleClockInSince } from "../src/sync.ts";
 
 const open = (clockInAt: string, clockOutAt: string | null = null) => ({
@@ -45,7 +46,21 @@ test("not flagged: clocked out, a closed session, no session; on a break is stil
 });
 
 test("the banner exists in the window and nothing is clocked out or corrected automatically", () => {
-  assert.match(readFileSync(new URL("../index.html", import.meta.url), "utf8"), /id="att-stale" class="notice" role="alert" hidden/);
+  assert.match(readFileSync(new URL("../index.html", import.meta.url), "utf8"), /id="att-stale" class="notice" role="status" hidden/);
   const main = readFileSync(new URL("../src/main.ts", import.meta.url), "utf8");
-  assert.ok(main.includes("You are still clocked in since ${formatTime(staleSince)}. Clock out, then request a correction of the real end time."));
+  assert.ok(main.includes("setText($(\"#att-stale\"), `You are still clocked in since ${formatTime(staleSince)}. Clock out, then request a correction of the real end time."));
+});
+
+test("live regions are rewritten only when their text changes (render runs every second)", () => {
+  let writes = 0;
+  let value: string | null = "";
+  const el = { get textContent() { return value; }, set textContent(v) { writes++; value = v; } };
+  assert.equal(setText(el, "A"), true);
+  assert.equal(setText(el, "A"), false);
+  assert.equal(setText(el, "A"), false);
+  assert.equal(setText(el, "B"), true);
+  assert.equal(writes, 2);
+  const main = readFileSync(new URL("../src/main.ts", import.meta.url), "utf8");
+  assert.ok(main.includes('setText($("#device-blocked-text"), blocked ?? "")'));
+  assert.ok(!/\$\("#att-stale"\)\.textContent =/.test(main), "the stale notice is never rewritten directly");
 });

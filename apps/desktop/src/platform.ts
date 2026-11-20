@@ -86,3 +86,13 @@ export function applyStaticWording(w: Wording, byId: (id: string) => { textConte
 let current: Platform = "macos";
 export const setPlatform = (p: Platform) => void (current = p);
 export const words = (): Wording => wordingFor(current);
+
+/**
+ * Writes `text` only when it differs. render() runs every second; rewriting a live region (role alert/status)
+ * with the same text makes screen readers announce it again. Returns whether it changed.
+ */
+export function setText(el: { textContent: string | null }, text: string): boolean {
+  if (el.textContent === text) return false;
+  el.textContent = text;
+  return true;
+}
