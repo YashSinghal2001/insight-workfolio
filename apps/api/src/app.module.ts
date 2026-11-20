@@ -13,6 +13,8 @@ import { RetentionService } from "./activity/retention.service.js";
 import { ActivityCategoriesService } from "./activity/categories.service.js";
 import { AuditController } from "./audit/audit.controller.js";
 import { AuditService } from "./audit/audit.service.js";
+import { AnomaliesController } from "./attendance/anomalies.controller.js";
+import { AnomaliesService } from "./attendance/anomalies.service.js";
 import { AttendanceController } from "./attendance/attendance.controller.js";
 import { AttendanceService } from "./attendance/attendance.service.js";
 import { CorrectionsController } from "./attendance/corrections.controller.js";
@@ -102,13 +104,14 @@ import { NotificationsService } from "./notifications/notifications.service.js";
     }),
     DatabaseModule,
   ],
-  controllers: [AlertsController, HealthController, AuthController, EmployeesController, DevicesController, AttendanceController, CorrectionsController, ActivityController, MonitoringSettingsController, ScreenshotsController, ScreenshotSettingsController, TimelapseController, LeaveController, HolidaysController, TeamsController, ProjectsController, TaskTimeController, ReportsController, WebsitesController, RolesController, AuditController, ScheduleSettingsController, DailyAttendanceController, EmployeeTrackingController, GoogleDriveOAuthController, OneDriveController, DesktopUpdatesController, NotificationsController],
+  controllers: [AlertsController, HealthController, AuthController, EmployeesController, DevicesController, AttendanceController, CorrectionsController, ActivityController, MonitoringSettingsController, ScreenshotsController, ScreenshotSettingsController, TimelapseController, LeaveController, HolidaysController, TeamsController, ProjectsController, TaskTimeController, ReportsController, WebsitesController, RolesController, AuditController, ScheduleSettingsController, DailyAttendanceController, EmployeeTrackingController, GoogleDriveOAuthController, OneDriveController, DesktopUpdatesController, NotificationsController, AnomaliesController],
   providers: [
     AlertsService,
     AuthService,
     EmployeesService,
     DevicesService,
     AttendanceService,
+    AnomaliesService,
     TimesheetService,
     CorrectionsService,
     EmployeeLocks,
