@@ -3,7 +3,8 @@
 //  - resolve the `@/` alias to src/ and extensionless relative imports (.ts, .tsx, /index.ts[x]), as Next does;
 //  - transpile .ts/.tsx to ESM with the installed `typescript` (jsx: react-jsx). Types are not checked here:
 //    `pnpm typecheck` does that.
-//  - serve `react/jsx-runtime` (CommonJS whose named exports Node cannot detect) through an ESM shim.
+//  - serve `react/jsx-runtime` (CommonJS whose named exports Node cannot detect) through an ESM shim;
+//  - resolve bare `next/<name>` (next has no exports map, e.g. `next/link`, `next/navigation`) to its CJS entry `next/<name>.js`.
 import { registerHooks } from "node:module";
 import { readFileSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -27,6 +28,7 @@ registerHooks({
   resolve(specifier, context, next) {
     if (context.conditions?.includes("require")) return next(specifier, context); // CommonJS: Node's own rules
     if (specifier === "react/jsx-runtime") return { url: JSX_SHIM, shortCircuit: true };
+    if (/^next\/[\w-]+$/.test(specifier)) return next(`${specifier}.js`, context);
     const base = specifier.startsWith("@/")
       ? new URL(specifier.slice(2), SRC).href
       : /^\.{0,2}\//.test(specifier) && context.parentURL?.startsWith("file:")

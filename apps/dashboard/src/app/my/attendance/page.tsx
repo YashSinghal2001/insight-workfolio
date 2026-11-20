@@ -18,16 +18,16 @@ import {
 import { DataTable, EmptyState, PageHeader, Pagination, StatCard, StatGrid, StatusBadge, SuccessNotice } from "@/components/kit";
 import { dayLabel, timeIn, UpdatedAt, useApi, useMe } from "@/components/my-ui";
 import { RangePicker, type Range } from "@/components/range-picker";
-import { Card, Notice } from "@/components/ui";
+import { Card } from "@/components/ui";
 import { CORRECTION_TYPE_LABEL as TYPE_LABEL, CorrectionForm } from "../_components/correction-form";
 import { Loaded } from "../_components/states";
+import { AttendanceCalendar } from "../_components/attendance-calendar";
+import { dateTime, MissingClockOutBanner } from "../_components/missing-clock-out-banner";
+import { stillClockedInSince } from "../_lib/attendance";
 
 const PAGE_SIZE = 100;
 const FIELD_LABEL: Record<string, string> = { clockInAt: "Clock-in", clockOutAt: "Clock-out", startedAt: "Break start", endedAt: "Break end", breakEndedAt: "Break end" };
 const STATUS = { PENDING: { label: "Pending", tone: "warning" }, APPROVED: { label: "Approved", tone: "success" }, REJECTED: { label: "Rejected", tone: "danger" } } as const;
-
-/** Date and time in the employee's zone, e.g. "27 Oct 2026, 09:05". */
-const dateTime = (iso: string, timeZone: string) => new Intl.DateTimeFormat("en-GB", { dateStyle: "medium", timeStyle: "short", timeZone }).format(new Date(iso));
 
 /** Own attendance, timesheet and correction requests. Read-only: recorded by the desktop app. */
 export default function MyAttendancePage() {
@@ -45,10 +45,20 @@ export default function MyAttendancePage() {
   const history = useApi<Paginated<AttendanceSession>>(`/attendance/history?from=${range.from}&to=${range.to}&page=${historyPage}&pageSize=${PAGE_SIZE}`);
   const corrections = useApi<Paginated<CorrectionRequest>>(`/attendance/corrections?mine=true&page=${correctionsPage}&pageSize=${PAGE_SIZE}`);
   const [ok, setOk] = useState<string | null>(null);
+  // Bumped by the banner (or ?correct=missing-clock-out from /my): remounts the form pre-filled as a missing clock-out.
+  const [prefill, setPrefill] = useState(() => (typeof window !== "undefined" && new URLSearchParams(window.location.search).get("correct") === "missing-clock-out" ? 1 : 0));
+  const stale = current.load.state === "ready" && stillClockedInSince(current.load.data, tz) ? current.load.data.session : null;
 
   return (
     <div className="flex flex-col gap-6">
       <PageHeader title="My attendance" description={`Times are shown in your time zone (${tz}).`} />
+      {current.load.state === "ready" && (
+        <MissingClockOutBanner
+          current={current.load.data}
+          tz={tz}
+          action={<button type="button" className="font-medium underline" onClick={() => setPrefill((n) => n + 1)}>Request a correction</button>}
+        />
+      )}
       <p role="note" className="rounded-lg border border-border bg-surface px-4 py-3 text-sm">
         <strong>You clock in, take breaks and clock out in the Insight Workfolio desktop app on your work computer, not on this website.</strong> This page shows what the app recorded. It cannot be changed here; to fix a mistake, request a correction below. Nothing changes until an administrator approves it.
       </p>
@@ -57,6 +67,10 @@ export default function MyAttendancePage() {
         <Loaded load={current.load} reload={current.reload} label="your attendance state">
           {(c) => <CurrentState current={c} tz={tz} />}
         </Loaded>
+      </Card>
+
+      <Card title="Monthly calendar">
+        <AttendanceCalendar tz={tz} />
       </Card>
 
       <Card title="Timesheet">
@@ -80,7 +94,9 @@ export default function MyAttendancePage() {
           <Loaded load={history.load} reload={history.reload} label="your shifts">
             {(h) => (
               <CorrectionForm
-                sessions={h.items}
+                key={`${prefill}:${prefill && stale ? stale.id : ""}`}
+                initial={prefill && stale ? { type: "MISSING_CLOCK_OUT", sessionId: stale.id } : undefined}
+                sessions={stale && !h.items.some((x) => x.id === stale.id) ? [stale, ...h.items] : h.items}
                 tz={tz}
                 onCreated={(r) => {
                   setOk(`Correction requested (${TYPE_LABEL[r.type]}). An administrator will review it; your records change only if it is approved.`);
@@ -115,12 +131,6 @@ function CurrentState({ current, tz }: { current: AttendanceCurrent; tz: string 
   return (
     <div className="flex flex-col gap-3">
       <p data-testid="my-attendance-state" className="text-sm font-medium">{text}</p>
-      {current.missingClockOut && s && (
-        <Notice tone="warning">
-          It looks like you forgot to clock out: the shift you started on {dateTime(s.clockInAt, tz)} is still open, so it is not counted in your worked time.
-          {" "}<a href="#request-correction" className="underline">Request a correction</a> below (choose “Missing clock-out”) to add the time you stopped; an administrator reviews it.
-        </Notice>
-      )}
       {current.state === "CLOCKED_OUT" && <p className="text-xs text-muted">To clock in, open the Insight Workfolio desktop app on your work computer.</p>}
     </div>
   );

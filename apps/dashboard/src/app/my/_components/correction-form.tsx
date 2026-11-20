@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import {
   createCorrectionSchema,
   localDate,
@@ -36,9 +36,25 @@ const EMPTY: Record<Times, string> = { clockInAt: "", clockOutAt: "", breakEnded
  * scopes it to the caller's own profile). Times are entered in the employee's time zone and sent as UTC;
  * the shared schema is checked before sending and the server re-checks against the records.
  */
-export function CorrectionForm({ sessions, tz, onCreated }: { sessions: AttendanceSession[]; tz: string; onCreated: (r: CorrectionRequest) => void }) {
-  const [type, setType] = useState<CorrectionType>("ATTENDANCE_TIME");
-  const [sessionId, setSessionId] = useState("");
+export function CorrectionForm({
+  sessions,
+  tz,
+  onCreated,
+  initial,
+}: {
+  sessions: AttendanceSession[];
+  tz: string;
+  onCreated: (r: CorrectionRequest) => void;
+  /** Pre-filled request (e.g. from the missing clock-out banner); the form scrolls into view on mount. */
+  initial?: { type: CorrectionType; sessionId: string };
+}) {
+  const [type, setType] = useState<CorrectionType>(initial?.type ?? "ATTENDANCE_TIME");
+  const [sessionId, setSessionId] = useState(initial?.sessionId ?? "");
+  const formRef = useRef<HTMLFormElement>(null);
+  const prefilled = !!initial;
+  useEffect(() => {
+    if (prefilled) formRef.current?.scrollIntoView({ block: "start" });
+  }, [prefilled]);
   const [breakId, setBreakId] = useState("");
   const [times, setTimes] = useState(EMPTY);
   const [reason, setReason] = useState("");
@@ -145,7 +161,7 @@ export function CorrectionForm({ sessions, tz, onCreated }: { sessions: Attendan
       : null;
 
   return (
-    <form aria-label="Request a correction" onSubmit={submit} noValidate className="flex flex-col gap-4">
+    <form ref={formRef} aria-label="Request a correction" onSubmit={submit} noValidate className="flex flex-col gap-4">
       <p className="text-sm text-muted">
         Nothing changes until an administrator approves the request. Times are in your time zone ({tz}). Shifts listed are from the period chosen for the timesheet above.
       </p>
