@@ -57,21 +57,20 @@ export function reasonText(reason: MissingClockOutReason, t: AnomalyThresholds):
   }
 }
 
-/** "just now", "12 min ago", "6 h ago", "3 days ago" (future instants count as just now). */
-export function relativeTime(iso: string, now: number): string {
-  const min = Math.floor((now - Date.parse(iso)) / 60_000);
-  if (min < 1) return "just now";
-  if (min < 60) return `${min} min ago`;
-  const h = Math.floor(min / 60);
-  if (h < 24) return `${h} h ago`;
-  const d = Math.floor(h / 24);
-  return `${d} day${d === 1 ? "" : "s"} ago`;
+/** Elapsed time: "just now", "12 m ago", "3 h 44 m ago", "6 h ago", "2 d ago" (negative = clock skew = just now). */
+export function ago(ms: number): string {
+  const m = Math.floor(Math.max(0, ms) / 60_000);
+  if (m < 1) return "just now";
+  if (m < 60) return `${m} m ago`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return m % 60 ? `${h} h ${m % 60} m ago` : `${h} h ago`;
+  return `${Math.floor(h / 24)} d ago`;
 }
 
 /** Device freshness: "Online" only when the API says so; otherwise when it was last seen. */
 export function lastSeenLabel(online: boolean, lastSeenAt: string | null, now: number): string {
   if (online) return "Online";
-  return lastSeenAt ? `Last seen ${relativeTime(lastSeenAt, now)}` : "Device never seen";
+  return lastSeenAt ? `Last seen ${ago(now - Date.parse(lastSeenAt))}` : "Never seen";
 }
 
 /** How the last attendance event reached the server (not whether the device is online now). */

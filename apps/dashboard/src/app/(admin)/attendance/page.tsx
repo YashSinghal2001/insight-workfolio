@@ -22,6 +22,7 @@ import { DataTable, EmptyState, ErrorState, FilterBar, PageHeader, Pagination, S
 import { formatInZone, inputClass, secondaryButtonClass } from "@/components/ui";
 import { api, errorMessage } from "@/lib/api";
 import { ATTENDANCE_TABS, eventSourceLabel, lastSeenLabel, parseAttendanceTab, type AttendanceTab } from "@/lib/attendance-ui";
+import { pollWhileVisible } from "@/lib/poll";
 import { LateTab } from "./_components/late";
 import { MissingTab } from "./_components/missing";
 import { MonthlyTab } from "./_components/monthly";
@@ -93,7 +94,7 @@ function Attendance() {
         {tab === "daily" && <Daily key={`${team}-${date}`} teamId={teamId} date={date} />}
         {tab === "monthly" && <MonthlyTab key={team} teamId={teamId} />}
         {tab === "late" && <LateTab key={team} teamId={teamId} />}
-        {tab === "missing" && <MissingTab teamId={teamId} />}
+        {tab === "missing" && <MissingTab key={team} teamId={teamId} />}
       </Tabs>
     </div>
   );
@@ -106,21 +107,16 @@ function Live({ teamId }: { teamId: string | null }) {
   const [now, setNow] = useState(() => Date.now());
 
   useEffect(() => {
-    let active = true;
     const params = new URLSearchParams({ page: String(query.page), pageSize: String(PAGE_SIZE) });
     if (query.q) params.set("q", query.q);
     if (teamId) params.set("teamId", teamId);
-    const load = () =>
-      api<Paginated<LiveRow>>(`/attendance/overview?${params}`).then(
-        (r) => active && (setData(r), setError(null), setNow(Date.now())),
-        (e) => active && setError(errorMessage(e)),
-      );
-    load();
-    const timer = setInterval(load, REFRESH_MS);
-    return () => {
-      active = false;
-      clearInterval(timer);
-    };
+    // Every 30 s while the tab is visible; only the newest response is applied.
+    return pollWhileVisible(
+      () => api<Paginated<LiveRow>>(`/attendance/overview?${params}`),
+      (r) => (setData(r), setError(null), setNow(Date.now())),
+      (e) => setError(errorMessage(e)),
+      REFRESH_MS,
+    );
   }, [query, teamId]);
 
   function onSearch(e: FormEvent<HTMLFormElement>) {

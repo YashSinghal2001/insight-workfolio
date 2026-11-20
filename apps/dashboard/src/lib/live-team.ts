@@ -8,6 +8,7 @@ import {
   type OverviewFreshness,
 } from "@workfolio/shared";
 import type { Tone } from "@/components/kit";
+import { ago, lastSeenLabel } from "@/lib/attendance-ui";
 
 export type MemberRow = AttendanceOverviewRow & OverviewFreshness;
 
@@ -59,16 +60,6 @@ export interface MemberCard {
   missingClockOut: boolean;
 }
 
-/** "just now", "12 m ago", "3 h 44 m ago", "6 h ago", "2 d ago". */
-export function ago(ms: number): string {
-  const m = Math.floor(Math.max(0, ms) / 60_000);
-  if (m < 1) return "just now";
-  if (m < 60) return `${m} m ago`;
-  const h = Math.floor(m / 60);
-  if (h < 24) return m % 60 ? `${h} h ${m % 60} m ago` : `${h} h ago`;
-  return `${Math.floor(h / 24)} d ago`;
-}
-
 export const clockTime = (iso: string, timeZone: string) =>
   new Intl.DateTimeFormat("en-GB", { hour: "2-digit", minute: "2-digit", hourCycle: "h23", timeZone }).format(new Date(iso));
 
@@ -110,7 +101,7 @@ export function describeMember(row: MemberRow, extras: MemberExtras, now: number
   return {
     state,
     statusLine,
-    presence: row.online === true ? "Online" : row.lastSeenAt ? `Last seen ${ago(seenMs)}` : "Never seen",
+    presence: lastSeenLabel(row.online === true, row.lastSeenAt, now),
     clockIn: touchesToday ? clockTime(s.clockInAt, tz) : null,
     workedMs,
     scheduledMs: extras.scheduled === false ? null : DEFAULT_POLICY.scheduledDailyMinutes * 60_000,
