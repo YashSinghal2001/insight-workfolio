@@ -201,8 +201,8 @@ export class NotificationRulesService implements OnModuleInit, OnModuleDestroy {
   }
 
   /** ponytail: account_audit has no notification resource type (CHECK); the rows use ACCOUNT with the recipient as target. */
-  private audit(admin: AuthContext, action: string, targetUserId: string | null, metadata: Record<string, string | null>): InStatement {
-    return accountAudit({ actorUserId: admin.id, targetUserId, action: action as AccountAuditAction, resourceType: "ACCOUNT", resourceId: targetUserId, metadata });
+  private audit(admin: AuthContext, action: AccountAuditAction, targetUserId: string | null, metadata: Record<string, string | null>): InStatement {
+    return accountAudit({ actorUserId: admin.id, targetUserId, action, resourceType: "ACCOUNT", resourceId: targetUserId, metadata });
   }
 
   // ---- Producers -------------------------------------------------------------------------------
