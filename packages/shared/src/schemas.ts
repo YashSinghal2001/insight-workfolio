@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { isVersion } from "./desktop-updates.js";
 import { PLATFORM_ROLES, ROLES, type PlatformRole } from "./roles.js";
 
 export const roleSchema = z.enum(ROLES);
@@ -98,6 +99,14 @@ export const listEmployeesQuerySchema = z.object({
   q: z.string().trim().max(100).optional(),
   page: z.coerce.number().int().min(1).max(10_000).default(1),
   pageSize: z.coerce.number().int().min(1).max(100).default(20),
+  /** Active members of this team (404 when the caller may not read it). */
+  teamId: z.uuid().optional(),
+  /** Identity: Super Admin, Admin or Employee. */
+  role: z.enum(PLATFORM_ROLES).optional(),
+  /** Has a non-revoked device on this platform. */
+  platform: z.enum(["macos", "windows"]).optional(),
+  /** A non-revoked device last reported this installed desktop version. */
+  appVersion: z.string().trim().refine(isVersion, "Use MAJOR.MINOR.PATCH, for example 0.3.0").optional(),
 });
 export type ListEmployeesQuery = z.infer<typeof listEmployeesQuerySchema>;
 

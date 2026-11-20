@@ -15,12 +15,13 @@ import {
   type Paginated,
   type SetupToken,
   type UpdateEmployeeInput,
+  platformRoleOf,
 } from "@workfolio/shared";
 import { accountAudit, employeeReadAudit } from "../audit/account-audit.js";
 import type { AuthContext } from "../auth/auth.service.js";
 import { RateLimiter } from "../auth/crypto.js";
 import { setupLink, setupTokenStatements } from "../auth/setup-token.js";
-import { canReadEmployee, scopeSql } from "../common/scope.js";
+import { assertTeamReadable, canReadEmployee, scopeSql, teamFilterSql } from "../common/scope.js";
 import { DATABASE } from "../database/database.module.js";
 import { DEVICE_COLUMNS, toDevice } from "../devices/devices.service.js";
 import type { Env } from "../config/env.js";
@@ -29,11 +30,16 @@ import { deliverInvitation, INVITATION_TRANSPORT, type InvitationTransport, invi
 
 // password_hash is reduced to a boolean in SQL so the hash never leaves the database.
 const SELECT = `
-  SELECT p.id, p.user_id, u.email, u.role, u.status, u.password_hash IS NOT NULL AS password_set,
+  SELECT p.id, p.user_id, u.email, u.role, u.admin_title, u.status, u.password_hash IS NOT NULL AS password_set,
          p.employee_code, p.full_name, p.timezone, p.employment_status, p.created_at,
          max(p.updated_at, u.updated_at) AS updated_at,
          i.id AS inv_id, i.recipient AS inv_recipient, i.provider AS inv_provider, i.status AS inv_status, i.attempts AS inv_attempts,
-         i.sent_at AS inv_sent_at, i.last_error AS inv_last_error, i.created_at AS inv_created_at, t.expires_at AS inv_expires_at, t.used_at AS inv_used_at
+         i.sent_at AS inv_sent_at, i.last_error AS inv_last_error, i.created_at AS inv_created_at, t.expires_at AS inv_expires_at, t.used_at AS inv_used_at,
+         (SELECT json_group_array(json_object('id', tt.id, 'name', tt.name)) FROM team_members tm JOIN teams tt ON tt.id = tm.team_id
+            WHERE tm.employee_id = p.id AND tt.active = 1) AS teams_json,
+         (SELECT group_concat(DISTINCT d.platform) FROM devices d WHERE d.employee_id = p.id AND d.revoked_at IS NULL) AS platforms,
+         (SELECT s.installed_version FROM devices d JOIN desktop_update_status s ON s.device_id = d.id
+            WHERE d.employee_id = p.id AND d.revoked_at IS NULL ORDER BY s.last_check_at DESC LIMIT 1) AS app_version
   FROM employee_profiles p JOIN users u ON u.id = p.user_id
   LEFT JOIN account_invitations i ON i.id = (SELECT id FROM account_invitations WHERE user_id = u.id ORDER BY created_at DESC, rowid DESC LIMIT 1)
   LEFT JOIN account_setup_tokens t ON t.id = i.setup_token_id`;
@@ -74,6 +80,10 @@ const toEmployee = (r: Row): Employee => ({
   createdAt: String(r.created_at),
   updatedAt: String(r.updated_at),
   invitation: toInvitation(r),
+  platformRole: platformRoleOf(r.role as Employee["role"], r.admin_title as string | null),
+  teams: (JSON.parse(String(r.teams_json ?? "[]")) as { id: string; name: string }[]).sort((a, b) => a.name.localeCompare(b.name)),
+  platforms: r.platforms == null ? [] : String(r.platforms).split(",").sort(),
+  appVersion: r.app_version == null ? null : String(r.app_version),
 });
 
 /**
@@ -136,19 +146,39 @@ export class EmployeesService {
     return { employee: await this.require(employeeId), ...(sent ? {} : { setup: { token: inv.token, expiresAt: inv.expiresAt } }) };
   }
 
-  /** Without `caller`: every employee (internal use). With it: the caller's data scope (team heads: their teams). */
-  async list({ q, page, pageSize }: ListEmployeesQuery, caller?: AuthContext, permission: Permission = "employees:read"): Promise<Paginated<Employee>> {
-    const like = q ? `%${q.replace(/[\\%_]/g, (c) => `\\${c}`)}%` : null;
+  /**
+   * Without `caller`: every employee (internal use). With it: the caller's data scope (team heads: their teams).
+   * Optional filters (AND): team (active members; a team the caller may not read is a 404), identity, platform and
+   * installed desktop version of a non-revoked device.
+   */
+  async list({ q, page, pageSize, teamId, role, platform, appVersion }: ListEmployeesQuery, caller?: AuthContext, permission: Permission = "employees:read"): Promise<Paginated<Employee>> {
+    if (caller) await assertTeamReadable(this.db, caller, permission, teamId);
+    const conditions: string[] = [];
+    const args: (string | number | null)[] = [];
+    if (q) {
+      const like = `%${q.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
+      conditions.push("(p.full_name LIKE ? ESCAPE '\\' OR u.email LIKE ? ESCAPE '\\' OR p.employee_code LIKE ? ESCAPE '\\')");
+      args.push(like, like, like);
+    }
+    if (role === "EMPLOYEE") conditions.push("u.role = 'EMPLOYEE'");
+    if (role === "ADMIN") conditions.push("u.role = 'ADMIN' AND u.admin_title IS NOT 'SUPER_ADMIN'");
+    if (role === "SUPER_ADMIN") conditions.push("u.role = 'ADMIN' AND u.admin_title = 'SUPER_ADMIN'");
+    if (platform) {
+      conditions.push("EXISTS (SELECT 1 FROM devices d WHERE d.employee_id = p.id AND d.revoked_at IS NULL AND d.platform = ?)");
+      args.push(platform);
+    }
+    if (appVersion) {
+      conditions.push("EXISTS (SELECT 1 FROM devices d JOIN desktop_update_status s ON s.device_id = d.id WHERE d.employee_id = p.id AND d.revoked_at IS NULL AND s.installed_version = ?)");
+      args.push(appVersion);
+    }
+    const team = teamFilterSql(teamId, "p.id");
     const scope = caller ? scopeSql(caller, permission, "p.id") : { sql: "", args: [] };
-    const where = `WHERE (?1 IS NULL OR p.full_name LIKE ?1 ESCAPE '\\' OR u.email LIKE ?1 ESCAPE '\\'
-                   OR p.employee_code LIKE ?1 ESCAPE '\\')${scope.sql.replace("?", "?4")}`;
+    const where = `WHERE 1${conditions.map((c) => ` AND ${c}`).join("")}${team.sql}${scope.sql}`;
+    const whereArgs = [...args, ...team.args, ...scope.args];
     const [rows, count] = await this.db.batch(
       [
-        {
-          sql: `${SELECT} ${where} ORDER BY p.full_name COLLATE NOCASE, p.id LIMIT ?2 OFFSET ?3`,
-          args: [like, pageSize, (page - 1) * pageSize, ...scope.args],
-        },
-        { sql: `SELECT count(*) AS n FROM employee_profiles p JOIN users u ON u.id = p.user_id ${where}`, args: [like, null, null, ...scope.args] },
+        { sql: `${SELECT} ${where} ORDER BY p.full_name COLLATE NOCASE, p.id LIMIT ? OFFSET ?`, args: [...whereArgs, pageSize, (page - 1) * pageSize] },
+        { sql: `SELECT count(*) AS n FROM employee_profiles p JOIN users u ON u.id = p.user_id ${where}`, args: whereArgs },
       ],
       "read",
     );
