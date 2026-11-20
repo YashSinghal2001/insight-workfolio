@@ -25,6 +25,7 @@ const { AppModule } = await import("../dist/app.module.js");
 const { configureApp } = await import("../dist/app.setup.js");
 const { DATABASE } = await import("../dist/database/database.module.js");
 const { hashPassword } = await import("../dist/auth/crypto.js");
+const { SCREENSHOT_STORAGE, StorageError } = await import("../dist/screenshots/storage.js");
 const { DEFAULT_SCREENSHOT_NOTICE_VERSION, SCREENSHOT_EXPORT_LIMITS } = await import("@workfolio/shared");
 
 const ORIGIN = "http://localhost:3000";
@@ -200,7 +201,13 @@ describe("POST /screenshots/export", () => {
     const audits = await exportAudits();
     assert.equal(audits.length, 1);
     assert.equal(audits[0]!.actor_user_id, superAdminId);
-    assert.deepEqual(JSON.parse(String(audits[0]!.metadata)), { count: 3, bytes: shots.reduce((n, s) => n + s.bytes.length, 0), employees: 2 });
+    assert.deepEqual(JSON.parse(String(audits[0]!.metadata)), {
+      count: 3,
+      bytes: shots.reduce((n, s) => n + s.bytes.length, 0),
+      employees: 2,
+      screenshotIds: shots.map((s) => s.id).join(","),
+      screenshotIdsOmitted: 0,
+    });
   });
 
   test("refuses screenshots not stored (409) and selections over the size cap (413) before logging anything", async () => {
@@ -218,6 +225,48 @@ describe("POST /screenshots/export", () => {
     }
     assert.equal((await accessRows(stored.id)).length, 0);
     assert.equal((await exportAudits()).length, before);
+  });
+});
+
+describe("export failures are never a valid-looking archive", () => {
+  test("storage fails on the first file: 502 JSON; on a later file: the connection is aborted (body read fails)", async () => {
+    const e = await employee();
+    const shots = [await shot(e, 40), await shot(e, 30), await shot(e, 20)];
+    const storage = app.get(SCREENSHOT_STORAGE) as { get: (key: string) => Promise<Uint8Array> };
+    const real = storage.get.bind(storage);
+    const failOn = async (key: string) => {
+      storage.get = async (k: string) => {
+        if (k === key) throw new StorageError("synthetic outage");
+        return real(k);
+      };
+    };
+    try {
+      await failOn(shots[0]!.key);
+      const first = await exportZip(shots.map((s) => s.id));
+      assert.equal(first.status, 502);
+      assert.match(await first.text(), /storage is unavailable/i);
+      await failOn(shots[1]!.key);
+      const later = await exportZip(shots.map((s) => s.id));
+      assert.equal(later.status, 200, "headers were already sent");
+      await assert.rejects(later.arrayBuffer(), "the body must not complete");
+    } finally {
+      storage.get = real;
+    }
+    assert.equal((await exportZip(shots.map((s) => s.id))).status, 200, "recovers");
+  });
+
+  test("audit row lists at most 40 ids and counts the rest", async () => {
+    const e = await employee();
+    const shots = [];
+    for (let i = 0; i < 42; i++) shots.push(await shot(e, 100 - i * 2));
+    const res = await exportZip(shots.map((s) => s.id));
+    assert.equal(res.status, 200);
+    await res.arrayBuffer();
+    const meta = JSON.parse(String((await exportAudits()).at(-1)!.metadata));
+    assert.equal(meta.count, 42);
+    assert.equal(meta.screenshotIds.split(",").length, 40);
+    assert.equal(meta.screenshotIdsOmitted, 2);
+    for (const s of shots) assert.equal((await accessRows(s.id)).length, 1, "every file is in the access log");
   });
 });
 

@@ -2,11 +2,11 @@ import { Inject, Injectable } from "@nestjs/common";
 import type { DatabaseClient, InStatement } from "@workfolio/database";
 import { addDays, buildTimelineSegments, zonedToUtc, type ActivityKind, type TeamTimelineQuery, type TeamTimelineResponse } from "@workfolio/shared";
 import { ActivityCategoriesService } from "../activity/categories.service.js";
-import { SESSION_COLUMNS, str, withBreaks } from "../attendance/sessions.js";
+import { ACTIVE_EMPLOYEE, SESSION_COLUMNS, str, withBreaks } from "../attendance/sessions.js";
 import { employeeReadAudit } from "../audit/account-audit.js";
 import type { AuthContext } from "../auth/auth.service.js";
+import { assertTeamReadable, scopeSql, teamFilterSql } from "../common/scope.js";
 import { DATABASE } from "../database/database.module.js";
-import { EmployeesService } from "../employees/employees.service.js";
 
 /**
  * GET /activity/team-timeline: one page of employees (caller's activity:read-all scope, optional team), each with the
@@ -17,12 +17,11 @@ import { EmployeesService } from "../employees/employees.service.js";
 export class TeamTimelineService {
   constructor(
     @Inject(DATABASE) private readonly db: DatabaseClient,
-    private readonly employees: EmployeesService,
     private readonly categories: ActivityCategoriesService,
   ) {}
 
   async timeline(q: TeamTimelineQuery, caller: AuthContext, now = Date.now()): Promise<TeamTimelineResponse> {
-    const page = await this.employees.list({ page: q.page, pageSize: q.pageSize, teamId: q.teamId }, caller, "activity:read-all");
+    const page = await this.activeEmployees(q, caller);
     const generatedAt = new Date(now).toISOString();
     if (!page.items.length) return { items: [], total: page.total, page: q.page, pageSize: q.pageSize, date: q.date, generatedAt };
     const days = new Map(page.items.map((e) => [e.id, [zonedToUtc(`${q.date}T00:00`, e.timezone), zonedToUtc(`${addDays(q.date, 1)}T00:00`, e.timezone)] as const]));
@@ -66,5 +65,25 @@ export class TeamTimelineService {
       return { employee: { id: e.id, fullName: e.fullName, employeeCode: e.employeeCode, timezone: e.timezone }, dayStart, dayEnd, segments };
     });
     return { items, total: page.total, page: q.page, pageSize: q.pageSize, date: q.date, generatedAt };
+  }
+
+  /** Active accounts and employment only (deactivated or terminated people get no row and no audit row), in scope. */
+  private async activeEmployees(q: TeamTimelineQuery, caller: AuthContext) {
+    await assertTeamReadable(this.db, caller, "activity:read-all", q.teamId);
+    const scope = scopeSql(caller, "activity:read-all", "p.id");
+    const team = teamFilterSql(q.teamId, "p.id");
+    const where = `FROM employee_profiles p JOIN users u ON u.id = p.user_id WHERE ${ACTIVE_EMPLOYEE}${scope.sql}${team.sql}`;
+    const args = [...scope.args, ...team.args];
+    const [rows, count] = await this.db.batch(
+      [
+        { sql: `SELECT p.id, p.user_id, p.full_name, p.employee_code, p.timezone ${where} ORDER BY p.full_name COLLATE NOCASE, p.id LIMIT ? OFFSET ?`, args: [...args, q.pageSize, (q.page - 1) * q.pageSize] },
+        { sql: `SELECT count(*) AS n ${where}`, args },
+      ],
+      "read",
+    );
+    return {
+      items: rows!.rows.map((r) => ({ id: String(r.id), userId: String(r.user_id), fullName: String(r.full_name), employeeCode: String(r.employee_code), timezone: String(r.timezone) })),
+      total: Number(count!.rows[0]!.n),
+    };
   }
 }

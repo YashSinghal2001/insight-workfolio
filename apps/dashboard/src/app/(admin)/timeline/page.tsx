@@ -67,7 +67,7 @@ function Timeline() {
       {!current && <SkeletonRows label="timeline" rows={6} />}
       {data &&
         (data.items.length === 0 ? (
-          <EmptyState title="No employees in this view." hint={teamId ? "This team has no active members." : undefined} />
+          <EmptyState title="No active employees in this view." hint="Deactivated and terminated employees are not shown." />
         ) : (
           <section aria-label="Employee timelines" className="overflow-x-auto rounded-lg border border-border bg-surface p-3">
             <div className="flex flex-col gap-5">

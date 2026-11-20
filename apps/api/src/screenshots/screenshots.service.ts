@@ -105,6 +105,15 @@ const toGalleryItem = (r: Row): ScreenshotGalleryItem => ({
   employee: { id: String(r.employee_id), fullName: String(r.full_name), employeeCode: String(r.employee_code), timezone: String(r.timezone) },
   idle: Boolean(r.idle),
 });
+/** Screenshot ids listed in the export audit row (the row is capped at 2000 characters); every id is in the access log. */
+const EXPORT_AUDIT_IDS = 40;
+const exportAuditMetadata = (rows: Row[], bytes: number) => ({
+  count: rows.length,
+  bytes,
+  employees: new Set(rows.map((r) => String(r.employee_id))).size,
+  screenshotIds: rows.slice(0, EXPORT_AUDIT_IDS).map((r) => String(r.id)).join(","),
+  screenshotIdsOmitted: Math.max(0, rows.length - EXPORT_AUDIT_IDS),
+});
 /** Archive entry name: employee code, UTC capture time and id only (never a storage key or path). */
 const exportName = (r: Row) => `screenshot-${String(r.employee_code).replace(/[^A-Za-z0-9_-]/g, "_")}-${String(r.captured_at).replace(/[:.]/g, "-")}-${String(r.id)}.webp`;
 
@@ -470,7 +479,7 @@ export class ScreenshotsService implements OnModuleInit, OnModuleDestroy {
     await this.db.batch(
       [
         ...rows.map((r) => ({ sql: "INSERT INTO screenshot_access_log (id, screenshot_id, user_id, action) VALUES (?, ?, ?, 'VIEW')", args: [randomUUID(), String(r.id), caller.id] })),
-        accountAudit({ actorUserId: caller.id, action: "SCREENSHOTS_EXPORTED", resourceType: "ACCOUNT", resourceId: caller.id, metadata: { count: rows.length, bytes, employees: new Set(rows.map((r) => String(r.employee_id))).size } }),
+        accountAudit({ actorUserId: caller.id, action: "SCREENSHOTS_EXPORTED", resourceType: "ACCOUNT", resourceId: caller.id, metadata: exportAuditMetadata(rows, bytes) }),
       ],
       "write",
     );
