@@ -209,6 +209,8 @@ export const screenshotGallerySchema = z
     from: z.iso.date(),
     to: z.iso.date(),
     tz: timeZoneSchema.default("UTC"),
+    /** `true`: only screenshots captured while the employee was idle (see ScreenshotGalleryItem.idle). */
+    idle: z.stringbool().optional(),
     page: z.coerce.number().int().min(1).max(10_000).default(1),
     pageSize: z.coerce.number().int().min(1).max(60).default(24),
   })
@@ -272,6 +274,11 @@ export interface ScreenshotItem {
 export interface ScreenshotGalleryItem extends ScreenshotItem {
   /** `timezone`: the employee's IANA zone, for showing capture times in their local time. */
   employee: { id: string; fullName: string; employeeCode: string; timezone: string };
+  /**
+   * Captured inside an IDLE activity interval of the employee (no keyboard/mouse input for the idle threshold).
+   * False when no activity data covers the capture (monitoring off, not synced yet, or purged by activity retention).
+   */
+  idle: boolean;
 }
 
 export interface ScreenshotAccess {
@@ -340,6 +347,13 @@ export type ScreenshotDeletionMode = "LOCAL_DEV" | "RECYCLE_BIN" | "PERMANENT";
 /** Super Admin deletion of one screenshot. The reason is stored with the row and shown in the audit view. */
 export const screenshotDeleteSchema = z.strictObject({ reason: z.string().trim().min(3).max(500) });
 export type ScreenshotDeleteRequest = z.infer<typeof screenshotDeleteSchema>;
+
+/** Bulk export (Super Admin): at most this many screenshots and this many registered bytes per ZIP. */
+export const SCREENSHOT_EXPORT_LIMITS = { maxItems: 200, maxBytes: 200 * 1024 * 1024 } as const;
+export const screenshotExportSchema = z.strictObject({
+  ids: z.array(z.uuid()).min(1).max(SCREENSHOT_EXPORT_LIMITS.maxItems).refine((ids) => new Set(ids).size === ids.length, "ids must be unique"),
+});
+export type ScreenshotExportRequest = z.infer<typeof screenshotExportSchema>;
 
 export interface ScreenshotDeleteResponse {
   screenshot: ScreenshotGalleryItem;
