@@ -15,6 +15,7 @@ const ROUTES = {
   "/setup-password": ["Set your password"],
   "/employees": ["Checking your session"],
   "/employees/new": ["Checking your session"],
+  "/live-team": ["Checking your session"],
   "/attendance": ["Checking your session"],
   "/timesheets": ["Checking your session"],
   "/timesheets/00000000-0000-4000-8000-000000000000": ["Checking your session"],

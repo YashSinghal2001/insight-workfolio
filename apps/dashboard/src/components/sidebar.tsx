@@ -10,7 +10,7 @@ import { useAuth } from "@/components/auth-provider";
  * suites (`nav a` text). Settings sub-pages live in the Settings sub-menu (SETTINGS_NAV).
  */
 export const ADMIN_NAV: readonly NavSection[] = [
-  { title: "Realtime", items: [{ label: "Overview", href: "/" }] },
+  { title: "Realtime", items: [{ label: "Overview", href: "/" }, { label: "Live team", href: "/live-team" }] },
   {
     title: "Attendance",
     items: [
