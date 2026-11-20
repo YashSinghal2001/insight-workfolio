@@ -1,6 +1,7 @@
 // Durable upload queues (attendance events, activity intervals): drain FIFO with exponential backoff.
 // No Tauri imports; storage and transport are injected so node tests can drive it.
 import {
+  missingClockOut,
   SYNC_BATCH_MAX,
   transition,
   type AttendanceCurrent,
@@ -184,6 +185,19 @@ export interface Projection {
  * Last server snapshot plus pending events, using the same state machine as the server.
  * Shown as a preview only; the server stays authoritative.
  */
+/** An open shift longer than this is flagged on the desktop (contracts §9: max shift 14 h). */
+export const MAX_SHIFT_MS = 14 * 3_600_000;
+
+/**
+ * When the shown session is open since an earlier local date (employee's zone) or for more than 14 h: its
+ * clock-in instant, else null. Informational only; the employee clocks out and requests a correction.
+ */
+export function staleClockInSince(p: Pick<Projection, "state" | "session">, timeZone: string, now = Date.now()): string | null {
+  const s = p.state === "CLOCKED_OUT" ? null : p.session;
+  if (!s || s.clockOutAt) return null;
+  return missingClockOut(s, timeZone, now) || now - Date.parse(s.clockInAt) > MAX_SHIFT_MS ? s.clockInAt : null;
+}
+
 export function project(current: AttendanceCurrent | null, queued: QueuedEvent[]): Projection | null {
   if (!current) return null;
   let state = current.state;

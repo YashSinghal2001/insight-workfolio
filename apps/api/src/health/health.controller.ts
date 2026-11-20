@@ -2,6 +2,7 @@ import { Controller, Get, HttpStatus, Inject, Logger, Res } from "@nestjs/common
 import { pingDatabase, type DatabaseClient } from "@workfolio/database";
 import type { HealthResponse, ReadinessCheck, ReadinessResponse } from "@workfolio/shared";
 import type { Response } from "express";
+import { readFileSync } from "node:fs";
 import { Public } from "../auth/auth.guard.js";
 import { DATABASE } from "../database/database.module.js";
 import { FILE_STORAGE, type FileStorage } from "../screenshots/storage.js";
@@ -9,6 +10,10 @@ import { FILE_STORAGE, type FileStorage } from "../screenshots/storage.js";
 const READY_TIMEOUT_MS = 2000;
 /** Never written; a lookup proves the provider authenticates and answers (Graph: token + item GET; Drive: token + list). */
 const STORAGE_PROBE_KEY = "readiness-probe";
+/** dist/health/ -> apps/api/package.json (the same relative path from src/health/). */
+const VERSION = (JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8")) as { version: string }).version;
+/** Only a plain hex commit id is echoed back; anything else in the env is not exposed. */
+const COMMIT = /^[0-9a-f]{7,40}$/;
 
 @Public()
 @Controller({ version: "1" })
@@ -23,7 +28,14 @@ export class HealthController {
   /** Liveness: the process is up and serving requests. Never touches dependencies. */
   @Get("health")
   health(): HealthResponse {
-    return { status: "ok", uptimeSeconds: Math.round(process.uptime()), timestamp: new Date().toISOString() };
+    const commit = process.env.WORKFOLIO_BUILD_COMMIT ?? "";
+    return {
+      status: "ok",
+      uptimeSeconds: Math.round(process.uptime()),
+      timestamp: new Date().toISOString(),
+      version: VERSION,
+      commit: COMMIT.test(commit) ? commit : null,
+    };
   }
 
   /** Readiness: required dependencies are reachable. 503 when any check fails. */

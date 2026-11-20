@@ -270,6 +270,24 @@ describe("desktop updates", () => {
     assert.equal((await create({ version: "7.0" })).status, 400);
   });
 
+  test("regression: a build without the updater reports its version from the manifest it reads itself (devices showed 'unknown')", async () => {
+    const e = await desktopEmployee("macos");
+    const rowOf = async () => (await api("/desktop-updates/devices", { cookie: itCookie })).body.find((d: { deviceId: string }) => d.deviceId === e.deviceId);
+    const before = await rowOf();
+    assert.deepEqual([before.installedVersion, before.state], [null, null], "never reported: the dashboard shows unknown / Not reported");
+    // What the app does (apps/desktop update-policy.ts manualStatus): GET the manifest with its session and device id, then report.
+    const m = await api("/desktop-updates/manifest/darwin/aarch64/0.2.2", { bearer: e.bearer, device: e.installationId });
+    assert.ok(m.status === 200 || m.status === 204, m.text);
+    const available = m.status === 200 ? m.body.version : null;
+    const r = await api("/desktop-updates/status", { method: "POST", bearer: e.bearer, device: e.installationId, body: { installedVersion: "0.2.2", availableVersion: available, state: available ? "AVAILABLE" : "UP_TO_DATE", failureReason: null } });
+    assert.equal(r.status, 204, r.text);
+    const after = await rowOf();
+    assert.equal(after.installedVersion, "0.2.2");
+    assert.equal(after.state, available ? "AVAILABLE" : "UP_TO_DATE");
+    assert.equal(after.availableVersion, available);
+    assert.ok(after.lastCheckAt);
+  });
+
   test("devices report their update state; an upgrade is recorded; web sessions and other employees' devices cannot report", async () => {
     const e = await desktopEmployee("windows");
     const report = (body: Record<string, unknown>, bearer = e.bearer, device = e.installationId) => api("/desktop-updates/status", { method: "POST", bearer, device, body });

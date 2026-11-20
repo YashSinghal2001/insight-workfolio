@@ -1,5 +1,5 @@
 // Update prompt rules and error wording. No Tauri imports, so node tests can drive it.
-import type { UpdateManifest, UpdatePolicy } from "@workfolio/shared";
+import { compareVersions, isVersion, type ReportUpdateStatusInput, type UpdateManifest, type UpdatePolicy } from "@workfolio/shared";
 
 /** The policy fields the app reads from the updater's rawJson (the API's manifest). */
 export interface Offer {
@@ -62,4 +62,18 @@ export function updateErrorReason(err: unknown): string {
   if (has(/permission denied|access is denied|os error 5\b|os error 13\b|Operation not permitted/i)) return "The update could not be installed: the app's folder is not writable. Ask your IT administrator.";
   if (has(/not allowed|plugin .*not found|updater.*not.*(found|initialized)/i)) return "Updates are not available in this build of the app.";
   return `The update failed: ${raw.replace(/https?:\/\/\S+/g, "[url]").replace(/(\/|[A-Z]:\\)[^\s]*/g, "[path]").slice(0, 200)}`;
+}
+
+/** The manifest path the Tauri updater asks ({{target}}/{{arch}}/{{current_version}}); `os` is app_info's platform. */
+export const manifestPath = (os: string, arch: string, version: string) =>
+  `/desktop-updates/manifest/${os === "macos" ? "darwin" : os}/${encodeURIComponent(arch)}/${encodeURIComponent(version)}`;
+
+/**
+ * The report of a build without the updater (installed by hand). It still says which version is installed,
+ * and whether the API offers a newer one (`manifest` undefined = 204, nothing to install).
+ */
+export function manualStatus(installedVersion: string, manifest: Partial<UpdateManifest> | undefined): ReportUpdateStatusInput {
+  const v = manifest?.version;
+  const newer = typeof v === "string" && isVersion(v) && isVersion(installedVersion) && compareVersions(v, installedVersion) > 0 ? v : null;
+  return { installedVersion, availableVersion: newer, state: newer ? "AVAILABLE" : "UP_TO_DATE", failureReason: null };
 }

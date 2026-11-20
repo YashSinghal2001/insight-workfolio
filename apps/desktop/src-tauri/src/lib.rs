@@ -26,6 +26,8 @@ struct AppInfo {
     tracking_enabled: bool,
     /// "macos" | "windows" (others are not supported by the API).
     platform: &'static str,
+    /// CPU architecture as the updater manifest names it ("x86_64" | "aarch64").
+    arch: &'static str,
     /// Whether this build has the updater configured (signed release builds; see scripts/desktop-config.mjs).
     updates_enabled: bool,
 }
@@ -36,6 +38,7 @@ fn app_info(app: tauri::AppHandle) -> AppInfo {
         version: app.package_info().version.to_string(),
         tracking_enabled: activity::platform::SUPPORTED,
         platform: std::env::consts::OS,
+        arch: std::env::consts::ARCH,
         updates_enabled: updater_configured(&app.config().plugins),
     }
 }
