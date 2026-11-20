@@ -248,7 +248,8 @@ function Screenshots() {
       setOk(`Exported ${selected.size} screenshot(s). Each one is recorded in its access log, and the export in the audit log.`);
       setSelected(new Set());
     } catch (err) {
-      setExportError(errorMessage(err));
+      // A non-API error here is a dropped connection: the server aborts a ZIP it cannot finish, so nothing was saved.
+      setExportError(err instanceof ApiRequestError ? err.message : "The download was interrupted and the ZIP is incomplete, so it was not saved. Try again, or select fewer screenshots.");
     } finally {
       setExporting(false);
     }

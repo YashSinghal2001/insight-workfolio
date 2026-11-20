@@ -130,7 +130,15 @@ export class ScreenshotsController {
     res.setHeader("cache-control", "no-store, private, max-age=0");
     res.setHeader("pragma", "no-cache");
     res.setHeader("x-content-type-options", "nosniff");
-    return new StreamableFile(Readable.from(stream), { type: "application/zip", disposition: `attachment; filename="screenshots-${new Date().toISOString().slice(0, 10)}.zip"` });
+    // A failure after the first byte must abort the connection (a clean end would look like a complete ZIP); before
+    // it, a 502 like /content. The service has already logged the cause.
+    return new StreamableFile(Readable.from(stream), { type: "application/zip", disposition: `attachment; filename="screenshots-${new Date().toISOString().slice(0, 10)}.zip"` })
+      .setErrorLogger(() => {})
+      .setErrorHandler((err, r) => {
+        const out = r as Response;
+        if (out.headersSent) out.destroy(err);
+        else out.status(502).json({ statusCode: 502, error: "Bad Gateway", message: err.message, path: "/api/v1/screenshots/export", timestamp: new Date().toISOString() });
+      });
   }
 
   /** Metadata of one screenshot (admins also get its access log). */

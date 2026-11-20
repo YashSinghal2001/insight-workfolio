@@ -152,3 +152,16 @@ test("audit: one EMPLOYEE_ACTIVITY_TIMELINE_VIEWED row per other employee shown 
   await tl("", { bearer: head.bearer });
   assert.deepEqual([await count(head.userId, member.userId), await count(head.userId, head.userId)], [headBefore[0]! + 1, 0]);
 });
+
+test("only active people: a disabled account or terminated employee in the team gets no row and no audit row", async () => {
+  const gone = await employee("TL-GONE");
+  const left = await employee("TL-LEFT");
+  assert.equal((await api(`/teams/${beta}/members`, { method: "PUT", cookie: admin, body: { employeeIds: [outsider.id, gone.id, left.id] } })).status, 200);
+  await db.execute({ sql: "UPDATE users SET status = 'DISABLED' WHERE id = ?", args: [gone.userId] });
+  await db.execute({ sql: "UPDATE employee_profiles SET employment_status = 'TERMINATED' WHERE id = ?", args: [left.id] });
+  const r = await tl(`&teamId=${beta}`, { cookie: admin });
+  assert.deepEqual(ids(r), [outsider.id]);
+  assert.equal(r.body.total, 1);
+  const audited = await db.execute({ sql: "SELECT count(*) AS n FROM account_audit WHERE action = 'EMPLOYEE_ACTIVITY_TIMELINE_VIEWED' AND target_user_id IN (?, ?)", args: [gone.userId, left.userId] });
+  assert.equal(Number(audited.rows[0]!.n), 0);
+});
