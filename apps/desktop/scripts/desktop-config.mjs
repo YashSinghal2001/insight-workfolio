@@ -283,7 +283,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     console.warn(windowsSigning ? `Windows signing: ${windowsSigning.method}` : "Unsigned Windows installer: for testing only, SmartScreen will warn (docs/deployment.md)");
   }
   console.warn(updater ? `In-app updates on: manifest ${result.apiUrl}${UPDATE_MANIFEST_PATH}, updater key ${updater.keyId}` : "In-app updates off (no WORKFOLIO_UPDATER_PUBKEY)");
-  console.warn(signing.identity ? `Signing as ${signing.identity}; notarization ${signing.notarize ? "on" : "off"}` : "Unsigned build (no APPLE_SIGNING_IDENTITY): for testing only, Gatekeeper will block it");
+  console.warn(signing.identity ? `Signing as ${signing.identity}; notarization ${signing.notarize ? "on" : "off"}` : "Unsigned build (no APPLE_SIGNING_IDENTITY): for testing only. Gatekeeper will block it, and macOS ties the Screen Recording grant to this exact binary: after installing it, remove and re-add the app under Privacy & Security › Screen & System Audio Recording (docs/deployment.md)");
   const run = spawnSync("pnpm", tauriBuildArgs(file, args), {
     cwd: DESKTOP,
     stdio: "inherit",

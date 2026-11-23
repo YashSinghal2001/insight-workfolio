@@ -22,7 +22,7 @@ const MAC = {
     "Closing this window keeps the app running in the menu bar. Quitting Insight Workfolio stops activity monitoring and screenshots until you open it again. It does not clock you out: clock out first if your shift is over.",
   permissionLabel: "Screen recording permission",
   permissionHelp:
-    "macOS asks you to allow screen recording. If you already declined, open System Settings › Privacy & Security › Screen & System Audio Recording, turn on Insight Workfolio, then quit and reopen this app. You can turn it off there at any time; screenshots then stop.",
+    "macOS asks you to allow screen recording. If nothing appears, open System Settings › Privacy & Security › Screen & System Audio Recording, turn on Insight Workfolio, then quit and reopen this app. If it is already turned on there but this still says Not allowed (this happens after the app was updated or reinstalled), select Insight Workfolio in that list, remove it with the – button, add it again with +, then quit and reopen this app. You can turn it off there at any time; screenshots then stop.",
   /** Whether the "Allow screen recording…" button exists on this OS. */
   permissionRequestable: true,
   permissionWaiting: "Waiting for you to allow screen recording for this app in macOS. No screenshots are taken until then.",
