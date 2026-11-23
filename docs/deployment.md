@@ -344,7 +344,12 @@ STAGING_ADMIN_EMAIL=… STAGING_ADMIN_PASSWORD=… STAGING_EMPLOYEE_EMAIL=… ST
 - **macOS:** an Apple Developer ID Application certificate and notarization credentials are needed
   so the app opens without Gatekeeper warnings. **Not available**; no build has been signed.
   Screen Recording permission is granted per signed app identity, so it must be granted again for
-  the signed build. See "macOS signing and notarization" below.
+  the signed build. An unsigned build has no stable identity: macOS (TCC) ties the grant to the
+  code hash of that exact binary, so **every unsigned rebuild or reinstall loses the grant** while
+  System Settings still shows the old entry turned on. The app then reports "Not allowed" and the
+  admin Live page "Permission denied" until the employee removes the entry (– button under
+  Privacy & Security › Screen & System Audio Recording), adds the app again and reopens it. Only
+  Developer ID signing ends this. See "macOS signing and notarization" below.
 - **Windows: implemented, not yet run on Windows.** Cross-compiled and linted on macOS
   (`x86_64-pc-windows-gnu`); tray, single instance, startup and installer config in
   docs/windows.md. Needs a Windows runtime pass, Credential Manager testing, and an Authenticode

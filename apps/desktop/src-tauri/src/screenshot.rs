@@ -870,8 +870,16 @@ pub mod platform {
 
         /// Shows the macOS permission prompt (first time only; afterwards the user changes it in
         /// System Settings › Privacy & Security › Screen & System Audio Recording). Not bypassable.
+        ///
+        /// macOS prompts once per app identity. When it does not grant (declined earlier, or a grant
+        /// left over from another build: an unsigned build's grant is tied to that exact binary), the
+        /// Screen Recording pane is opened so the click always leads somewhere.
         pub fn request_permission() -> bool {
-            CGRequestScreenCaptureAccess()
+            let granted = CGRequestScreenCaptureAccess();
+            if !granted {
+                let _ = std::process::Command::new("/usr/bin/open").arg("x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture").spawn();
+            }
+            granted
         }
 
         fn describe(err: *mut NSError) -> String {
