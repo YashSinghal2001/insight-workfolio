@@ -10,6 +10,7 @@ import {
   type ActivityStatusResponse,
   type CategorizedActivitySummary,
   type AttendanceCurrent,
+  type EmployeeShiftResponse,
   type LeaveRequest,
   type Paginated,
   type Project,
@@ -27,6 +28,7 @@ import { CategoryTotals } from "./_components/categories";
 import { DesktopDownloads } from "./_components/desktop-downloads";
 import { LiveStatusLine } from "./_components/live-status";
 import { MissingClockOutBanner } from "./_components/missing-clock-out-banner";
+import { AutoClockOutNotice, MyShiftCard } from "./_components/my-shift";
 import { Loaded } from "./_components/states";
 
 const STATE_LABEL: Record<AttendanceCurrent["state"], string> = { CLOCKED_IN: "Clocked in", ON_BREAK: "On a break", CLOCKED_OUT: "Clocked out" };
@@ -46,6 +48,7 @@ export default function MyDashboard() {
   const projects = useApi<Project[]>("/task-time/assignments");
   const timer = useApi<TimerState>("/task-time/current");
   const leave = useApi<Paginated<LeaveRequest>>("/leave?mine=true&status=PENDING&pageSize=100");
+  const shift = useApi<EmployeeShiftResponse>(`/employees/${me.id}/shift`);
 
   return (
     <>
@@ -59,6 +62,7 @@ export default function MyDashboard() {
         <Loaded load={status.load} reload={status.reload} label="your status" rows={1}>
           {(s) => <LiveStatusLine status={s} tz={me.timezone} />}
         </Loaded>
+        {current.load.state === "ready" && <AutoClockOutNotice current={current.load.data} tz={me.timezone} />}
         {current.load.state === "ready" && (
           <MissingClockOutBanner
             current={current.load.data}
@@ -93,6 +97,8 @@ export default function MyDashboard() {
           }}
         </Loaded>
       </section>
+
+      {shift.load.state === "ready" && <div className="mb-4"><MyShiftCard shift={shift.load.data} /></div>}
 
       <DesktopDownloads />
 

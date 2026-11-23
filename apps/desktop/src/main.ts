@@ -28,6 +28,7 @@ import { project, staleClockInSince, SyncEngine, type QueuedEvent } from "./sync
 import { resolveApiUrl, type ApiUrlMode } from "./api-url.ts";
 import { trayBridge, trayUpdate, type TrayState } from "./tray-bridge.ts";
 import { edgeNotifier } from "./notify.ts";
+import { shiftNotice } from "./shift-notice.ts";
 import { applyStaticWording, platformOf, setPlatform, setText, words } from "./platform.ts";
 import { initPrefs } from "./prefs-ui.ts";
 import { initUpdates } from "./updates-ui.ts";
@@ -502,10 +503,27 @@ function renderAttendance() {
   $("#att-preview").hidden = !hint;
   $("#att-preview").textContent = hint ?? "";
 
-  // Flag only (owner decision): nothing is clocked out or corrected automatically.
+  // Flag only (owner decision): nothing is corrected automatically. (A shift with automatic clock-out is the
+  // server's business, below; without one nothing is ever clocked out automatically.)
   const staleSince = p && app.profile ? staleClockInSince(p, app.profile.timezone) : null;
   $("#att-stale").hidden = !staleSince;
   if (staleSince) setText($("#att-stale"), `You are still clocked in since ${formatTime(staleSince)}. Clock out, then request a correction of the real end time.`);
+
+  // Automatic clock-out is done by the server at shift end + grace; the app only explains it. Clock-out is not sign-out.
+  const shift = shiftNotice(app.current, p?.state, Date.now() + app.clockOffsetMs);
+  const shiftEl = $("#att-shift");
+  shiftEl.hidden = !shift;
+  shiftEl.className = shift && shift.phase !== "before" ? "notice" : "hint";
+  if (shift)
+    setText(
+      shiftEl,
+      shift.phase === "before"
+        ? `Your shift ends at ${formatTime(shift.shiftEndAt)}. If you are still clocked in at ${formatTime(shift.autoClockOutAt)}, you will be clocked out automatically.`
+        : shift.phase === "grace"
+          ? `Your shift ended at ${formatTime(shift.shiftEndAt)}. You will be clocked out automatically at ${formatTime(shift.autoClockOutAt)} (${shift.minutesLeft} min left). The app stays signed in.`
+          : `Your shift's automatic clock-out time (${formatTime(shift.autoClockOutAt)}) has passed; updating…`,
+    );
+  notify("shift-grace", shift ? shift.phase === "grace" : false, "Your shift has ended", shift ? `You will be clocked out automatically at ${formatTime(shift.autoClockOutAt)} unless you clock out.` : "");
 
   for (const button of document.querySelectorAll<HTMLButtonElement>("[data-action]")) {
     const type = button.dataset.action as AttendanceEventType;
@@ -694,6 +712,9 @@ async function checkApi() {
   $("#api-label").textContent = up ? "Online" : "Offline — server unreachable";
   if (up && !app.apiUp) void onReconnect();
   app.apiUp = up;
+  // The server clocked this session out at its deadline: pick up the new state (monitoring follows it).
+  const shift = shiftNotice(app.current, project(app.current, app.queued)?.state, Date.now() + app.clockOffsetMs);
+  if (up && shift?.phase === "due" && app.device?.status === "ACTIVE") void loadCurrent().then(render, () => undefined);
 }
 
 async function showAppInfo() {

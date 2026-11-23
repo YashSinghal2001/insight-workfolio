@@ -26,6 +26,7 @@ import { pollWhileVisible } from "@/lib/poll";
 import { LateTab } from "./_components/late";
 import { MissingTab } from "./_components/missing";
 import { MonthlyTab } from "./_components/monthly";
+import { ShiftsTab } from "./_components/shifts";
 
 const PAGE_SIZE = 20;
 const REFRESH_MS = 30_000;
@@ -95,6 +96,7 @@ function Attendance() {
         {tab === "monthly" && <MonthlyTab key={team} teamId={teamId} />}
         {tab === "late" && <LateTab key={team} teamId={teamId} />}
         {tab === "missing" && <MissingTab key={team} teamId={teamId} />}
+        {tab === "shifts" && <ShiftsTab key={team} teamId={teamId} />}
       </Tabs>
     </div>
   );

@@ -3,6 +3,7 @@ import type { EmployeeRef, Paginated } from "./api.js";
 import type { LeavePortion } from "./leave.js";
 import { SETTINGS_LIMITS } from "./activity.js";
 import { zonedToUtc } from "./timesheet.js";
+import { workdaysSchema } from "./schemas.js";
 
 // ---- Work schedule policy (W17/W18) -------------------------------------------------------
 // Organisation-wide, with optional per-employee start/workday overrides (employeeTrackingOverrideSchema).
@@ -36,11 +37,6 @@ export interface WorkScheduleResponse {
 }
 
 const expectedStartSchema = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, "Use HH:MM (24-hour)");
-const workdaysSchema = z
-  .string()
-  .regex(/^[1-7]{1,7}$/, "Use ISO weekday digits 1 (Monday) to 7 (Sunday)")
-  .refine((v) => new Set(v).size === v.length, "Each weekday at most once")
-  .transform((v) => [...v].sort().join(""));
 
 export const workScheduleSchema = z.strictObject({
   enabled: z.boolean(),

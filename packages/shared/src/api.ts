@@ -5,6 +5,7 @@ import type { CorrectionStatus, CorrectionType } from "./corrections.js";
 import type { ScreenshotFeatureState, ScreenshotStorageProvider } from "./screenshots.js";
 import type { AccountStatus, EmploymentStatus } from "./schemas.js";
 import type { SessionSource, Timesheet, TimesheetTotals } from "./timesheet.js";
+import type { ClockOutReason } from "./shifts.js";
 
 /** Every API error uses this envelope; successful responses return the resource directly. */
 export interface ApiError {
@@ -242,6 +243,8 @@ export interface AttendanceSession {
   corrected: boolean;
   /** How the clock-in reached the server. */
   clockInSource: SessionSource;
+  /** Why the session ended: a clock-out by the employee (or a correction), or the shift's automatic clock-out. Null while open. */
+  clockOutReason?: ClockOutReason | null;
 }
 
 export interface AttendanceCurrent {
@@ -251,6 +254,10 @@ export interface AttendanceCurrent {
   serverTime: string;
   /** The open session was clocked in on an earlier local date (forgotten clock-out). */
   missingClockOut: boolean;
+  /** When the open session will be clocked out automatically (shift end + grace); null without a shift or when off. */
+  autoClockOutAt?: string | null;
+  /** The open session's scheduled shift end (automatic clock-out = this + grace); null without a plan. */
+  shiftEndAt?: string | null;
 }
 
 export type SyncResultStatus = "ACCEPTED" | "DUPLICATE" | "REJECTED";

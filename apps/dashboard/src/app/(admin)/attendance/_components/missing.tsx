@@ -38,7 +38,7 @@ export function MissingTab({ teamId }: { teamId: string | null }) {
   return (
     <div className="flex flex-col gap-4">
       <p className="text-xs text-muted">
-        Shifts still open that look forgotten. Nothing is closed automatically and shifts cannot be closed here: request a correction, and a
+        Shifts still open that look forgotten. Nothing is closed automatically unless the employee has a shift with automatic clock-out (see the Shifts tab), and shifts cannot be closed here: request a correction, and a
         different administrator approves it on <Link href="/corrections" className="text-brand underline">Corrections</Link>.
       </p>
       <SuccessNotice message={ok} onDismiss={() => setOk(null)} />

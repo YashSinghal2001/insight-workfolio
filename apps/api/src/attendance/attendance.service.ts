@@ -41,6 +41,7 @@ import { ScreenshotSettingsService } from "../screenshots/screenshot-settings.se
 import { ScreenshotsService } from "../screenshots/screenshots.service.js";
 import { MonitoringSettingsService } from "../settings/monitoring-settings.service.js";
 import { NotificationRulesService } from "../notifications/notification-rules.service.js";
+import { AutoClockOutService } from "../shifts/auto-clock-out.service.js";
 import { ACTIVE_EMPLOYEE, activityReport, DEVICE_LIVE_COLUMNS, iso, scopedEmployees, screenshotReport, SESSION_COLUMNS, stateOf, str, withBreaks } from "./sessions.js";
 
 /** Device timestamps may lead the send time by this much (sub-second clock jitter, rounding). */
@@ -80,6 +81,7 @@ export class AttendanceService {
     private readonly monitoring: MonitoringSettingsService,
     private readonly screenshots: ScreenshotsService,
     private readonly notificationRules: NotificationRulesService,
+    private readonly autoClockOut: AutoClockOutService,
   ) {}
 
   /** Online action from a direct endpoint: server time is authoritative. */
@@ -126,6 +128,8 @@ export class AttendanceService {
         );
       }
       await this.endWorkTime(device.employeeId, req.events.map((ev, i) => [ev.type, out[i]!]));
+      // Still open past the shift deadline after the queue was applied: clock out now (at the deadline).
+      await this.autoClockOut.processDue(device.employeeId);
       return out;
     });
     void this.notificationRules.attendanceApplied(device.employeeId, req.events.map((ev, i) => [ev.type, results[i]!])); // after the lock; never rejects
@@ -133,12 +137,13 @@ export class AttendanceService {
   }
 
   async current(employeeId: string): Promise<AttendanceCurrent> {
-    const [{ state, session }, { rows }] = await Promise.all([
+    const [{ state, session }, { rows }, planned] = await Promise.all([
       this.snapshot(employeeId),
       this.db.execute({ sql: "SELECT timezone FROM employee_profiles WHERE id = ?", args: [employeeId] }),
+      this.autoClockOut.planned(employeeId),
     ]);
     const now = Date.now();
-    return { state, session, serverTime: iso(now), missingClockOut: missingClockOut(session, String(rows[0]?.timezone ?? "UTC"), now) };
+    return { state, session, serverTime: iso(now), missingClockOut: missingClockOut(session, String(rows[0]?.timezone ?? "UTC"), now), ...planned };
   }
 
   /**
@@ -418,6 +423,9 @@ export class AttendanceService {
         : { id: ev.key, status: "REJECTED", reason: String(prior.reject_reason) };
     }
 
+    // The shift deadline passed before this event: the automatic clock-out comes first (at the deadline), so
+    // the event is judged against the clocked-out state, whether or not the worker has run yet.
+    if (!ev.invalid) await this.autoClockOut.processDue(device.employeeId, Date.parse(ev.occurredAt));
     const snap = await this.snapshot(device.employeeId);
     let reason = ev.invalid;
     if (!reason && !transition(snap.state, ev.type)) reason = invalidTransitionMessage(snap.state, ev.type);

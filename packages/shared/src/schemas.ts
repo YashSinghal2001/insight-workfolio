@@ -72,11 +72,40 @@ export const setupPasswordSchema = z.object({
 
 // ---- Employees ------------------------------------------------------------
 
+/** ISO weekday digits, each once: 1 = Monday … 7 = Sunday (e.g. "12345"); stored sorted. */
+export const workdaysSchema = z
+  .string()
+  .regex(/^[1-7]{1,7}$/, "Use ISO weekday digits 1 (Monday) to 7 (Sunday)")
+  .refine((v) => new Set(v).size === v.length, "Each weekday at most once")
+  .transform((v) => [...v].sort().join(""));
+
+/** Employee shift (docs/EMPLOYEE-SHIFT-MANAGEMENT.md; logic in shifts.ts). 24-hour times; end < start = overnight. */
+export const DEFAULT_SHIFT_GRACE_MINUTES = 60;
+export const SHIFT_GRACE_MAX_MINUTES = 480;
+
+const hhmm = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, "Use 24-hour HH:MM, for example 18:00");
+
+export const shiftInputSchema = z
+  .strictObject({
+    startTime: hhmm,
+    endTime: hhmm,
+    /** Defaults to the employee's own time zone. */
+    timezone: timeZoneSchema.optional(),
+    graceMinutes: z.number().int().min(0).max(SHIFT_GRACE_MAX_MINUTES).default(DEFAULT_SHIFT_GRACE_MINUTES),
+    autoClockOut: z.boolean().default(true),
+    /** Days the shift starts on (an overnight shift ends the next day). Default Monday–Friday. */
+    workdays: workdaysSchema.default("12345"),
+  })
+  .refine((s) => s.startTime !== s.endTime, { message: "Shift start and end must differ", path: ["endTime"] });
+export type ShiftInput = z.input<typeof shiftInputSchema>;
+
 export const createEmployeeSchema = z.strictObject({
   email: emailSchema,
   fullName: fullNameSchema,
   employeeCode: employeeCodeSchema,
   timezone: timeZoneSchema.default(DEFAULT_TIMEZONE),
+  /** Optional shift, created with the account (same rules as PUT /employees/:id/shift). */
+  shift: shiftInputSchema.optional(),
 });
 export type CreateEmployeeInput = z.input<typeof createEmployeeSchema>;
 

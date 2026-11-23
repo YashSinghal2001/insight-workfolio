@@ -16,7 +16,9 @@ import {
   type SetupToken,
   type UpdateEmployeeInput,
   platformRoleOf,
+  type shiftInputSchema,
 } from "@workfolio/shared";
+import type { z } from "zod";
 import { accountAudit, employeeReadAudit } from "../audit/account-audit.js";
 import type { AuthContext } from "../auth/auth.service.js";
 import { RateLimiter } from "../auth/crypto.js";
@@ -26,6 +28,7 @@ import { DATABASE } from "../database/database.module.js";
 import { DEVICE_COLUMNS, toDevice } from "../devices/devices.service.js";
 import type { Env } from "../config/env.js";
 import { assertCanDisable } from "../roles/roles.service.js";
+import { shiftStatements } from "../shifts/shift-statements.js";
 import { deliverInvitation, INVITATION_TRANSPORT, type InvitationTransport, invitationEmail, RESEND_COOLDOWN_MS } from "./invitations.js";
 
 /** Desktop version of the employee's most recently checked non-revoked device: the column and the appVersion filter. */
@@ -201,7 +204,7 @@ export class EmployeesService {
    * Creates the account without a password. With an invitation provider, emails the one-time setup link (the
    * account is committed first: a failed email never undoes or duplicates it); otherwise returns the link.
    */
-  async create(input: { email: string; fullName: string; employeeCode: string; timezone: string }, caller: AuthContext): Promise<CreateEmployeeResponse> {
+  async create(input: { email: string; fullName: string; employeeCode: string; timezone: string; shift?: z.output<typeof shiftInputSchema> }, caller: AuthContext): Promise<CreateEmployeeResponse> {
     if (this.inviting) this.limitInvitations(caller);
     const userId = randomUUID();
     const id = randomUUID();
@@ -217,6 +220,7 @@ export class EmployeesService {
             args: [id, userId, input.employeeCode, input.fullName, input.timezone],
           },
           accountAudit({ actorUserId: caller.id, targetUserId: userId, action: "ACCOUNT_CREATED", resourceType: "ACCOUNT", resourceId: userId, metadata: { employeeId: id } }),
+          ...(input.shift ? shiftStatements(caller, { id, userId, timezone: input.timezone }, input.shift) : []),
           ...statements,
           ...(this.inviting
             ? [{ sql: "INSERT INTO account_invitations (id, user_id, setup_token_id, recipient, provider, created_by) VALUES (?, ?, ?, ?, ?, ?)", args: [invitationId, userId, setupTokenId, input.email, this.mail.name, caller.id] }]
@@ -391,7 +395,7 @@ export class EmployeesService {
    * 403 when a non-Super-Admin caller targets a Super Admin account. Otherwise returns the in-write
    * guard (empty for Super Admin callers): `sql` to append to a WHERE, `when` for an audit row.
    */
-  private async superAdminGuard(caller: AuthContext, userId: string) {
+  async superAdminGuard(caller: AuthContext, userId: string) {
     if (caller.platformRole === "SUPER_ADMIN") return { sql: "", when: undefined, args: [] as string[] };
     const { rows } = await this.db.execute({ sql: `SELECT ${NOT_SUPER_ADMIN} AS ok`, args: [userId] });
     if (!Number(rows[0]!.ok)) throw new ForbiddenException(SUPER_ADMIN_ONLY);

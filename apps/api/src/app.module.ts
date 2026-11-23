@@ -61,6 +61,9 @@ import { RolesController } from "./roles/roles.controller.js";
 import { RolesService } from "./roles/roles.service.js";
 import { DailyAttendanceController, ScheduleSettingsController } from "./schedule/schedule.controller.js";
 import { ScheduleService } from "./schedule/schedule.service.js";
+import { AutoClockOutService } from "./shifts/auto-clock-out.service.js";
+import { EmployeeShiftController, ShiftOverviewController } from "./shifts/shifts.controller.js";
+import { ShiftsService } from "./shifts/shifts.service.js";
 import { MonitoringSettingsController } from "./settings/monitoring-settings.controller.js";
 import { MonitoringSettingsService } from "./settings/monitoring-settings.service.js";
 import { EmployeeTrackingController, EmployeeTrackingService } from "./settings/employee-tracking.controller.js";
@@ -116,7 +119,7 @@ import { NotificationRulesService } from "./notifications/notification-rules.ser
     }),
     DatabaseModule,
   ],
-  controllers: [AlertsController, HealthController, AuthController, EmployeesController, DevicesController, AttendanceController, CorrectionsController, ActivityController, MonitoringSettingsController, ScreenshotsController, ScreenshotSettingsController, TimelapseController, LeaveController, HolidaysController, TeamsController, ProjectsController, TaskTimeController, ReportsController, WebsitesController, RolesController, AuditController, ScheduleSettingsController, DailyAttendanceController, EmployeeTrackingController, GoogleDriveOAuthController, OneDriveController, DesktopUpdatesController, NotificationsController, AnomaliesController, EmployeeAnalyticsController, SummaryReportController, OverviewController, TeamTimelineController],
+  controllers: [AlertsController, HealthController, AuthController, EmployeesController, DevicesController, AttendanceController, CorrectionsController, ActivityController, MonitoringSettingsController, ScreenshotsController, ScreenshotSettingsController, TimelapseController, LeaveController, HolidaysController, TeamsController, ProjectsController, TaskTimeController, ReportsController, WebsitesController, RolesController, AuditController, ScheduleSettingsController, DailyAttendanceController, EmployeeTrackingController, GoogleDriveOAuthController, OneDriveController, DesktopUpdatesController, NotificationsController, AnomaliesController, EmployeeAnalyticsController, SummaryReportController, OverviewController, TeamTimelineController, EmployeeShiftController, ShiftOverviewController],
   providers: [
     AlertsService,
     ActivityAppsService,
@@ -140,6 +143,8 @@ import { NotificationRulesService } from "./notifications/notification-rules.ser
     RetentionService,
     ActivityCategoriesService,
     ScheduleService,
+    AutoClockOutService,
+    ShiftsService,
     screenshotStorageProvider,
     ScreenshotSettingsService,
     ScreenshotsService,
