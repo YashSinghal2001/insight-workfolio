@@ -9,6 +9,7 @@ export const ATTENDANCE_TABS = [
   { id: "monthly", label: "Monthly" },
   { id: "late", label: "Late" },
   { id: "missing", label: "Missing clock-outs" },
+  { id: "shifts", label: "Shifts" },
 ] as const;
 export type AttendanceTab = (typeof ATTENDANCE_TABS)[number]["id"];
 

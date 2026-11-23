@@ -3,6 +3,7 @@
 import { useState, type FormEvent } from "react";
 import { DEFAULT_TIMEZONE, EMPLOYMENT_STATUSES, type Employee, type Invitation, type InvitationStatus, type SetupToken } from "@workfolio/shared";
 import { StatusBadge, type Tone } from "./kit";
+import { ShiftFields } from "./shifts";
 import { buttonClass, Field, formatInZone, inputClass, Notice, secondaryButtonClass } from "./ui";
 
 const TIMEZONES = typeof Intl.supportedValuesOf === "function" ? Intl.supportedValuesOf("timeZone") : [];
@@ -14,19 +15,25 @@ export function EmployeeForm({
   initial,
   submitLabel,
   onSubmit,
+  withShift,
 }: {
   initial?: Employee;
   submitLabel: string;
-  onSubmit: (values: EmployeeFormValues) => Promise<string | null>;
+  /** `form` carries the shift fields (multi-value) when `withShift` is set. */
+  onSubmit: (values: EmployeeFormValues, form: FormData) => Promise<string | null>;
+  /** Create flow: optional shift assignment in the same request. */
+  withShift?: boolean;
 }) {
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
+  const [assignShift, setAssignShift] = useState(false);
 
   async function submit(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
     setPending(true);
     setError(null);
-    setError(await onSubmit(Object.fromEntries(new FormData(e.currentTarget)) as EmployeeFormValues));
+    const form = new FormData(e.currentTarget);
+    setError(await onSubmit(Object.fromEntries(form) as EmployeeFormValues, form));
     setPending(false);
   }
 
@@ -64,6 +71,16 @@ export function EmployeeForm({
             ))}
           </select>
         </Field>
+      )}
+      {withShift && (
+        <fieldset className="flex flex-col gap-3 rounded-md border border-border p-3 sm:col-span-2">
+          <legend className="px-1 text-sm font-medium">Shift</legend>
+          <label className="inline-flex items-center gap-2 text-sm">
+            <input type="checkbox" name="assignShift" checked={assignShift} onChange={(e) => setAssignShift(e.target.checked)} />
+            Assign a shift now (you can also do it later on the employee&apos;s Edit tab)
+          </label>
+          {assignShift && <ShiftFields defaultTimezone={DEFAULT_TIMEZONE} />}
+        </fieldset>
       )}
       <div className="sm:col-span-2">
         <button type="submit" disabled={pending} className={buttonClass}>

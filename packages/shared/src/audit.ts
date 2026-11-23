@@ -38,6 +38,11 @@ export const ACCOUNT_AUDIT_ACTIONS = [
   "NOTIFICATION_RULE_UPDATED",
   "NOTIFICATION_RECIPIENT_ADDED",
   "NOTIFICATION_RECIPIENT_REMOVED",
+  // Shift settings (docs/EMPLOYEE-SHIFT-MANAGEMENT.md); metadata = the new settings, never tokens.
+  "SHIFT_ASSIGNED",
+  "SHIFT_REMOVED",
+  // The server clocked an employee out at their shift deadline (actor NULL). Sign-in sessions are untouched.
+  "AUTO_CLOCK_OUT",
 ] as const;
 export type AccountAuditAction = (typeof ACCOUNT_AUDIT_ACTIONS)[number];
 export const ACCOUNT_AUDIT_RESOURCES = ["ACCOUNT", "SESSION", "DEVICE", "SETUP_LINK"] as const;

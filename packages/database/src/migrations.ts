@@ -1455,6 +1455,58 @@ export const MIGRATIONS: Migration[] = [
       "CREATE TRIGGER report_schedules_one_scope_update BEFORE UPDATE ON report_schedules WHEN NEW.employee_id IS NOT NULL AND NEW.team_id IS NOT NULL BEGIN SELECT RAISE(ABORT, 'report_scope'); END",
     ],
   },
+  {
+    id: "0036_employee_shifts",
+    statements: [
+      // Shift + automatic clock-out (docs/EMPLOYEE-SHIFT-MANAGEMENT.md). Additive: no row = no shift, so every
+      // existing employee keeps today's behaviour until an admin assigns one. end_time < start_time = overnight.
+      `CREATE TABLE employee_shifts (
+        employee_id    TEXT PRIMARY KEY REFERENCES employee_profiles(id) ON DELETE RESTRICT,
+        start_time     TEXT NOT NULL CHECK (start_time GLOB '[01][0-9]:[0-5][0-9]' OR start_time GLOB '2[0-3]:[0-5][0-9]'),
+        end_time       TEXT NOT NULL CHECK (end_time GLOB '[01][0-9]:[0-5][0-9]' OR end_time GLOB '2[0-3]:[0-5][0-9]'),
+        timezone       TEXT NOT NULL CHECK (length(timezone) BETWEEN 1 AND 64),
+        grace_minutes  INTEGER NOT NULL DEFAULT 60 CHECK (grace_minutes BETWEEN 0 AND 480),
+        auto_clock_out INTEGER NOT NULL DEFAULT 1 CHECK (auto_clock_out IN (0, 1)),
+        -- ISO weekday digits the shift starts on (same rule as work_schedule_policies.workdays).
+        workdays       TEXT NOT NULL DEFAULT '12345' CHECK (length(workdays) BETWEEN 1 AND 7 AND workdays NOT GLOB '*[^1-7]*'),
+        updated_by     TEXT NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+        created_at     TEXT NOT NULL DEFAULT ${NOW},
+        updated_at     TEXT NOT NULL DEFAULT ${NOW},
+        CHECK (start_time <> end_time)
+      ) STRICT`,
+      // One row per automatic clock-out, written in the same transaction as the clock-out. UNIQUE(session)
+      // makes a second worker's attempt roll back. The shift is copied as it was. Sign-in sessions are NOT
+      // touched: attendance clock-out and app sign-out are separate operations.
+      `CREATE TABLE auto_clock_outs (
+        id                    TEXT PRIMARY KEY,
+        attendance_session_id TEXT NOT NULL UNIQUE REFERENCES attendance_sessions(id) ON DELETE RESTRICT,
+        employee_id           TEXT NOT NULL REFERENCES employee_profiles(id) ON DELETE RESTRICT,
+        shift_start_time      TEXT NOT NULL,
+        shift_end_time        TEXT NOT NULL,
+        shift_timezone        TEXT NOT NULL,
+        grace_minutes         INTEGER NOT NULL,
+        scheduled_shift_end_at TEXT NOT NULL,
+        deadline_at           TEXT NOT NULL,
+        clock_out_at          TEXT NOT NULL,  -- the attendance clock-out (>= deadline_at), not when the worker ran
+        processed_at          TEXT NOT NULL,
+        reason                TEXT NOT NULL CHECK (reason = 'AUTOMATIC_SHIFT_END'),
+        break_ended           INTEGER NOT NULL CHECK (break_ended IN (0, 1)),
+        CHECK (clock_out_at >= deadline_at AND deadline_at >= scheduled_shift_end_at)
+      ) STRICT`,
+      "CREATE INDEX auto_clock_outs_employee ON auto_clock_outs(employee_id, clock_out_at)",
+      "CREATE TRIGGER auto_clock_outs_no_update BEFORE UPDATE ON auto_clock_outs BEGIN SELECT RAISE(ABORT, 'append_only'); END",
+      "CREATE TRIGGER auto_clock_outs_no_delete BEFORE DELETE ON auto_clock_outs BEGIN SELECT RAISE(ABORT, 'append_only'); END",
+      // Failed attempts (the whole clock-out rolled back; the next run retries). Operational visibility only.
+      `CREATE TABLE auto_clock_out_failures (
+        id                    TEXT PRIMARY KEY,
+        employee_id           TEXT NOT NULL REFERENCES employee_profiles(id) ON DELETE RESTRICT,
+        attendance_session_id TEXT NOT NULL,
+        error                 TEXT NOT NULL CHECK (length(error) BETWEEN 1 AND 500),
+        failed_at             TEXT NOT NULL DEFAULT ${NOW}
+      ) STRICT`,
+      "CREATE INDEX auto_clock_out_failures_at ON auto_clock_out_failures(failed_at)",
+    ],
+  },
 ];
 
 const checksum = (m: Migration) => createHash("sha256").update(JSON.stringify(m.statements)).digest("hex");

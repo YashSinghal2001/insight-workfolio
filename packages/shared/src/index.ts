@@ -27,3 +27,4 @@ export * from "./overview.js";
 export * from "./timeline.js";
 export * from "./activity-apps.js";
 export * from "./risk-users.js";
+export * from "./shifts.js";

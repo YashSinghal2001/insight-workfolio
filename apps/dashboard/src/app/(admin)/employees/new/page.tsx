@@ -5,6 +5,7 @@ import Link from "next/link";
 import type { CreateEmployeeResponse } from "@workfolio/shared";
 import { EmployeeForm, InvitationSummary, SetupLinkNotice } from "@/components/employee-form";
 import { PageHeader } from "@/components/kit";
+import { shiftFromForm } from "@/components/shifts";
 import { Card, Notice } from "@/components/ui";
 import { api, errorMessage } from "@/lib/api";
 
@@ -37,9 +38,11 @@ export default function NewEmployeePage() {
           </p>
           <EmployeeForm
             submitLabel="Create employee"
-            onSubmit={async ({ email, fullName, employeeCode, timezone }) => {
+            withShift
+            onSubmit={async ({ email, fullName, employeeCode, timezone }, form) => {
+              const shift = form.get("assignShift") === "on" ? shiftFromForm(form) : undefined;
               try {
-                setCreated(await api<CreateEmployeeResponse>("/employees", { method: "POST", body: { email, fullName, employeeCode, timezone } }));
+                setCreated(await api<CreateEmployeeResponse>("/employees", { method: "POST", body: { email, fullName, employeeCode, timezone, ...(shift ? { shift } : {}) } }));
                 return null;
               } catch (err) {
                 return errorMessage(err);

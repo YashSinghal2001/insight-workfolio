@@ -1,6 +1,6 @@
 // Session reads shared by attendance, timesheet and correction services.
 import type { DatabaseClient, Row } from "@workfolio/database";
-import { addDays, type ShiftActivity } from "@workfolio/shared";
+import { addDays, type ClockOutReason, type ShiftActivity } from "@workfolio/shared";
 import type { AttendanceBreak, AttendanceSession, AttendanceState, DeviceActivityReport, DeviceActivityState, DeviceScreenshotState, EmployeeRef, SessionSource } from "@workfolio/shared";
 import type { AuthContext } from "../auth/auth.service.js";
 import { scopeSql, teamFilterSql } from "../common/scope.js";
@@ -11,7 +11,10 @@ export const SESSION_COLUMNS = `s.id, s.employee_id, s.clock_in_at, s.clock_out_
      SELECT 1 FROM break_sessions b WHERE b.attendance_session_id = s.id AND b.correction_id IS NOT NULL)) AS corrected,
   coalesce((SELECT e.source FROM attendance_events e
             WHERE e.employee_id = s.employee_id AND e.event_type = 'CLOCK_IN' AND e.outcome = 'ACCEPTED'
-              AND e.occurred_at = s.clock_in_at LIMIT 1), 'CORRECTION') AS clock_in_source`;
+              AND e.occurred_at = s.clock_in_at LIMIT 1), 'CORRECTION') AS clock_in_source,
+  CASE WHEN s.clock_out_at IS NULL THEN NULL
+       WHEN EXISTS (SELECT 1 FROM auto_clock_outs a WHERE a.attendance_session_id = s.id) THEN 'AUTOMATIC_SHIFT_END'
+       ELSE 'MANUAL' END AS clock_out_reason`;
 
 export const str = (v: unknown) => (v === null || v === undefined ? null : String(v));
 export const iso = (ms: number) => new Date(ms).toISOString();
@@ -45,6 +48,7 @@ export async function withBreaks(db: DatabaseClient, rows: Row[]): Promise<Atten
     status: r.status as AttendanceSession["status"],
     corrected: Boolean(r.corrected),
     clockInSource: r.clock_in_source as SessionSource,
+    clockOutReason: (r.clock_out_reason ?? null) as ClockOutReason | null,
     breaks: bySession.get(String(r.id)) ?? [],
   }));
 }

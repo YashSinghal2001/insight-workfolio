@@ -6,6 +6,7 @@ import { useParams, usePathname, useRouter, useSearchParams } from "next/navigat
 import { analyticsRange, type Device, type Employee, type EmployeeAnalyticsResponse, type InvitationResponse, type ScreenshotBlurOverridesResponse, type SetupToken } from "@workfolio/shared";
 import { EmployeeForm, InvitationSummary, SetupLinkNotice } from "@/components/employee-form";
 import { TrackingOverrides } from "@/components/tracking-overrides";
+import { ShiftCard } from "@/components/shifts";
 import { activeDevice, AdminDeviceTable, OS_LABEL } from "@/components/devices";
 import { ConfirmDialog, ErrorState, PageHeader, SkeletonRows, StatusBadge, SuccessNotice, Tabs } from "@/components/kit";
 import type { Range } from "@/components/range-picker";
@@ -127,6 +128,8 @@ function EmployeeDetail() {
 
       <Tabs label={`${employee.fullName} profile`} tabs={TABS} value={tab} onChange={setTab} idPrefix="profile">
         {tab === "overview" ? (
+          <div className="flex flex-col gap-6">
+          <ShiftCard key="view" employeeId={employee.id} timezone={employee.timezone} editable={false} />
           <ProfileOverview
             employeeId={employee.id}
             timeZone={employee.timezone}
@@ -137,6 +140,7 @@ function EmployeeDetail() {
             devices={{ data: devices, error: null }}
             onEditTab={() => setTab("edit")}
           />
+          </div>
         ) : (
           <div className="flex flex-col gap-6">
           <SuccessNotice message={notice} onDismiss={() => setNotice(null)} />
@@ -158,6 +162,8 @@ function EmployeeDetail() {
               }}
             />
           </Card>
+
+          <ShiftCard key="edit" employeeId={employee.id} timezone={employee.timezone} editable />
 
           <Card title="Account access">
             <div className="flex flex-col gap-4 text-sm">
